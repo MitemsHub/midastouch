@@ -1,5 +1,15 @@
 # Changelog
 
+## [V75 regime analysis — no entry-regime filter qualifies; stand-aside rejected, walkforward warning stands] - 2026-09-14
+
+### Finding — the 2026 deficit cannot be filtered away with the standard regime states
+- The open question after v2.20 was whether the losing 2026 segment could be dodged by a stand-aside filter: measure regime state at each of the 75 real long-only entries (H1 ATR(14) z-score, H1 ADX(14), 6h EMA slope, month realized vol from M30) and correlate against PnL at both granularities, with the repo's walkforward convention (fit on 2024.01–2025.08, evaluate 2025.09–2026.09 out-of-sample).
+- **Nothing correlates.** Per-trade — the granularity at which an EA filter actually fires — the best is |ρ| = 0.05 (adx), atr_z +0.03, slope −0.02; permutation p ≥ 0.67, i.e. pure noise. Month-level (n=29) tops out at atr_z ρ +0.22 (p≈0.25) across eight scanned feature-direction cells — unremarkable after the scan.
+- **The train-fit filters fail their own out-of-sample.** The best full-window month rule (atr_z ≥ 0.84, kept +786.61) works only by dropping the train segment's single losing month and never fires OOS (test kept −236.04 = the unfiltered baseline). The per-trade rules are worse than useless OOS: atr_z ≤ 1.19 keeps −333.84 while dropping +97.80; adx ≤ 36.99 keeps −330.58 while dropping +94.54. The nominal "best OOS separation" (slope ≤ 0.53) drops zero trades — the baseline restated, not a filter.
+- **The granularities disagree in sign** on the one feature with any signal (month-level keeps high atr_z; the per-trade train fit drops high atr_z). A real effect does not flip sign under re-aggregation; noise does.
+- Decision: **no stand-aside input is added to the engine; v2.20 geometry stands unchanged.** The 2026 deficit is the already-recorded walkforward inversion (every config flips negative on the test window) showing up feature-wise — edge decay, not a filterable regime state. Limits recorded: 75 entries / 22 test trades = low power; the verdict closes these four features, not the space — reopening requires a new pre-registered feature + fresh window per the ledger discipline.
+- Evidence: `artifacts/v75_macro_engine_tester/regime_analysis_20260914.txt` (reproduced bit-identically on re-run); generator `scripts/v75_regime_analysis.py`; ledger row #11 in `docs/OPERATING_SUMMARY.md`.
+
 All notable changes to Synthetic AI Trader are documented here.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).

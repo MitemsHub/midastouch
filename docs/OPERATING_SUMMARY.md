@@ -21,6 +21,7 @@ everything from here: the gate outcome.
 | 8 | Is the EA itself sound? | **Audited** — 4 bugs fixed (paper-equity guard, out-of-range slots fail closed, magic, banner); 0-error compile; 15/15 presets | `docs/FULL_EA_AUDIT_v2635.md`, milestone `8d155fe` |
 | 9 | Is the data path sound? | **Drilled** — synthetic wire-format ledgers through adjudicator + reconciler, 10/10; caught 2 real bugs (OPEN-epoch pairing, zero-pairs crash) | `scripts/first_trade_drill.py`, commit `db7e2fc` |
 | 10 | Would arm C start fast? | **PROVEN** — activation ≈ 1 minute (authorized T+6s, banner T+8s), parked by protocol | `docs/ARM_C_TEMPLATE.md`, commit `333473f` |
+| 11 | Can a regime filter stand the engine aside in hostile 2026? | **REJECTED** — no entry-regime separation: per-trade abs(rho) ≤ 0.05 (perm p ≥ 0.67) on atr_z/adx/slope; train-fit filters invert or no-op out-of-sample; the walkforward warning stands as the operative 2026 risk. Not protocol-frozen — closes these four features only | `artifacts/v75_macro_engine_tester/regime_analysis_20260914.txt` (2026-09-14) |
 
 Nothing above can be reopened by vibes: each carries a frozen protocol, an
 artifact, and a commit. The discipline going forward is to add rows here, not
