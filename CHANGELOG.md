@@ -1,5 +1,41 @@
 # Changelog
 
+## [H1 timeframe test on V75 (1s): cost stops binding, signal appears (+10.5R IS) — OOS persistence still fails; frozen verdict NO-EDGE] - 2026-09-15
+
+### Amendment A to docs/CROSS_SYMBOL_SCAN_20260915.md, pre-registered before any H1 run
+- **Setup:** H1-primary replay (H1 series in the harness's primary slot, H4 context aggregated from the same source — no synthetic bars), same four frozen configs, same gates, one pass; V75(1t)@H1 as the control. Spread constants are per-trade and timeframe-independent.
+- **Control first:** V75(1t)@H1 is miserable everywhere (shipped −16.64R, DD 67%; trained_best −20.31R) — the H1 horizon is not a general fix.
+- **The finding:** V75(1s)@H1 shipped config = the ONLY SCAN pass on any alternative symbol or timeframe: +10.51R over 406 trades, DD 25.7%, streak 6, WR 48.0%. Spread toll drops to 1.24% of stop distance (M15 1s: 5.6%; M15 1t: 2.2%) — the lowest cost burden of any combination tested. At H1, cost is no longer what kills this family.
+- **What fails:** OOS persistence — −3.97R (n=53, DD 33.8% > 30 gate) over the shared Jun–Sep 2026 window. This is the same failure mode as the home symbol's rebuilt entry (+11.9R IS → −5.7R OOS). Honest caveat now on record: every OOS test this cycle shares one 3-month window — one regime draw, not independent confirmations. Distinguishing a hostile regime from pervasive overfit is THE open question of the program; an independent later window is the only clean separator.
+- Artifacts: CROSS_SYMBOL_SCAN_v75low_H1.json, CROSS_SYMBOL_SCAN_v75t_H1.json; H1-primary datasets under artifacts/train/v75low_h1/ and v75t_h1/.
+
+## [Cross-symbol edge scan: NO-EDGE on V100 and V75 (1s); new 2.9-year V75(1s) corpus collected live] - 2026-09-15
+
+### Executed — docs/CROSS_SYMBOL_SCAN_20260915.md (frozen before runs) + scripts/cross_symbol_scan.py
+- **Scope honesty first:** the repo held no V75-low data; V100 was already adjudicated for the OLD configs (`docs/V100_NET_EDGE_STUDY.md`: gross dies net, Q1/Q2 NO, 1.0-lot floor). The scan's open question was whether the REBUILT entry (EMA-side kernel, MR-off) has an edge where the old configs did not.
+- **V100 (2y, true spec — spread 0.26, $1.0/unit/lot, 1.0-lot floor): NO-EDGE.** The rebuilt entry shows gross signal even here (+9.40R, n=79, WR 51.9%) — the kernel's directional effect transfers across symbols — but the 1.0-lot floor at a $300 basis risks 3–5%/trade and DD hits 49.5% inside a winning run. Independently re-confirms Q5: V100 is untradeable at small scale regardless of signal quality.
+- **V75 (1s) Index: NO-EDGE, decisively — and the symbol had no data in the repo, so it was collected live.** `symbol_select` woke the dormant subscription; spec measured live (spread 1.90 units, $1.0/unit/lot, min lot 0.05, step 0.001); 96,055 M15 bars (2023-11-06 → 2026-09-15, ~2.9 years, the largest corpus we hold) pulled chunked and saved to artifacts/train/v75low/. All four configs deeply negative (shipped −58.19R/377t; rebuilt −18.10/−26.47R). Mechanism priced: M15 TR is ~7× smaller (30.8 vs 220.3) while spread is ~10× smaller (1.90 vs 18.5) → spread is 5.6% of the 1.7·ATR stop vs 2.2% on the 1-tick V75 — a 2.6× relative cost toll, structural at this timeframe.
+- Verdict recorded in OPERATING_SUMMARY question table (row 7b): the strategy family's edge, where it exists at all, is specific to the 1-tick V75 index; no second instrument is certifiable from held data. Artifacts: CROSS_SYMBOL_SCAN_v100.json, CROSS_SYMBOL_SCAN_v75low.json. Engine code and presets untouched.
+
+## [Entry redesign sprint: EMA-side kernel + MR-off rebuilds the family (+11.9R IS, −5.7R OOS) — still NO-SHIP on the frozen gates] - 2026-09-15
+
+### Executed — docs/SPRINT_ENTRY_REDESIGN_20260915.md (frozen before runs) + scripts/entry_lab.py + scripts/sprint_entry_redesign.py
+- **Lab fidelity proven first:** scripts/entry_lab.py is a byte-copy of the certified harness with five inert-by-default knobs (use_bandfade, m15_full_stack, h1_sep, disable_mr, mom_confirm); anchors ema-side off AND on reproduce the harness EXACTLY (same n, totalR, DD) before any candidate counted. Certified files untouched.
+- **The rebuilt entry:** trend-side pullback core (ema_side ON), PB band narrowed to 0.6–0.7·ATR, TP 1.6R, mean-revert legs disabled. IS: +11.89R over 137 trades (DD 14.6%, streak ≤8) vs the shipped config's −4.3R on the identical window. OOS: −5.73R (n=40, DD 13.8%) vs the shipped baseline's −15.10R (n=119, DD 29.7%) on the identical window — beats the gate-5 margin by ~9.4R and halves the drawdown.
+- **Still NO-SHIP, and the gates are right:** OOS totalR is negative (g2) and meanR degraded below half of IS (g4). A config that loses less than baseline is not a config that makes money. All three finalists (incl. the full-M15-stack variant, +10.56R IS) failed identically: the Jun–Sep 2026 out-of-sample regime is hostile to the entire family.
+- **Two auxiliary findings priced:** (1) BandFade legs never fire on this corpus (strategy mix PB 163 / MOM+PB 104 / MR 16 / MOM+MR 3), so the preset-vs-harness BF fidelity question is moot here — gap exactly 0.0R. (2) The MR leg is the family's biggest bleed source: ~19 IS trades costing ≈−10R; disabling it is the single largest improvement lever found (recorded as the lead design fact for the next iteration, not shipped).
+- **Two driver bugs caught and fixed before conclusions:** a duplicate-kwarg crash in family C, and a wrong OOS baseline row (pinned CLI defaults instead of the module constants PB 0.30/2.2 — corrected to the true shipped baseline, n=119/−15.10R, matching the training protocol's row exactly).
+- Artifacts: artifacts/train/SPRINT_REPORT.json (equivalence proof, 72 IS runs, finalists, OOS rows, gate matrix), docs/SPRINT_ENTRY_REDESIGN_20260915.md. Engine code and presets untouched; the rebuilt entry is a candidate, not a deployment.
+
+## [V75 parameter training: NO-SHIP — no trainable edge over the shipped config on 417 days of data] - 2026-09-15
+
+### Executed — docs/TRAINING_PROTOCOL_20260915.md (frozen before the runs) + scripts/train_v75_grid.py
+- **The question:** user directive to train the EA on the data we hold, today. The protocol froze the split (IS 2025-08-01→2026-06-01, OOS 2026-06-01→2026-09-02 from the 40k-bar/417-day broker corpus, converted to harness format in artifacts/train/), the fill model (touch = broker-side resting-order approximation), the search space, the selection rule, and six ship gates BEFORE any run.
+- **Stage 1 (108 runs): 0 eligible.** Best ≈ −4.3R over 10 months; nearly all of the 108-configuration space is deeply negative (tp 2.4 rows: −14 to −28R, DD 40–75%). Parameters cannot rescue the entries.
+- **Amendment A (declared after stage 1, before OOS):** structural levers on IS only. `ema_side_filter` is the one real finding — it flips the family from ≈−15R to +1.5R (n=194) and its best geometry reaches +0.71R with DD 24.3% — but still fails the frozen eligibility bar on the loss-streak bound (9 vs ≤8), and OOS turns it negative (−7.8R; baseline itself −15.1R over the same 93 days). `legacy_sl` re-confirms the walkforward inversion mechanism: −39R, 95% DD. min-score and family-throttle variants destroy the trade count without fixing expectancy.
+- **Verdict (frozen rule, applied mechanically): NO-SHIP.** The shipped parameters remain the certified ones. The certified fresh-60 +4.37R is now honestly recontextualized: 93 of its 94 days overlap the OOS segment where the same config scores −15.1R — favorable-regime luck, not a stable edge. The EMA-side filter is the only lever with a measured directional effect; it is recorded as the lead candidate for a strategy redesign (entry side must be trend-aware), not as a preset change.
+- Artifacts: artifacts/train/TRAINING_REPORT.json (consolidated, 108+14 runs + OOS diagnostics), TRAIN_LOG.txt, AMENDMENT_A_*.json, OOS_DIAGNOSTICS.json; protocol with Amendment A: docs/TRAINING_PROTOCOL_20260915.md. Engine code and presets untouched.
+
 ## [Ledger ERA provenance — pre/post-v26.38 fill regimes are now separated in every statistic, automatically] - 2026-09-15
 
 ### Added — scripts/era.py + era stamps in both engines (v26.39 / v2.24) + era-aware consumers + tests (18 new)
