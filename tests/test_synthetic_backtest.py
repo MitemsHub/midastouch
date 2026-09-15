@@ -112,7 +112,8 @@ class TestDerivIndices(unittest.TestCase):
     def test_all_indices_configured(self):
         """All Deriv index types should be configured."""
         expected = {"SYN50", "SYN75", "SYN100", "SURGE50", "SURGE75", "SURGE100",
-                    "DROP50", "DROP75", "DROP100", "LEAP50", "LEAP75", "LEAP100"}
+                    "DROP50", "DROP75", "DROP100", "LEAP50", "LEAP75", "LEAP100",
+                    "R_100", "R_75", "V75", "V100"}
         self.assertEqual(set(DERIV_INDICES.keys()), expected)
 
     def test_from_deriv_config(self):

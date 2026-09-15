@@ -12,7 +12,7 @@ DEFAULT_DATA_DIR = os.path.join("artifacts", "v75_replay")
 DEFAULT_SPREAD = 18.5
 DEFAULT_USD_PER_UNIT_PER_LOT = 1.009
 DEFAULT_MIN_LOT = 0.01
-DEFAULT_LOT_STEP = 0.01
+DEFAULT_LOT_STEP = 0.001
 SPEC_KEYS = (
     "CERT_SPREAD",
     "CERT_USD_PER_UNIT_PER_LOT",
@@ -36,7 +36,7 @@ def assert_spec_integrity() -> None:
             "CERT_DATA_DIR — five in total. If this really is V75 data, set them "
             "to the V75 truth: CERT_SPREAD=18.5 "
             "CERT_USD_PER_UNIT_PER_LOT=1.009 CERT_MIN_LOT=0.01 "
-            "CERT_LOT_STEP=0.01. An artifact whose sizing implies a lot grid the "
+            "CERT_LOT_STEP=0.001. An artifact whose sizing implies a lot grid the "
             "instrument cannot trade is invalid on its face."
         )
 
@@ -57,6 +57,8 @@ def spec_block(*, artifact: str | None = None, symbol: str = "Volatility 75 Inde
             "CERT_USD_PER_UNIT_PER_LOT", str(DEFAULT_USD_PER_UNIT_PER_LOT))),
         "min_lot": float(os.environ.get("CERT_MIN_LOT", str(DEFAULT_MIN_LOT))),
         "lot_step": float(os.environ.get("CERT_LOT_STEP", str(DEFAULT_LOT_STEP))),
+        "micro_fit_pct": float(os.environ.get("CERT_MICRO_FIT_PCT", "1.5")),
+        "broker_min_stop": float(os.environ.get("CERT_MIN_STOP", "107.70")),
         "cost_model": cost_model or (
             "legacy cost-blind (CERT_COST_LEGACY=1)"
             if os.environ.get("CERT_COST_LEGACY", "0") == "1"

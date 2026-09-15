@@ -39,6 +39,7 @@ from replay_v75_week import (  # noqa: E402
     BULL, BEAR, RANGE, HVOL, NOTRADE, RNAME,
 )
 from v75_money import run_money_replay  # noqa: E402  (kept for the pure money sim)
+from pb_failure_classifier import FailureRule  # noqa: E402
 from artifact_spec import (  # noqa: E402
     SPEC_KEYS, assert_spec_integrity, spec_block as shared_spec_block,
 )
@@ -49,6 +50,9 @@ SPREAD_V75 = float(os.environ.get("CERT_SPREAD", "18.5"))
                             # live measured spread, index units (env: CERT_SPREAD)
 SPREAD_GATE_FRAC = float(os.environ.get("CERT_SPREAD_GATE_FRAC", "0.18"))
                             # InpMaxSpreadATRFrac (env: CERT_SPREAD_GATE_FRAC)
+MICRO_FIT_PCT = float(os.environ.get("CERT_MICRO_FIT_PCT", "1.5"))
+BROKER_MIN_STOP = float(os.environ.get("CERT_MIN_STOP", "107.70"))
+                            # V75 terminal contract: 107.70 index units at capture time
 # ---- v26.36 cost model: fills pay the spread (default ON) ------------------
 # Bar prices are broker mids; a BUY fills at ask (mid + half), a SELL at bid
 # (mid - half); the exit pays the other half, so every round trip costs
@@ -59,7 +63,7 @@ PAY_SPREAD_IN_PNL = os.environ.get("CERT_COST_LEGACY", "0") != "1"
 HALF_SPREAD = 0.5 * SPREAD_V75
 USD_PER_UNIT_PER_LOT = float(os.environ.get("CERT_USD_PER_UNIT_PER_LOT", "1.009"))
 MIN_LOT = float(os.environ.get("CERT_MIN_LOT", "0.01"))
-LOT_STEP = float(os.environ.get("CERT_LOT_STEP", "0.01"))
+LOT_STEP = float(os.environ.get("CERT_LOT_STEP", "0.001"))
 MAX_CONSEC_LOSS = 3         # InpMaxConsecLoss -> pause until next day
 AUTO_DISABLE_N = 20         # InpMinTradesToJudge
 PROBE_EVERY = 10            # InpProbeEveryN
@@ -67,6 +71,11 @@ THROTTLE_K = 10             # family throttle: rolling window size
 THROTTLE_R = -3.0           # family throttle: suspend when window R below this
 THROTTLE_PROBE = 5          # family throttle: every Nth blocked signal probes
 START = 480                 # ~5 days indicator/GARCH burn-in
+USE_PULLBACK = True         # V75 preset InpUsePullback
+USE_MOMENTUM = True         # V75 preset InpUseMomentum
+USE_MEAN_REVERT = True      # V75 preset InpUseMeanRevert
+USE_BAND_FADE = False       # V75 FINAL/LIVE preset InpUseBandFade
+REQUIRE_TWO_STRATS = False  # V75 preset InpRequire2Strats
 
 
 def spec_block(tp_mult: float = TP_MULT_CERT, stop_mult: float = 1.0,
@@ -91,7 +100,17 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
             family_throttle: bool = False,
             mom_standalone: bool = False,
             min_score_bonus: int = 0,
-            pay_spread: bool = PAY_SPREAD_IN_PNL) -> dict:
+            pay_spread: bool = PAY_SPREAD_IN_PNL,
+            use_pullback: bool = USE_PULLBACK,
+            use_momentum: bool = USE_MOMENTUM,
+            use_mean_revert: bool = USE_MEAN_REVERT,
+            require_two_strats: bool = REQUIRE_TWO_STRATS,
+            failure_classifier: FailureRule | None = None) -> dict:
+    global USE_PULLBACK, USE_MOMENTUM, USE_MEAN_REVERT, REQUIRE_TWO_STRATS
+    old_flags = (USE_PULLBACK, USE_MOMENTUM, USE_MEAN_REVERT, REQUIRE_TWO_STRATS)
+    USE_PULLBACK, USE_MOMENTUM, USE_MEAN_REVERT, REQUIRE_TWO_STRATS = (
+        use_pullback, use_momentum, use_mean_revert, require_two_strats
+    )
     assert_spec_integrity()
     blocked_hours = blocked_hours or set()
     m15, h1 = load("m15.csv"), load("h1.csv")
@@ -292,12 +311,12 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
         legs = []
         rng_ = b["h"] - b["l"]
         body = b["c"] - b["o"]
-        if rng_ > 0 and abs(body) / rng_ >= MOM_BODY_MIN:
+        if USE_MOMENTUM and rng_ > 0 and abs(body) / rng_ >= MOM_BODY_MIN:
             if body > 0 and abs(body) / rng_ > 0.55:
                 legs.append(("MOM", 1, 3.0))
             elif body < 0 and abs(body) / rng_ > 0.55:
                 legs.append(("MOM", -1, 3.0))
-        if reg == RANGE and i >= 1 and rsi[i] is not None:
+        if USE_MEAN_REVERT and reg == RANGE and i >= 1 and rsi[i] is not None:
             bb_l = sma20[i] - 2 * bb_sd[i]
             bb_u = sma20[i] + 2 * bb_sd[i]
             if closes[i - 1] <= bb_l and b["c"] > bb_l and rsi[i] < RSI_OS:
@@ -305,7 +324,9 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
             if closes[i - 1] >= bb_u and b["c"] < bb_u and rsi[i] > RSI_OB:
                 legs.append(("MR", -1, 3.8))
         bf_geo_ok, bf_stop_f, bf_tgt_f = False, 0.0, 0.0
-        if reg in (RANGE, HVOL) and sig_init and warm:
+        # V75 FINAL/LIVE presets set InpUseBandFade=false; keep this harness
+        # aligned with the deployed paper arms rather than replaying an unused leg.
+        if USE_BAND_FADE and reg in (RANGE, HVOL) and sig_init and warm:
             if exp_ratio > BAND_EXT:
                 if z_dev >= BAND_Z or z_dev <= -BAND_Z:
                     bars = BAND_HOLD_BARS
@@ -316,7 +337,7 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
                         d = -1 if z_dev >= BAND_Z else 1
                         legs.append(("BF", d, 4.2))
                         bf_geo_ok, bf_stop_f, bf_tgt_f = True, stop_f, tgt_f
-        if reg in (BULL, BEAR) and rsi[i] is not None:
+        if USE_PULLBACK and reg in (BULL, BEAR) and rsi[i] is not None:
             d = 1 if reg == BULL else -1
             pb = abs(b["c"] - eF[i])
             lo_pb = (PB_MIN if pb_min is None else pb_min) * atr[i]
@@ -365,8 +386,23 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
         if ddir == 0:
             funnel["score"] += 1
             continue
+        if REQUIRE_TWO_STRATS:
+            direction_count = sum(1 for _, leg_dir, _ in legs if leg_dir == ddir)
+            if direction_count < 2:
+                funnel["score"] += 1
+                continue
 
         strat = "+".join(n for n, d, _ in legs if d == ddir)
+
+        # Optional research-only PB-family failure classifier. It is passed as
+        # a frozen rule from the chronological training segment; the default is
+        # None so the registered production baseline is byte-for-behavior equal.
+        if failure_classifier is not None and failure_classifier.blocks({
+                "strat": strat, "z": z_dev}):
+            funnel["pb-failure-classifier"] = funnel.get("pb-failure-classifier", 0) + 1
+            veto.append({"t": str(b["t"]), "strat": strat,
+                         "reason": failure_classifier.name})
+            continue
 
         # ---- governor: auto-disable + probe ----------------------------------
         if strat in disabled:
@@ -402,9 +438,13 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
             sd = max(sd, 0.5 * atr[i])
             sd *= stop_mult
             td = tp_mult * sd
+        sd = max(sd, BROKER_MIN_STOP)
         sd = min(sd, entry * 0.03)
 
         # ---- governor: spread gate (v26.23, exact rule) ------------------------
+        # The EA evaluates this against the pre-fit stop geometry. Micro-fit
+        # follows the gate; do not re-check here or the replay would be stricter
+        # than the deployed order path.
         if SPREAD_GATE_FRAC > 0 and SPREAD_V75 > SPREAD_GATE_FRAC * sd:
             funnel["spread-gate"] += 1
             veto.append({"t": str(nb["t"]), "strat": strat, "sd": round(sd, 1),
@@ -425,6 +465,23 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
         if vol < MIN_LOT:
             vol = MIN_LOT
         eff_risk = vol * risk_per_lot
+
+        # v26.36: mirror the standard OpenTrade micro-balance fit. The broker
+        # minimum lot can make the nominal stop risk much larger than the
+        # configured target on a $50 account. Rescale stop/target together,
+        # respecting the live spread and broker minimum-stop floor.
+        if MICRO_FIT_PCT > 0.0 and eff_risk > eq * MICRO_FIT_PCT / 100.0:
+            fit_cap = eq * MICRO_FIT_PCT / 100.0
+            max_stop = fit_cap / (vol * USD_PER_UNIT_PER_LOT)
+            spread_floor = max(SPREAD_V75 * 1.2 + BROKER_MIN_STOP + 3.0 * 0.01,
+                               2.0 * 0.01)
+            new_sd = max(max_stop, spread_floor)
+            scale = new_sd / sd
+            sd = new_sd
+            td *= scale
+            risk_per_lot = sd * USD_PER_UNIT_PER_LOT
+            eff_risk = vol * risk_per_lot
+
         if eff_risk > eq * 0.20:
             funnel["risk-cap"] += 1
             veto.append({"t": str(nb["t"]), "strat": strat, "sd": round(sd, 1),
@@ -465,6 +522,7 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
     for t in trades:
         streak = streak + 1 if t["r"] <= 0 else 0
         worst = max(worst, streak)
+    USE_PULLBACK, USE_MOMENTUM, USE_MEAN_REVERT, REQUIRE_TWO_STRATS = old_flags
     return {
         "equity0": equity0, "equity_final": round(eqc, 2),
         "n": len(trades), "wins": len(wins),
@@ -474,6 +532,8 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
         "max_drawdown_pct": round(maxdd, 1),
         "worst_loss_streak": worst,
         "max_risk_pct": max((t["risk_pct"] for t in trades), default=0),
+        "micro_fit_pct": MICRO_FIT_PCT,
+        "broker_min_stop": BROKER_MIN_STOP,
         "funnel": funnel,
         "by_strategy": {k: {"n": v["n"], "r": round(v["r"], 2)}
                         for k, v in sorted(ledger.items())},
@@ -502,6 +562,10 @@ def main():
                     help="v26.31 candidate: suspend PB-family on rolling -3R/10 window")
     ap.add_argument("--min-score-bonus", type=int, default=0,
                     help="registered bs17 arm only: raise MinScore bar (frequency lever)")
+    ap.add_argument("--require-two-strats", action="store_true",
+                    help="test the existing InpRequire2Strats=true setting")
+    ap.add_argument("--no-pullback", action="store_true",
+                    help="test the existing InpUsePullback=false setting")
     ap.add_argument("--legacy-sl", action="store_true",
                     help="reproduce v26.27 accounting (SL always -1.0R even after BE)")
     ap.add_argument("--start", default="", help="window start (ISO date/time, e.g. 2026-08-09)")
@@ -516,8 +580,14 @@ def main():
                   start=datetime.fromisoformat(args.start) if args.start else None,
                   end=datetime.fromisoformat(args.end) if args.end else None,
                   family_throttle=args.family_throttle,
-                  min_score_bonus=args.min_score_bonus)
+                  min_score_bonus=args.min_score_bonus,
+                  use_pullback=not args.no_pullback,
+                  require_two_strats=args.require_two_strats)
     rep["blocked_hours"] = sorted(blocks)
+    rep["config_flags"] = {"use_pullback": not args.no_pullback,
+                         "use_momentum": True, "use_mean_revert": True,
+                         "require_two_strats": args.require_two_strats,
+                         "use_band_fade": False}
     rep["spec"] = spec_block(tp_mult=args.tp_mult, stop_mult=args.stop_mult,
                              min_score_bonus=args.min_score_bonus)
     path = os.path.join(DATA, f"cert_report_{args.tag}.json")

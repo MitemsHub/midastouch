@@ -83,7 +83,10 @@ def discover_arm_dirs() -> tuple[str | None, str | None]:
 
 def run_tool(name: str, cmd: list[str]) -> dict:
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, timeout=1800)
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"   # children emit UTF-8 regardless of console
+        p = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, timeout=1800,
+                           encoding="utf-8", errors="replace", env=env)
         out = (p.stdout + p.stderr).strip()
         v = verdict_line(out, name)
         return {"tool": name, "exit": p.returncode,
@@ -125,6 +128,8 @@ def main():
         prev = json.load(open(STATE)).get("verdicts", {})
 
     now = datetime.now()
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print(f"=== PAPER PIPELINE {now:%Y-%m-%d %H:%M} ===\n")
     current: dict[str, str] = {}
     rows: dict[str, dict] = {}
@@ -138,7 +143,12 @@ def main():
                    "--a-dir", a or os.path.join(TERM_ROOT, "_none_"),
                    "--b-dir", b or os.path.join(TERM_ROOT, "_none_")]
             tools.append(("ab", cmd))
+            # recon runs the bar-open baseline (amendment 2026-09-15): the
+            # engine evaluates its ladder per M15 bar-open, so that is the
+            # correct null for TJ2 arming; the every-tick study walk remains
+            # available in the reconciler via --mode tick.
             tools.append(("recon", [PY, os.path.join("scripts", "reconcile_paper_ticks.py"),
+                                    "--mode", "baropen",
                                     "--a-dir", a or os.path.join(TERM_ROOT, "_none_")]
                           + (["--b-dir", b] if b else [])))
         tools.append(("regime3", [PY, os.path.join("scripts", "regime_gate_study_v3.py")]))

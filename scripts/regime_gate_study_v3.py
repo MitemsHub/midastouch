@@ -182,15 +182,29 @@ def main():
     # Jun 19..Sep 4) are the only clean-OOS slice that exists so far — the
     # edges were frozen on F01-F16 and never saw these trades.
     from walkforward_v75 import build_folds  # noqa: E402
-    val_folds = build_folds()[16:]
-    rep_oos = certify(EQ, start=val_folds[0][1], end=val_folds[-1][2], tp_mult=1.8)
-    pb_oos = [t for t in rep_oos["trades"] if t["strat"] in ("PB", "MOM+PB")]
-    oz, oh = gap(pb_oos, zkey, z0, z1), gap(pb_oos, hkey, h0, h1_)
-    result["interim"]["oos_window_context"] = {
-        "label": "v2 validation folds only (clean OOS for the frozen edges)",
-        "n": len(pb_oos), "z": oz, "hour": oh}
-    print(f"  [context: v2 validation folds only, clean OOS, n={len(pb_oos)}: "
-          f"z gap {oz['gap']:+.3f}, hour gap {oh['gap']:+.3f}]")
+    folds_all = build_folds()
+    val_folds = folds_all[16:]
+    if not val_folds:
+        # The v2 OOS context was defined on the 210-day window's 26 folds.
+        # The certified dataset is now the fresh 60-day window (2026-09-04
+        # re-baseline, 7 folds) — F17-F26 no longer exist there, so the
+        # clean-OOS context block is not computable and is skipped honestly;
+        # the paper branch and its pre-registered verdict are unaffected.
+        result["interim"]["oos_window_context"] = {
+            "label": "unavailable: v2 validation folds F17-F26 do not exist in "
+                     "the current dataset (fresh 60d window, "
+                     f"{len(folds_all)} folds)", "n": 0}
+        print("  [context: v2 validation folds not present in current dataset "
+              f"({len(folds_all)} folds) - OOS context skipped]")
+    else:
+        rep_oos = certify(EQ, start=val_folds[0][1], end=val_folds[-1][2], tp_mult=1.8)
+        pb_oos = [t for t in rep_oos["trades"] if t["strat"] in ("PB", "MOM+PB")]
+        oz, oh = gap(pb_oos, zkey, z0, z1), gap(pb_oos, hkey, h0, h1_)
+        result["interim"]["oos_window_context"] = {
+            "label": "v2 validation folds only (clean OOS for the frozen edges)",
+            "n": len(pb_oos), "z": oz, "hour": oh}
+        print(f"  [context: v2 validation folds only, clean OOS, n={len(pb_oos)}: "
+              f"z gap {oz['gap']:+.3f}, hour gap {oh['gap']:+.3f}]")
 
     # ---- paper branch ------------------------------------------------------
     path = find_arm_a_ledger()
@@ -202,7 +216,8 @@ def main():
         return
     paper = load_paper_trades(path)
     if not paper:
-        print(f"\nledger exists but no closed PB trades yet -> KEEP COLLECTING")
+        print(f"\nledger exists but no closed PB trades yet")
+        print("Verdict: KEEP COLLECTING (no closed paper trades)")
         result["verdict"] = "KEEP COLLECTING (no closed paper trades)"
         _write(result)
         return

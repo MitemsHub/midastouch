@@ -168,6 +168,43 @@ DERIV_INDICES: dict[str, DerivIndexConfig] = {
         spread=SpreadModel(base_spread_pct=0.001, off_peak_spread_mult=1.4),
         momentum_bias=0.0,
     ),
+    # Aliases for R_* and V* symbol naming conventions
+    "R_100": DerivIndexConfig(
+        index_type=DerivIndexType.SYN,
+        symbol="R_100",
+        initial_price=10000.0,
+        base_volatility=0.16,
+        garch=GARCHParams(omega=0.0000016, alpha=0.06, beta=0.92, gamma=-0.02),
+        spread=SpreadModel(base_spread_pct=0.001, off_peak_spread_mult=1.4),
+        momentum_bias=0.0,
+    ),
+    "R_75": DerivIndexConfig(
+        index_type=DerivIndexType.SYN,
+        symbol="R_75",
+        initial_price=7500.0,
+        base_volatility=0.14,
+        garch=GARCHParams(omega=0.0000014, alpha=0.055, beta=0.925, gamma=-0.018),
+        spread=SpreadModel(base_spread_pct=0.0009, off_peak_spread_mult=1.35),
+        momentum_bias=0.0,
+    ),
+    "V75": DerivIndexConfig(
+        index_type=DerivIndexType.SYN,
+        symbol="V75",
+        initial_price=6000.0,
+        base_volatility=0.18,
+        garch=GARCHParams(omega=0.0000018, alpha=0.07, beta=0.91, gamma=-0.022),
+        spread=SpreadModel(base_spread_pct=0.0011, off_peak_spread_mult=1.4),
+        momentum_bias=0.0,
+    ),
+    "V100": DerivIndexConfig(
+        index_type=DerivIndexType.SYN,
+        symbol="V100",
+        initial_price=9000.0,
+        base_volatility=0.20,
+        garch=GARCHParams(omega=0.0000020, alpha=0.075, beta=0.905, gamma=-0.025),
+        spread=SpreadModel(base_spread_pct=0.0012, off_peak_spread_mult=1.45),
+        momentum_bias=0.0,
+    ),
 
     # ── SURGE Indices (Momentum-Biased) ──
     "SURGE50": DerivIndexConfig(
@@ -323,16 +360,7 @@ class SyntheticIndexConfig:
             recovery_speed=bb_config.recovery_speed,
         )
 
-    @classmethod
-    def from_deriv(cls, symbol: str = "R_100") -> "SyntheticIndexConfig":
-        """Create config from a Deriv index symbol."""
-        deriv_configs = {
-            "R_100": cls(symbol="R_100", initial_price=300.0, base_volatility=0.15),
-            "R_75": cls(symbol="R_75", initial_price=350.0, base_volatility=0.12),
-            "V75": cls(symbol="V75", initial_price=6000.0, base_volatility=0.18),
-            "V100": cls(symbol="V100", initial_price=9000.0, base_volatility=0.20),
-        }
-        return deriv_configs.get(symbol, cls(symbol=symbol))
+
 
 
 # ── Mersenne Twister CSPRNG Wrapper ──────────────────────────────

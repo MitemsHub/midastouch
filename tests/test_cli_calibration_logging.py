@@ -9,6 +9,8 @@ import tempfile
 
 _JOURNAL_DIR = Path(tempfile.mkdtemp(prefix="mitems-test-journals-"))
 
+from typing import Callable
+
 from synthetic_trader.cli import build_parser, main
 from synthetic_trader.live.calibration_scorer import CalibrationScoringResult
 
@@ -200,9 +202,35 @@ def test_main_score_live_calibration_prints_scored_failed_and_skipped_counts(
             skipped_records=3,
         )
 
+    def fake_resolve_scoring_client_factory() -> Callable:
+        """Fake factory that returns a no-op client for testing."""
+        return lambda: _FakeMt5Client()
+
+    class _FakeMt5Client:
+        """Fake MT5 client that satisfies the protocol without real network calls."""
+        async def __aenter__(self) -> _FakeMt5Client:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            pass
+
+        async def ticks_history(
+            self,
+            *,
+            symbol: str,
+            count: int,
+            start: int,
+            end: int,
+        ) -> list:
+            return []
+
     monkeypatch.setattr(
         "synthetic_trader.cli.run_score_unresolved_records_from_market",
         fake_run_score_unresolved_records_from_market,
+    )
+    monkeypatch.setattr(
+        "synthetic_trader.live.auto_scorer._resolve_scoring_client_factory",
+        fake_resolve_scoring_client_factory,
     )
 
     with contextlib.redirect_stdout(output):

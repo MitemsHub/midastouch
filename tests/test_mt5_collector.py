@@ -48,12 +48,14 @@ def _fake_mt5(rates):
 
 
 class Mt5CollectorTests(unittest.TestCase):
-    def test_get_venue_symbol_maps_r75_to_syn75(self) -> None:
-        # Verified live on the Deriv terminal: SYN75/SYN100 are the real
-        # broker symbols, NOT "Volatility 75 Index".
-        self.assertEqual(get_venue_symbol("R_75"), "SYN75")
-        self.assertEqual(get_venue_symbol("R_100"), "SYN100")
-        self.assertEqual(get_venue_symbol("SYN75"), "SYN75")
+    def test_get_venue_symbol_maps_r75_to_venue(self) -> None:
+        # Live-verified 2026-09-15 via the MT5 API on the operative account
+        # (DerivSVG-Server-03, account 140778269): SYN75/SYN100 DO NOT EXIST
+        # there; "Volatility 75 Index" does (bid 45987). The map follows the
+        # broker, not the other Deriv servers that name these SYN*.
+        self.assertEqual(get_venue_symbol("R_75"), "Volatility 75 Index")
+        self.assertEqual(get_venue_symbol("R_100"), "Volatility 100 Index")
+        self.assertEqual(get_venue_symbol("Volatility 75 Index"), "Volatility 75 Index")
 
     def test_collect_mt5_candle_history_writes_ohlc_exact_ticks(self) -> None:
         # Candles must be strictly in the past: fetch_m1_candles excludes the
@@ -85,9 +87,9 @@ class Mt5CollectorTests(unittest.TestCase):
                 )
 
             self.assertEqual(result.ticks_collected, 40)  # 10 candles x 4 ticks
-            self.assertEqual(result.venue_symbol, "SYN75")
+            self.assertEqual(result.venue_symbol, "Volatility 75 Index")
             self.assertTrue(output.exists())
-            fake.symbol_select.assert_called_once_with("SYN75", True)
+            fake.symbol_select.assert_called_once_with("Volatility 75 Index", True)
             fake.copy_rates_range.assert_called_once()
 
             # Rebuild candles from the reconstructed ticks and verify OHLC.

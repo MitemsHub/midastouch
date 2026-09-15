@@ -1,8 +1,27 @@
 //+------------------------------------------------------------------+
 //|                                             MitemshubAI.mq5      |
-//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.35     |
+//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.39     |
 //|   Intelligent • Regime-Aware • Volatility-Only • Spike-Aware • Smart  |
 //|                                                                  |
+//| v26.39 LEDGER ERA TAG: PaperInit stamps an idempotent era row    |
+//|     (ERA,26.39,<boundary_epoch>,pertick-fills) into the paper    |
+//|     ledger after replay, so every future statistic can separate  |
+//|     pre-v26.38 bar-open-fill trades from per-tick-fill trades    |
+//|     data-natively (scripts/era.py interprets; the fill regimes   |
+//|     differ by -8.3R/window and must never share an expectancy    |
+//|     statistic). Restart-safe: repeated stamps are ignored by     |
+//|     readers, who keep the first (oldest) one.                    |
+//| v26.38 PAPER FILL-MODEL PARITY: hard SL/TP in paper mode now     |
+//|     fills per TICK at the resting level, mirroring the broker-   |
+//|     side orders the live engine sends with entry (fill-cost      |
+//|     stress, 2026-09-15: bar-open TP cadence alone priced -8.3R   |
+//|     per 60-day window vs live fills — the A/B gate was measuring |
+//|     machinery, not strategy). Management exits (PLOCK/ECUT/TIME, |
+//|     BE, trail) remain bar-granular: they are decisions, not      |
+//|     resting orders. STOP checked before TP when one tick spans   |
+//|     both. Slippage vs the planned level stays measurable in the  |
+//|     stress protocol as a separate overlay; touch-fill at level   |
+//|     is the no-slippage mirror of a broker's resting-order fill.  |
 //| v26.x SERIES (2026-08-30) — see PRODUCTION_CONFIGS.md for full   |
 //| details. Volatility-only deploy line:                            |
 //| v26.35: paper/account equity guard aligned, OOB governor fail-closed,
@@ -141,7 +160,7 @@
 //|  - Entry/regime TF overrides, telemetry journal                  |
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
-#define APP_VERSION "26.35"
+#define APP_VERSION "26.39"
 
 //--- v25.2: single source of truth for the version string.
 //--- #property version, every log tag, and every order comment derive from
@@ -305,24 +324,22 @@ void RecordTradeSlippage(double actual_r, double exit_p, string exit_type)
 #define HISTORY_BASE "MitemshubAI_history"
 void AppendTradeRow(string reason, double exit_p, double r)
 {
-   int h = FileOpen(SymbolTaggedFile(HISTORY_BASE, ".csv"),
-                    FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
-   if(h == INVALID_HANDLE)
-   {
-      PrintFormat(VTAG+"WARNING: cannot open trade-history file — row for ticket %I64u lost", g_ticket);
+   string file=SymbolTaggedFile(HISTORY_BASE, ".csv");
+   int h = FileOpen(file, FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
+   bool need_header = (h == INVALID_HANDLE) || (FileSize(h) == 0);
+   if(h != INVALID_HANDLE) FileClose(h);
+   if(need_header &&
+      !AppendVerified(file, "closed_at,ticket,strategy,dir,volume,entry,sl,tp,exit,exit_reason,r,pnl_money,risk_money,hold_sec,magic", "history-hdr"))
       return;
-   }
-   if(FileSize(h) == 0)   // first row ever: column header
-      FileWriteString(h, "closed_at,ticket,strategy,dir,volume,entry,sl,tp,exit,exit_reason,r,pnl_money,risk_money,hold_sec,magic\n");
-   FileSeek(h, 0, SEEK_END);
-   FileWriteString(h, StringFormat("%s,%I64u,%s,%d,%.2f,%.5f,%.5f,%.5f,%.5f,%s,%.3f,%.2f,%.2f,%d,%I64d\n",
+   AppendVerified(file,
+                   StringFormat("%s,%I64u,%s,%d,%.2f,%.5f,%.5f,%.5f,%.5f,%s,%.3f,%.2f,%.2f,%d,%I64d",
                    TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS),
                    g_ticket, g_last_strategy, g_dir, g_position_volume,
                    g_entry, g_sl, g_tp, exit_p, reason, r,
                    r * g_risk_money, g_risk_money,
                    g_entry_time > 0 ? (int)(TimeCurrent() - g_entry_time) : 0,
-                   (long)InpMagic));
-   FileClose(h);
+                   (long)InpMagic),
+                   "history");
 }
 
 //+------------------------------------------------------------------+
@@ -1051,6 +1068,13 @@ void OnTick()
       }
    }
 
+   // v26.38 PAPER FILL-MODEL PARITY: hard SL/TP fill per TICK, mirroring the
+   // broker-side resting orders the live engine sends with the entry order
+   // (trade.Buy(...,sl,tp) — broker fills intrabar). Must run on every tick,
+   // BEFORE the bar guard below, or paper fills at bar opens while live fills
+   // intrabar and the A/B gate measures the difference in machinery, not edge.
+   if(PaperActive() && g_pp_open) PaperCheckHardExits();
+
    static datetime last_bar=0;
    datetime cur = iTime(_Symbol, g_tf_entry, 0);
    bool new_bar = (cur != last_bar);
@@ -1446,14 +1470,10 @@ void UpdateBandTelemetry()
 //+------------------------------------------------------------------+
 void Telem(const string type, const string kv)
 {
-   int h=FileOpen(SymbolTaggedFile(TELEM_BASE, ".jsonl"), FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
-   if(h==INVALID_HANDLE)
-   { Print(VTAG+"telem write failed err=",GetLastError()); return; }
-   FileSeek(h,0,SEEK_END);
-   FileWriteString(h, StringFormat("{\"ts\":\"%s\",\"epoch\":%I64d,\"type\":\"%s\",%s}\n",
+   string line=StringFormat("{\"ts\":\"%s\",\"epoch\":%I64d,\"type\":\"%s\",%s}",
                    TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS),
-                   (long)TimeCurrent(), type, kv));
-   FileClose(h);
+                   (long)TimeCurrent(), type, kv);
+   AppendVerified(SymbolTaggedFile(TELEM_BASE, ".jsonl"), line, type);
 }
 
 //+------------------------------------------------------------------+
@@ -2469,6 +2489,21 @@ double FleetOpenRisk(int &no_sl_count)
 {
    no_sl_count=0;
    double total=0.0;
+   // v26.37 FIX: in paper mode the fleet's real positions do not exist, so the
+   // loop below always summed $0.00 and the ACCOUNT GUARD could never see the
+   // instance's own virtual position (2026-09-15 07:45 refusal: "fleet $0.00 +
+   // new $6.01 > cap $5.56" while a paper position was open). Mirror the virtual
+   // book: this engine's fleet is a single magic on the shared account
+   // (non-negotiable), so the instance's own virtual position IS its fleet
+   // contribution. Risk is carried at the ORIGINAL stop (g_pp_orig_risk),
+   // matching how the live loop values a real position: a trailed/breakeven
+   // stop would flatter the fleet number exactly as it would on the live path.
+   if(PaperActive() && g_pp_open && g_pp_orig_risk>0 && g_pp_vol>0)
+   {
+      double ts=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+      double tv=CalibTickValue(_Symbol);
+      if(ts>0 && tv>0) total += g_pp_orig_risk/ts*tv*g_pp_vol;
+   }
    for(int i=PositionsTotal()-1;i>=0;i--)
    {
       ulong t=PositionGetTicket(i);
@@ -3375,18 +3410,65 @@ double PaperEquity() { return(g_paper_eq>0 ? g_paper_eq : InpPaperEquity); }
 
 string PaperFile() { return(SymbolTaggedFile("MitemshubAI_paper",".csv")); }
 
+//+------------------------------------------------------------------+
+//| v26.36: VERIFIED APPEND — a ledger/telemetry row only counts as    |
+//| written when the bytes are actually written AND flushed. One retry |
+//| with a short backoff; a row that fails twice is quarantined to the |
+//| journal with the WLOST tag so the watchdog integrity scan sees it  |
+//| and the row can be restored by hand. The 2026-09-15 audit found a  |
+//| silently dropped CLOSE row (trade #5): FileWriteString failures    |
+//| were never checked, and the success print fired unconditionally.   |
+//| That class is now structurally impossible to miss.                 |
+//+------------------------------------------------------------------+
+bool AppendVerified(const string file,const string line,const string tag)
+{
+   uint want=StringLen(line)+2;               // + "\r\n" (FILE_ANSI: 1 byte/char)
+   for(int attempt=0; attempt<2; attempt++)
+   {
+      int h=FileOpen(file, FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
+      if(h!=INVALID_HANDLE)
+      {
+         FileSeek(h,0,SEEK_END);
+         long before=(long)FileSize(h);
+         uint got=FileWriteString(h, line+"\r\n");
+         FileClose(h);
+         // verify by re-reading: the file on disk must have grown by the row
+         int v=FileOpen(file, FILE_READ|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
+         bool on_disk=false;
+         if(v!=INVALID_HANDLE)
+         {
+            on_disk=((long)FileSize(v) >= before+(long)want);
+            FileClose(v);
+         }
+         if(got>=want && on_disk)
+            return(true);
+      }
+      Sleep(50);                              // brief backoff, then one retry
+   }
+   Print(VTAG+"WLOST ["+tag+"] append failed twice err="+IntegerToString(GetLastError())+" line="+line);
+   return(false);
+}
+
+//+------------------------------------------------------------------+
 void PaperLog(string line)
 {
-   int h=FileOpen(PaperFile(), FILE_READ|FILE_WRITE|FILE_TXT|FILE_ANSI);
-   if(h==INVALID_HANDLE) { Print(VTAG+"paper log open failed: ", GetLastError()); return; }
-   FileSeek(h,0,SEEK_END);
-   FileWriteString(h, line+"\r\n");
-   FileClose(h);
+   AppendVerified(PaperFile(), line, StringSubstr(line, 0, 5));   // WLOST quarantines on failure
 }
 
 bool PaperInit()
 {
    g_paper_eq=InpPaperEquity; g_paper_start=InpPaperEquity;
+   // v26.39: era provenance stamp — idempotent (readers keep the first one).
+   // Marks everything this build appends as per-tick-fill era; trades appended
+   // by pre-26.38 builds sit ABOVE this row in the append-only file and are
+   // classified by the frozen boundary epoch (scripts/era.py). Placed BEFORE
+   // any early return so a fresh ledger is stamped on its very first init.
+   // Paper-guarded: the LIVE book keeps its own history ledger, not this stamp.
+   if(PaperActive())
+   {
+      PaperLog("ERA,"+APP_VERSION+",1789494700,pertick-fills");   // boundary = 2026-09-15 17:51:40 UTC (mid-silence)
+      PrintFormat(VTAG+"PAPER ledger era stamp: %s (per-tick fills from the v26.38 boundary)", APP_VERSION);
+   }
    int h=FileOpen(PaperFile(), FILE_READ|FILE_TXT|FILE_ANSI);
    if(h==INVALID_HANDLE) return(true);      // fresh start
    double eq=InpPaperEquity;
@@ -3458,11 +3540,39 @@ bool PaperOpen(int direction,double entry,double sl,double tp,double vol,
    return(true);
 }
 
-void PaperClose(string reason)
+//+------------------------------------------------------------------+
+//| v26.38: per-tick hard-exit fills — the broker mirror for paper.   |
+//| A resting SL/TP is an ORDER AT A PRICE, not a bar-open decision:  |
+//| it fills on the first tick that touches it, at that price. The    |
+//| bar-open cadence was a paper-machinery artifact the fill-cost     |
+//| stress protocol priced at -8.3R/window vs live fills (TP-cadence  |
+//| term, 2026-09-15); the gate would have adjudicated machinery,     |
+//| not strategy. Management exits (PLOCK/ECUT/TIME/BE/trail) stay    |
+//| bar-granular by design — they are decisions, not resting orders.  |
+//| STOP checked before TP when one tick spans both (conservative).   |
+//+------------------------------------------------------------------+
+void PaperCheckHardExits()
+{
+   if(!g_pp_open) return;
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   if(g_pp_dir>0)
+   {
+      if(bid<=g_pp_sl){PaperClose("STOP",g_pp_sl);return;}
+      if(bid>=g_pp_tp){PaperClose("TARGET",g_pp_tp);return;}
+   }
+   else
+   {
+      if(ask>=g_pp_sl){PaperClose("STOP",g_pp_sl);return;}
+      if(ask<=g_pp_tp){PaperClose("TARGET",g_pp_tp);return;}
+   }
+}
+
+void PaperClose(string reason, double exit_price=0)   // v26.38: explicit fill price for resting-order exits
 {
    double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-   double exit=(g_pp_dir>0)?bid:ask;
+   double exit=(exit_price>0)?exit_price:((g_pp_dir>0)?bid:ask);   // default: touch price (legacy behavior)
    double r=g_pp_orig_risk>0?((g_pp_dir>0)?(exit-g_pp_entry):(g_pp_entry-exit))/g_pp_orig_risk:0;
    double pnl=g_pp_eff_risk*r;
    ulong ticket=g_ticket;

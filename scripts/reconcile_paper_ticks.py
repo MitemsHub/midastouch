@@ -34,6 +34,16 @@ VERDICT (fixed 2026-09-04, before data exists):
                              numbers UNDERSTATE live performance.
   REASON/PRICE-DRIFT       — F3/F4 fail (mechanics diverged even if R agrees).
 
+AMENDMENT 2026-09-15 (pre-registered before any bar-open data was scored):
+  The 2026-09-14 early look pinned the mechanism behind its REASON-DRIFT
+  verdict: the paper engine (v26.35) evaluates its ladder ONCE PER M15 BAR
+  OPEN (OnTick new_bar gate, PaperManage inside it), while this baseline
+  walked every tick. Cadence, not mechanics, drove the mismatch. --mode
+  baropen redefines the baseline to evaluate at M15 boundaries only — the
+  engine's own cadence — so TJ2 tests the right hypothesis. --mode tick
+  (default) remains the original every-tick study baseline. Both verdicts
+  are recorded; arming at 7d uses the mode pre-registered for the arm.
+
 Usage:
   python scripts/reconcile_paper_ticks.py --a-dir "<terminal>/MQL5/Files" \
       [--b-dir "<terminalB>/MQL5/Files"] [--min-days 7] [--ticks FILE]
@@ -50,7 +60,6 @@ import csv
 import json
 import math
 import os
-import random
 import statistics as st
 import subprocess
 import sys
@@ -58,6 +67,8 @@ from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+
+import era  # era classification: post-v26.38 per-tick fills vs pre-boundary bar-open fills
 
 from artifact_spec import assert_spec_integrity, spec_block  # noqa: E402
 from study_fastfail_ticks import (  # noqa: E402  (single source of ladder truth)
@@ -82,10 +93,12 @@ def load_ledger(path):
     orig_risk,max_hold,tag / CLOSE,epoch,ticket,reason,exit,r,pnl,veq / EQ,veq."""
     trades, curve, problems, opens = [], [], [], {}
     with open(path) as f:
-        for line in f:
+        for ln, line in enumerate(f, 1):
             p = line.strip().split(",")
             if not p:
                 continue
+            if p[0] == "ERA":
+                continue   # provenance row (v26.39+/v2.24+); scripts/era.py owns it
             if p[0] == "OPEN":
                 opens[p[2]] = dict(epoch=int(p[1]), dir=int(p[3]), entry=float(p[4]),
                                    sl=float(p[5]), tp=float(p[6]), vol=float(p[7]),
@@ -94,7 +107,7 @@ def load_ledger(path):
                 o = opens.pop(p[2], None)
                 trades.append(dict(epoch=int(p[1]), ticket=p[2], reason=p[3],
                                    exit=float(p[4]), r=float(p[5]), pnl=float(p[6]),
-                                   veq=float(p[7]),
+                                   veq=float(p[7]), line=ln,
                                    open_epoch=o["epoch"] if o else None,
                                    odir=o["dir"] if o else None,
                                    oentry=o["entry"] if o else None,
@@ -112,8 +125,10 @@ def load_ledger(path):
 
 
 # ------------------------------------------------------------- tick sim ---
-def sim_ladder(t, ts, bid, ask):
+def sim_ladder(t, ts, bid, ask, baropen=False):
     """Ladder from the LEDGER's own fill; same constants as the tick study.
+    baropen=True evaluates only at M15 boundaries (the engine's cadence,
+    amendment 2026-09-15); default walks every tick (study baseline).
     Returns (r, reason) or (None, why-skipped)."""
     d = t["odir"]
     if d is None:
@@ -130,10 +145,15 @@ def sim_ladder(t, ts, bid, ask):
     hw = 0.0
     t_end = t0 + MAX_BARS * BAR
     i = i0
+    prev_bars = -1
     while i < len(ts) and ts[i] <= t_end:
         rc = ((bid[i] - entry) if d > 0 else (entry - ask[i])) / sd
-        fav = rc                                   # favorable excursion source
-        hw = max(hw, fav)
+        bars = (ts[i] - t0) // BAR
+        # Bar-open mode: the engine's new_bar gate fires on the FIRST tick at/after
+        # each M15 boundary, so the ladder is evaluated there. SL/TP boundary hits
+        # stay per-tick in both modes (the engine's spike-exit path is per-tick).
+        at_boundary = bars > prev_bars
+        prev_bars = bars
         hit_sl = (bid[i] <= sl) if d > 0 else (ask[i] >= sl)
         hit_tp = (bid[i] >= tp) if d > 0 else (ask[i] <= tp)
         if hit_sl and not hit_tp:
@@ -142,21 +162,22 @@ def sim_ladder(t, ts, bid, ask):
             return tp_r, "TP"
         if hit_sl and hit_tp:
             return rc, "SL(ambig)"
-        bars = (ts[i] - t0) // BAR
-        if hw >= PLOCK_HW and 0 < rc <= PLOCK_Z:
-            return rc, "PLOCK"
-        if hw >= BE_TRIG:
-            ns = entry
-            if (d > 0 and ns > sl) or (d < 0 and ns < sl):
-                sl = ns
-        if hw >= TRAIL_START:
-            ns = (bid[i] if d > 0 else ask[i]) - d * TRAIL_DIST * sd
-            if (d > 0 and ns > sl) or (d < 0 and ns < sl):
-                sl = ns
-        if bars >= ECUT_BARS and rc <= ECUT_R and hw < ECUT_HW:
-            return rc, "ECUT"
-        if bars >= TIME_BARS and rc <= 0.2:
-            return rc, "TIME" if bars < TIME_EXT_BARS else "TIME_EXT"
+        if at_boundary or not baropen:
+            hw = max(hw, rc)                           # favorable excursion source
+            if hw >= PLOCK_HW and 0 < rc <= PLOCK_Z:
+                return rc, "PLOCK"
+            if hw >= BE_TRIG:
+                ns = entry
+                if (d > 0 and ns > sl) or (d < 0 and ns < sl):
+                    sl = ns
+            if hw >= TRAIL_START:
+                ns = (bid[i] if d > 0 else ask[i]) - d * TRAIL_DIST * sd
+                if (d > 0 and ns > sl) or (d < 0 and ns < sl):
+                    sl = ns
+            if bars >= ECUT_BARS and rc <= ECUT_R and hw < ECUT_HW:
+                return rc, "ECUT"
+            if bars >= TIME_BARS and rc <= 0.2:
+                return rc, "TIME" if bars < TIME_EXT_BARS else "TIME_EXT"
         i += 1
     last = len(ts) - 1
     return ((bid[last] - entry) if d > 0 else (entry - ask[last])) / sd, "EOD"
@@ -204,13 +225,13 @@ def ensure_tick_coverage(ts, bid, ask, need_lo_ms, need_hi_ms, ticks_path):
 
 
 # ---------------------------------------------------------------- main ----
-def reconcile(ledger_path, ts, bid, ask, spread_med):
+def reconcile(ledger_path, ts, bid, ask, spread_med, mode="tick"):
     trades, curve, problems = load_ledger(ledger_path)
     closed = [t for t in trades if t["open_epoch"] is not None]
     deltas, reasons_ok, exit_bad, fill_shifts = [], 0, 0, []
     sim_rows = []
     for t in closed:
-        r_tick, why = sim_ladder(t, ts, bid, ask)
+        r_tick, why = sim_ladder(t, ts, bid, ask, baropen=(mode == "baropen"))
         if r_tick is None:
             sim_rows.append({"ticket": t["ticket"], "skip": why})
             continue
@@ -230,7 +251,7 @@ def reconcile(ledger_path, ts, bid, ask, spread_med):
             fill_shifts.append((t["oentry"] - fair) * t["odir"])
     n = len(deltas)
     res = {"ledger_trades": len(trades), "simmed": n, "skipped": len(sim_rows),
-           "integrity": problems or "ok"}
+           "mode": mode, "integrity": problems or "ok"}
     if n == 0:
         return res, None
     mean_d = st.mean(deltas)
@@ -262,6 +283,10 @@ def main():
     ap.add_argument("--a-dir", required=True)
     ap.add_argument("--b-dir", default="")
     ap.add_argument("--min-days", type=float, default=MIN_DAYS_DEFAULT)
+    ap.add_argument("--mode", choices=["tick", "baropen"], default="tick",
+                    help="baseline cadence: tick = study every-tick walk "
+                         "(2026-09-04), baropen = engine's M15 cadence "
+                         "(amendment 2026-09-15)")
     ap.add_argument("--ticks", default=os.path.join(HERE, "..", "data", "v75_ticks_cert_window.csv"))
     args = ap.parse_args()
 
@@ -284,6 +309,20 @@ def main():
             print(f"arm {name}: ledger exists but has no closed trades yet")
             out["arms"][name] = {"closed": 0}
             continue
+        # Era eligibility (OPERATING_SUMMARY 2026-09-15 amendment): only
+        # post-boundary (per-tick-fill) trades are reconcilable against the
+        # per-tick baseline semantics; pre-v26.38 bar-open-fill trades would
+        # reconcile against the wrong regime by construction.
+        era_rows = era.parse_era_rows(path)
+        all_n = len(trades)
+        trades = era.era_filter(trades, "MitemshubAI", era.ERA_POST, era_rows)
+        out_era = {"filter": era.ERA_POST, "total": all_n, "post": len(trades),
+                   "pre_excluded": all_n - len(trades), "era_rows": era_rows}
+        if not trades:
+            print(f"arm {name}: no post-era trades yet (all {all_n} pre-boundary) — "
+                  f"era clock starts at the first post-v26.38 fill")
+            out["arms"][name] = {"closed": 0, "era": out_era}
+            continue
         days = (trades[-1]["epoch"] - trades[0]["epoch"]) / 86400
         if days < args.min_days:
             print(f"arm {name}: {days:.1f}/{args.min_days:.0f} days of data — KEEP COLLECTING "
@@ -293,12 +332,14 @@ def main():
         lo_ms, hi_ms = trades[0]["epoch"] * 1000 - 3_600_000, trades[-1]["epoch"] * 1000 + 60_000
         (ts, bid, ask), ticks_path = ensure_tick_coverage(ts, bid, ask, lo_ms, hi_ms, ticks_path)
         spread_med = st.median([a - b for a, b in zip(ask[:20000], bid[:20000])])
-        res, verdict = reconcile(path, ts, bid, ask, spread_med)
+        res, verdict = reconcile(path, ts, bid, ask, spread_med, mode=args.mode)
         res["days"] = round(days, 2)
+        res["era"] = out_era
         out["arms"][name] = res
+        out["baseline_mode"] = args.mode
         if name == "A":
             overall = verdict or "KEEP COLLECTING"
-        print(f"arm {name}: {res['simmed']} trades over {days:.1f}d | "
+        print(f"arm {name}: [{args.mode}] {res['simmed']} trades over {days:.1f}d | "
               f"ladder delta {res.get('mean_ladder_delta_r')}R CI{res.get('ci95')} | "
               f"reason-agree {res.get('reason_agreement')} | exit-viol {res.get('exit_price_violations')} | "
               f"fill-shift {res.get('fill_shift_median')} -> {verdict}")

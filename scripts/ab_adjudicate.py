@@ -36,6 +36,8 @@ from datetime import datetime, timezone
 
 from artifact_spec import assert_spec_integrity, spec_block
 
+import era
+
 LEDGER = "MitemshubAI_paper_Volatility_75_Index.csv"
 OUT = os.path.join("artifacts", "v75_replay", "ab_adjudication.json")
 PAIR_TOL_S = 90           # pairing tolerance in SECONDS (ledger epochs are seconds)
@@ -46,15 +48,19 @@ ARM_B_MAGIC = 7788100
 
 
 def parse_ledger(path):
-    """Returns (trades, veq_curve, integrity) — trades: dicts with epoch/r/pnl/reason/magic."""
+    """Returns (trades, veq_curve, integrity) — trades: dicts with epoch/r/pnl/reason/magic.
+    CLOSE rows carry their line number for era classification (scripts/era.py).
+    ERA provenance rows (v26.39+) are skipped here; era.py owns them."""
     trades, curve, problems = [], [], []
     open_rows = {}
     with open(path) as f:
-        for line in f:
+        for ln, line in enumerate(f, 1):
             parts = line.strip().split(",")
             if not parts or parts[0] == "OPEN":
                 if parts and parts[0] == "OPEN":
                     open_rows[parts[2]] = {"epoch": int(parts[1]), "tag": parts[11] if len(parts) > 11 else "?"}
+            elif parts[0] == "ERA":
+                continue
             elif parts[0] == "CLOSE":
                 # CLOSE,epoch,ticket,reason,exit,r,pnl,veq
                 tk = parts[2]
@@ -63,6 +69,7 @@ def parse_ledger(path):
                     "epoch": int(parts[1]), "ticket": tk, "reason": parts[3],
                     "r": float(parts[5]), "pnl": float(parts[6]), "veq": float(parts[7]),
                     "open_epoch": o["epoch"] if o else None, "tag": o["tag"] if o else "?",
+                    "line": ln,
                 })
             elif parts[0] == "EQ":
                 curve.append(float(parts[1]))
@@ -174,6 +181,25 @@ def main():
 
     ta, ca, pa = data["A_tp18"]
     tb, cb, pb = data["B_tp24"]
+
+    # ---- era separation (OPERATING_SUMMARY 2026-09-15 amendment): the paired
+    # A/B duel is defined on per-tick-fill trades only; pre-v26.38 bar-open-fill
+    # trades are recorded in the artifact but excluded from every statistic.
+    era_rows_a = era.parse_era_rows(os.path.join(args.a_dir, LEDGER))
+    era_rows_b = era.parse_era_rows(os.path.join(args.b_dir, LEDGER))
+    ta = era.era_filter(ta, "MitemshubAI", era.ERA_POST, era_rows_a)
+    tb = era.era_filter(tb, "MitemshubAI", era.ERA_POST, era_rows_b)
+    out["era"] = {
+        "boundary_epoch": era.ERA_EPOCH,
+        "boundary_utc": datetime.fromtimestamp(era.ERA_EPOCH, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        "filter": era.ERA_POST,
+        "a_rows": era_rows_a, "b_rows": era_rows_b,
+        "n_a_post": len(ta), "n_b_post": len(tb),
+        "note": "pre-boundary trades (bar-open fills) excluded from pairs, t, dR and the count gate",
+    }
+    print(f"era filter [{era.ERA_POST}]: A {len(ta)} / B {len(tb)} post-boundary trades "
+          f"(boundary {out['era']['boundary_utc']} UTC)")
+
     pairs = pair(ta, tb)
     deltas = [x["r"] - y["r"] for x, y in pairs]
     t = tstat(deltas)
@@ -189,11 +215,12 @@ def main():
               f"signals did not align; check clocks/signal sharing")
 
     gate = []
-    for name, tr in (("A_tp18", ta), ("B_tp24", tb)):
+    for name, tr, cv in (("A_tp18", ta, ca), ("B_tp24", tb, cb)):
         if len(tr) < MIN_TRADES:
-            rate = arm_stats(tr, ca)["trades_per_day"] or 0
+            # post-era lists can be empty (arm A right now): no rate to project
+            rate = arm_stats(tr, cv).get("trades_per_day") or 0
             eta = math.ceil((MIN_TRADES - len(tr)) / rate) if rate > 0 else None
-            gate.append(f"{name} has {len(tr)}/{MIN_TRADES} trades"
+            gate.append(f"{name} has {len(tr)}/{MIN_TRADES} post-era trades"
                         + (f" — ETA ~{eta}d at current rate" if eta else ""))
     if gate:
         print("\nVERDICT: KEEP COLLECTING — " + "; ".join(gate))

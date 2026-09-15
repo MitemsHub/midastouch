@@ -25,12 +25,22 @@ everything from here: the gate outcome.
 
 Nothing above can be reopened by vibes: each carries a frozen protocol, an
 artifact, and a commit. The discipline going forward is to add rows here, not
-to re-litigate them.
+to re-litigate them. The one sanctioned reopening path is pre-registered in
+`docs/V75_RECERT_PROTOCOL.md` (2026-09-14): forward-only fresh-window
+collection with frozen statistical gates, for the long-only pullback-buy
+config after the walkforward inversion.
 
 ## 2. The one open gate (pre-registered 2026-09-04, do not move the goalposts)
 
 Paper arms A (TP 1.8, magic 7788075) and B (TP 2.4, magic 7788100) each run
-its own MT5 terminal. **Live trading is authorized only when ALL of these hold:**
+its own MT5 terminal. **2026-09-14: arm B moved to the dedicated ARMS terminal
+(`MitemshubMT5_C` install, data folder 71BF) — that terminal is reserved for
+paper collection and tester/research sessions must never close it; its old
+host 49E0 (`MitemshubMT5_B`) is tester/reserve-only and carries no arm —
+since 2026-09-15 it is also the sanctioned **WIP staging terminal**: a
+candidate build proves telemetry-liveness there (`check_wip_liveness.py
+--collect`) before `-AllowWip` may deploy it anywhere.**
+**Live trading is authorized only when ALL of these hold:**
 
 | Gate leg | Rule | Auto-fires |
 |---|---|---|
@@ -44,6 +54,39 @@ signal rate the A/B expects ~2–3 weeks to reach 30. There is also a
 pre-registered *accelerated* path: gate TJ3 + **20** closed arm-A trades with
 positive expectancy + reconciliation on ≥5 days → live at the minimum viable
 size ($50), keeping the paper arms running.
+
+**2026-09-14, TJ2 early look:** arm A's 13 closed trades (5.09d) reconciled
+against the tick baseline — R agrees (mean +0.188R, CI covers 0, 0 exit-price
+violations) but reason-agreement 0.692 < 0.75 ⇒ verdict REASON-DRIFT. Mechanism
+pinned: the paper ladder runs per M15 bar-open (11/13 closes on boundaries)
+while the study baseline walks every tick; TJ2 stays unarmed (7d gate) and the
+bar-open-vs-tick baseline question is now the open item before any arming.
+`artifacts/v75_replay/paper_tick_reconciliation.json`, changelog 2026-09-14.
+
+**2026-09-15, TJ2 amendment (pre-registered) + MATCHED:** the reconciler gained
+`--mode baropen` (baseline evaluates on the first tick at/after each M15
+boundary — the engine's `new_bar` gate semantics — SL/TP boundary hits stay
+per-tick). Same 13 trades: delta +0.022R, CI covers 0, reason-agreement
+0.846 ≥ 0.75, zero exit violations → **MATCHED**; every-tick mode reproduces
+the 09-14 REASON-DRIFT (+0.188R / 0.692) unchanged. The drift was evaluation
+cadence, not mechanics; TJ2's arming question is resolved. Same artifact,
+final state `MATCHED | mode: baropen`, changelog 2026-09-15. Collection is
+now 24/7 (session gates off in both arm charts, verified by boot banners
+`Session=00-00`; terminals stay open).
+
+**2026-09-15, ERA BOUNDARY — v26.38 paper fill-model parity (append-only):**
+the fill-cost stress protocol priced the bar-open fill cadence at −8.3R/window
+vs the live book's broker-side resting orders; v26.38 closes that defect (hard
+SL/TP now fill per tick at the resting level, management exits stay bar-granular
+— the exact semantics of the TJ2 baropen MATCHED baseline). Consequence for the
+gate: **the 30-trade clock restarts at the 19:52/19:58 UTC+1 deploy boundary.**
+Trades closed before it carry bar-open fills (arms A/B), trades after carry
+per-tick fills; one expectancy statistic must not mix the two regimes. Arm
+equities persist (continuity preserved) but trade counts are era-tagged from
+the changelog entry forward. The 23 pre-boundary trades remain honest data
+about the OLD sim — and the arm-A risk-cap refusals at $30.73 (19:30/19:45,
+min-lot $6.57 > cap $6.15) are the VSG strangulation floor operating live.
+G5/G1 mechanics unchanged; only the clock and the fill semantics reset.
 
 ## 3. Decision tree — what each outcome MEANS (pre-declared, applies verbatim)
 
@@ -77,6 +120,9 @@ GATE ADJUDICATES (TJ1, TJ2, TJ3 all evaluated)
 │          touch a paper arm. Collection continues meanwhile.
 │      Probable truth if this happens: the replay's +0.038R/t (t=0.35) was
 │      not distinguishable from zero — the gate exists precisely to catch this.
+│      (Execution playbook, frozen 2026-09-15: docs/NO_GO_BRANCH_PLAYBOOK.md
+│      — re-baseline drill, spread-regime pricing, governor funnel diffs,
+│      frozen outcomes A/B/C; run Steps 2–4 read-only if INCONCLUSIVE.)
 │
 ├─ TJ1 arm-B positive while arm-A negative (TP 2.4 wins the duel)
 │    → Do NOT adopt by hand. Re-run the 210-day certified walk-forward with
@@ -94,10 +140,20 @@ GATE ADJUDICATES (TJ1, TJ2, TJ3 all evaluated)
 ### clears a study's frozen bar)
 
 ```
-1. A study returns VALIDATED-CANDIDATE (none has, as of 2026-09-05).
+1. A study returns VALIDATED-CANDIDATE (none has, as of 2026-09-05;
+   the first live candidate-path study is the pre-registered viable-scale
+   re-pricing: docs/VIABLE_SCALE_GEOMETRY_STUDY.md, 2026-09-15 — it re-prices
+   scale only and cannot manufacture edge; its output feeds step 3's sizing,
+   never skips step 2).
 2. ONLY AFTER the primary A/B has adjudicated uncontaminated:
      - write a NEW pre-registered adjudication rule (candidate vs arm A
-       reference — not an A/B rerun) BEFORE the candidate's 30th trade;
+       reference — not an A/B rerun) BEFORE the candidate's 30th trade
+       (the template now exists and is frozen: docs/ARM_C_TEMPLATE.md,
+       2026-09-15 pre-registration — daily-paired C−A rule, gates G1–G4,
+       VALIDATED-CANDIDATE-CONFIRMED / REJECTED / INCONCLUSIVE mapping; only
+       the fill-at-activation fields remain open; amendment 2026-09-15 added
+       G5, the adjudication-time strangulation-floor gate — a window collected
+       below the monitor's floor is INVALID, never adjudicated);
      - activate arm C (one input edit → Start-Process → confirm banner;
        measured ≈ 1 minute, docs/ARM_C_TEMPLATE.md);
      - add {"C_cand": 7788125} to morning_status.py magics.

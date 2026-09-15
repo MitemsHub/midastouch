@@ -37,6 +37,11 @@ from artifact_spec import assert_spec_integrity, spec_block  # noqa: E402
 from demo_watchdog import audit, paper_audit  # noqa: E402  (same checks as the watchdog)
 
 DATA = os.path.join(HERE, "..", "artifacts", "v75_replay")
+# Replay funnel source for the [5] funnel-diff leg: the certified baseline of
+# record (NO_GO_BRANCH_PLAYBOOK.md §2). Overridable via env for what-if replays.
+REPLAY_FUNNEL_SRC = os.environ.get(
+    "FUNNEL_REPLAY_JSON",
+    os.path.join(DATA, "cert_report_fresh60_tp18_net.json"))
 APPDATA = os.environ.get("APPDATA", "")
 TERM_ROOT = os.path.join(APPDATA, "MetaQuotes", "Terminal")
 COMMON_PRESETS = os.path.join(TERM_ROOT, "Common", "MQL5", "Presets")
@@ -154,6 +159,11 @@ def ledger_expectancy(path) -> dict:
 
 # ------------------------------------------------------------- main -------
 def main() -> None:
+    # The pipeline captures output through pipes; the default cp1252 console
+    # codec cannot encode arrows/dashes in the report lines (crash class fixed
+    # 2026-09-15). UTF-8 always, replace what a legacy console can't show.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     assert_spec_integrity()
     now = datetime.now()
     report = {"generated": now.isoformat(timespec="seconds"),
@@ -277,6 +287,26 @@ def main() -> None:
         print("  no drift detected")
     report["sections"]["drift"] = sec3
 
+    # ---- [4] arm-C ATR drift vs the frozen sizing truth table -------------
+    print("\n[4] ARM-C ATR DRIFT (sizing truth-table revalidation)")
+    try:
+        from atr_drift_monitor import run_reading as atr_reading
+        sec4 = atr_reading(append=True)   # appends to atr_drift_monitor.json
+    except Exception as e:  # monitor must never crash the weekly leg
+        print(f"  unavailable: {e}")
+        sec4 = {"error": str(e)}
+    report["sections"]["atr_drift"] = sec4
+
+    # ---- [5] funnel diff (NO-GO playbook Step 4, automated) ----------------
+    print("\n[5] FUNNEL DIFF (replay vs paper, rate-normalized)")
+    try:
+        from funnel_diff import run as funnel_run
+        sec5 = funnel_run(REPLAY_FUNNEL_SRC, append=True)  # writes its own artifacts
+    except Exception as e:  # the weekly leg must survive any single-tool crash
+        print(f"  unavailable: {e}")
+        sec5 = {"error": str(e)}
+    report["sections"]["funnel_diff"] = sec5
+
     # ---- actions ----------------------------------------------------------
     print("\nNEXT ACTIONS")
     acts = []
@@ -292,6 +322,13 @@ def main() -> None:
         if isinstance(exp, dict) and exp.get("closed", 0) >= MIN_N_VERDICT:
             acts.append(f"{name}: ≥{MIN_N_VERDICT} closed trades — run scripts/ab_adjudicate.py and "
                         "scripts/reconcile_paper_ticks.py")
+    av = (sec4.get("verdict") if isinstance(sec4, dict) else "") or ""
+    if av.startswith("AMEND"):
+        acts.append("arm-C sizing truth table requires a formal append-only amendment "
+                    "(ATR-drift AMEND) BEFORE any live decision cites it — arm-C branch "
+                    "precondition unmet until the amendment lands")
+    elif av.startswith("WATCH"):
+        acts.append(f"arm-C sizing truth table flagged {av} — review the $100 row at the next protocol review")
     for a in acts[:6]:
         print(f"  - {a}")
     report["actions"] = acts
