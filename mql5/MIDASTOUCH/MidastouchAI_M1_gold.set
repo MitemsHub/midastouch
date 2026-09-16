@@ -1,0 +1,24 @@
+; MIDASTOUCH v1.00 — gold paper arm preset (protocol-frozen defaults)
+; Symbol: XAUUSD or XAUUSDmicro (gold only, per charter)
+InpMagic=7801001
+InpArmTag=M1
+InpMode=1
+InpMacroEmaPeriod=20
+InpBBPeriod=20
+InpBBDev=2.0
+InpRSIPeriod=14
+InpRSIUpper=70.0
+InpRSILower=30.0
+InpAtrPeriod=14
+InpSlAtrMult=2.0
+InpTpMult=2.0
+InpTimeoutMinutes=720
+InpSessionStartHour=6
+InpSessionEndHour=20
+InpSpreadCapPctStop=1.5
+InpFridayCutoffHour=20
+InpUseNewsFilter=false
+InpStaleMinutes=30
+InpRiskPercent=1.0
+InpLiveExecution=false
+InpPaperEquity=1000.0

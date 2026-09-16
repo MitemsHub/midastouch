@@ -1,0 +1,170 @@
+{
+ "run": {
+  "tag": "v28long_REVERSE_BOTH",
+  "from": "2024.01.01",
+  "to": "2026.09.10"
+ },
+ "report": {
+  "Period": "M30 (2024.01.01 - 2026.09.10)",
+  "Bars": "47184",
+  "Ticks": "42442757",
+  "History Quality": "100% real ticks",
+  "Total Trades": "181",
+  "Total Net Profit": "87.94",
+  "Profit Factor": "1.02",
+  "Profit Trades (% of total)": "89 (49.17%)",
+  "OnTester result": "1.171057765024486",
+  "Balance Drawdown Maximal": "1 364.04 (13.09%)"
+ },
+ "deal_totals": {
+  "fills": 181,
+  "exits": 181,
+  "pnl": 97.63000000000001,
+  "pf": 1.0246140115569629
+ },
+ "research_line": "",
+ "slices": {
+  "FULL 2024.01-2026.09": {
+   "trades": 181,
+   "net": 97.63,
+   "win_rate_pct": 49.2,
+   "pf": 1.025,
+   "first": "2024.01.06",
+   "last": "2026.09.03",
+   "tp_hits": 0,
+   "sl_hits": 15
+  },
+  "SELECTION ERA >= 2025.09.15": {
+   "trades": 68,
+   "net": 858.62,
+   "win_rate_pct": 57.4,
+   "pf": 1.985,
+   "first": "2025.09.17",
+   "last": "2026.09.03",
+   "tp_hits": 0,
+   "sl_hits": 1
+  },
+  "VIRGIN ERA < 2025.09.15": {
+   "trades": 113,
+   "net": -760.99,
+   "win_rate_pct": 44.2,
+   "pf": 0.754,
+   "first": "2024.01.06",
+   "last": "2025.09.02",
+   "tp_hits": 0,
+   "sl_hits": 14
+  },
+  "blocks_90d": {
+   "block_0": {
+    "trades": 19,
+    "net": 247.52,
+    "win_rate_pct": 52.6,
+    "pf": 1.575,
+    "first": "2024.01.06",
+    "last": "2024.04.03",
+    "tp_hits": 0,
+    "sl_hits": 3
+   },
+   "block_1": {
+    "trades": 16,
+    "net": -148.74,
+    "win_rate_pct": 50.0,
+    "pf": 0.672,
+    "first": "2024.04.05",
+    "last": "2024.06.30",
+    "tp_hits": 0,
+    "sl_hits": 2
+   },
+   "block_2": {
+    "trades": 18,
+    "net": -461.87,
+    "win_rate_pct": 38.9,
+    "pf": 0.365,
+    "first": "2024.07.06",
+    "last": "2024.09.30",
+    "tp_hits": 0,
+    "sl_hits": 4
+   },
+   "block_3": {
+    "trades": 21,
+    "net": -188.11,
+    "win_rate_pct": 33.3,
+    "pf": 0.681,
+    "first": "2024.10.03",
+    "last": "2024.12.21",
+    "tp_hits": 0,
+    "sl_hits": 2
+   },
+   "block_4": {
+    "trades": 14,
+    "net": -238.91,
+    "win_rate_pct": 28.6,
+    "pf": 0.392,
+    "first": "2025.01.01",
+    "last": "2025.03.21",
+    "tp_hits": 0,
+    "sl_hits": 1
+   },
+   "block_5": {
+    "trades": 12,
+    "net": 55.76,
+    "win_rate_pct": 66.7,
+    "pf": 1.269,
+    "first": "2025.04.03",
+    "last": "2025.06.05",
+    "tp_hits": 0,
+    "sl_hits": 0
+   },
+   "block_6": {
+    "trades": 14,
+    "net": -45.14,
+    "win_rate_pct": 42.9,
+    "pf": 0.855,
+    "first": "2025.07.03",
+    "last": "2025.09.17",
+    "tp_hits": 0,
+    "sl_hits": 2
+   },
+   "block_7": {
+    "trades": 15,
+    "net": 70.14,
+    "win_rate_pct": 53.3,
+    "pf": 1.221,
+    "first": "2025.09.28",
+    "last": "2025.12.25",
+    "tp_hits": 0,
+    "sl_hits": 1
+   },
+   "block_8": {
+    "trades": 26,
+    "net": 253.13,
+    "win_rate_pct": 53.8,
+    "pf": 1.703,
+    "first": "2025.12.28",
+    "last": "2026.03.19",
+    "tp_hits": 0,
+    "sl_hits": 0
+   },
+   "block_9": {
+    "trades": 12,
+    "net": 415.73,
+    "win_rate_pct": 75.0,
+    "pf": 7.398,
+    "first": "2026.04.01",
+    "last": "2026.06.23",
+    "tp_hits": 0,
+    "sl_hits": 0
+   },
+   "block_10": {
+    "trades": 14,
+    "net": 138.12,
+    "win_rate_pct": 57.1,
+    "pf": 2.251,
+    "first": "2026.06.29",
+    "last": "2026.09.03",
+    "tp_hits": 0,
+    "sl_hits": 0
+   }
+  }
+ }
+}

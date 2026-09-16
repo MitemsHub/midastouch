@@ -1,0 +1,19 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+
+# logs & local state
+logs/
+*.log
+!.gitkeep
+scripts/.v75_control_panel_idle.txt
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.claude/
+skills-lock.json
+.env*

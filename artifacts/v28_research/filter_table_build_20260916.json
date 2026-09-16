@@ -1,0 +1,96 @@
+{
+  "generated": "2026-09-16T19:35:16.727694+00:00",
+  "table_version": "bucket-side-tod-v0",
+  "dataset_n": 799,
+  "coverage": 0.0948,
+  "buckets": {
+    "BUY|0": 0.4051,
+    "BUY|1": 0.5882,
+    "BUY|2": 0.7563,
+    "BUY|3": 0.6771,
+    "SELL|0": 0.876,
+    "SELL|1": 0.3264,
+    "SELL|2": 0.5065,
+    "SELL|3": 0.6269
+  },
+  "global_rate": 0.5645,
+  "walk_forward": {
+    "folds": [
+      {
+        "val_month": "2026.03",
+        "auc": 0.2686,
+        "kept_expr": 0.0969,
+        "baseline_expr": 0.0502,
+        "keep_rate": 0.8641
+      },
+      {
+        "val_month": "2026.04",
+        "auc": 0.4616,
+        "kept_expr": 0.6158,
+        "baseline_expr": 0.3063,
+        "keep_rate": 0.3836
+      },
+      {
+        "val_month": "2026.05",
+        "auc": 0.7359,
+        "kept_expr": 0.5585,
+        "baseline_expr": 0.5585,
+        "keep_rate": 1.0
+      },
+      {
+        "val_month": "2026.06",
+        "auc": 0.2577,
+        "kept_expr": -0.4057,
+        "baseline_expr": 0.0876,
+        "keep_rate": 0.1899
+      },
+      {
+        "val_month": "2026.07",
+        "auc": 0.7037,
+        "kept_expr": 0.0,
+        "baseline_expr": 0.0614,
+        "keep_rate": 0.0
+      },
+      {
+        "val_month": "2026.08",
+        "auc": 0.5836,
+        "kept_expr": 0.3213,
+        "baseline_expr": 0.1083,
+        "keep_rate": 0.14
+      }
+    ]
+  },
+  "activation_gate": {
+    "legs": {
+      "n_trades": {
+        "value": 799,
+        "pass": true
+      },
+      "coverage": {
+        "value": 0.0948,
+        "pass": false
+      },
+      "folds_auc_above": {
+        "value": "3/6",
+        "pass": false
+      },
+      "mean_auc": {
+        "value": 0.5019,
+        "pass": false
+      },
+      "worst_fold_delta_r": {
+        "value": -0.4933,
+        "pass": false
+      }
+    },
+    "verdict": "FAIL"
+  },
+  "activation": "PASSIVE",
+  "recon_disclosure": {
+    "recon_date": "2026-09-16",
+    "gbc_verdict_note": "the 15-feature GBC (\u00a710.4) showed no out-of-window ranking skill (mean wf AUC 0.476, calibration flips) \u2014 FAIL stands",
+    "bucket_auc_folds_above": 3,
+    "bucket_mean_auc": 0.476,
+    "trigger_coverage": "all featurized trades are M30_REVERSED_EXTREME \u2014 conviction class is not learnable yet and stays rule-based"
+  }
+}
