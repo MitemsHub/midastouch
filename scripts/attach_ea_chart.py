@@ -124,6 +124,19 @@ def build_chart_from_template(template_path: str, symbol: str, period_min: int,
          "</inputs>",
          "</expert>"]) + "\n"
     text = re.sub(r"<expert>.*?</expert>\n", lambda m: expert_block, text, flags=re.S)
+    if "<expert>" not in text:
+        # Template had NO EA attached: insert the block at MT5's canonical
+        # position — immediately before the first <window> (verified against
+        # FB9A chart01: chart scalars -> <expert>..</expert> -> <window>).
+        # A silent skip here wrote an EA-less chart and a dead arm.
+        built = text.splitlines()
+        for idx, line in enumerate(built):
+            if line.strip() == "<window>":
+                built[idx:idx] = expert_block.splitlines()
+                break
+        else:
+            raise SystemExit("template has neither <expert> nor <window> - not an MT5 chart?")
+        text = "\n".join(built) + "\n"
 
     return "\ufeff" + text                        # UTF-16-LE + BOM, LF endings
 

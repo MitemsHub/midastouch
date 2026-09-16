@@ -43,15 +43,23 @@ import era  # era classification for the gate clock (scripts/era.py)
 
 LEDGER = "MitemshubAI_paper_Volatility_75_Index.csv"
 TELEM = "MitemshubAI_v23_telemetry_Volatility_75_Index.jsonl"
+# v26.40 arm-tagged names: a second MitemshubAI arm on the same terminal+symbol
+# sets InpArmTag, which suffixes EVERY Files output (SymbolTaggedFile). Arm D
+# (forward-test of the gated candidate) runs beside arm B on the dedicated
+# terminal, so its ledger/telemetry carry the D suffix.
+LEDGER_D = "MitemshubAI_paper_Volatility_75_Index_D.csv"
+TELEM_D = "MitemshubAI_v23_telemetry_Volatility_75_Index_D.jsonl"
 # Per-EA file names: arm C is the V75MacroEngine v2.21 paper build, which
 # writes its own ledger/telemetry pair (same OPEN/CLOSE/EQ + jsonl formats).
+# Entries are dicts: tagged arms (key "tag") override the default pair.
 EA_FILES = {
-    "MitemshubAI": (LEDGER, TELEM),
-    "V75MacroEngine": ("V75MacroEngine_paper_Volatility_75_Index.csv",
-                       "V75MacroEngine_paper_telemetry_Volatility_75_Index.jsonl"),
+    "MitemshubAI": {"ledger": LEDGER, "telem": TELEM},
+    "V75MacroEngine": {"ledger": "V75MacroEngine_paper_Volatility_75_Index.csv",
+                       "telem": "V75MacroEngine_paper_telemetry_Volatility_75_Index.jsonl"},
 }
+EA_FILES["MitemshubAI"]["tag"] = {"ledger": LEDGER_D, "telem": TELEM_D}
 TERM_ROOT = os.path.join(os.environ.get("APPDATA", ""), "MetaQuotes", "Terminal")
-MAGICS = {"A_tp18": 7788075, "B_tp24": 7788100, "C_v75": 7788125}
+MAGICS = {"A_tp18": 7788075, "B_tp24": 7788100, "C_v75": 7788125, "D_fwd": 7788150}
 MIN_TRADES = 30
 STALE_TELEM_S = 2 * 3600  # telemetry older than this counts as stale
 WINDOW_DAYS = 3           # default journal audit window
@@ -165,7 +173,9 @@ def init_silence_canary(t: dict, now_local: datetime) -> dict:
                        f"{grace}m - quiet period, resumed {after[0][0]:%H:%M:%S})"}
     # No journal evidence at all - telemetry is the second liveness channel
     # (heartbeats write every bar even when the journal is quiet).
-    telem = os.path.join(t["files_dir"], EA_FILES[ea][1])
+    names = EA_FILES[ea]
+    names = names.get("tag", names) if t.get("tag") else names
+    telem = os.path.join(t["files_dir"], names["telem"])
     if os.path.exists(telem) and os.path.getmtime(telem) > init_ts.timestamp():
         age = (datetime.now().timestamp() - os.path.getmtime(telem)) / 60
         return {"state": "ok",
@@ -240,7 +250,7 @@ def terminal_inventory() -> list[dict]:
                 continue
             if "Volatility 75" not in txt:
                 continue
-            m = re.search(r"^InpMagic(?:Number)?=(7788075|7788100|7788125)$", txt, re.M)
+            m = re.search(r"^InpMagic(?:Number)?=(7788075|7788100|7788125|7788150)\s*$", txt, re.M)
             if not m:
                 continue
             ea = next((e for e in EA_FILES if e in txt), None)
@@ -248,15 +258,27 @@ def terminal_inventory() -> list[dict]:
                 continue
             magic = m.group(1)
             name = next((k for k, v in MAGICS.items() if str(v) == magic), f"?{magic}")
-            ledger_name, telem_name = EA_FILES[ea]
+            # v26.40: an InpArmTag= line on the chart switches the EA to its
+            # tagged file pair (SymbolTaggedFile appends the tag to all output).
+            tm = re.search(r"^InpArmTag=(\S+)\s*$", txt, re.M)
+            tag = tm.group(1) if tm else None
+            base = EA_FILES[ea]
+            names = base.get("tag", base) if tag else base
+            if tag and "tag" not in base:
+                raise SystemExit(f"morning_status: EA {ea} has no tagged file names registered for InpArmTag={tag}")
+            ledger_name, telem_name = names["ledger"], names["telem"]
             files_dir = os.path.join(td, "MQL5", "Files")
             telem_path = os.path.join(files_dir, telem_name)
             telem_age = (now_epoch - os.path.getmtime(telem_path)) if os.path.exists(telem_path) else None
             inv.append({"name": name, "magic": magic, "ea": ea, "dir": td, "files_dir": files_dir,
                         "telem_age": telem_age, "ledger_path": os.path.join(files_dir, ledger_name),
+                        "tag": tag,
                         # 2026-09-15: the TickRecorder runs on the MitemshubAI hosts
-                        # (one per terminal; V75MacroEngine has no recorder module)
-                        "has_tick_recorder": ea == "MitemshubAI"})
+                        # (one per terminal; V75MacroEngine has no recorder module).
+                        # v26.40: the recorder owns the shared symbol tick file, so it
+                        # is enabled on ONE chart per terminal — tagged arms (arm D)
+                        # keep it off to avoid double-append.
+                        "has_tick_recorder": ea == "MitemshubAI" and tag is None})
     return inv
 
 
@@ -370,11 +392,16 @@ def main() -> None:
         # on that feed). A stale archive silently kills forensic exactness for
         # every future exit, so staleness > 15 min on a 10s flush cadence is an
         # alert, not a note. V75MacroEngine charts have no recorder: skip them.
-        if t.get("has_tick_recorder"):
-            tf = os.path.join(t["dir"], "MQL5", "Files",
-                              "MITEMSHUB_ticks_Volatility_75_Index_"
-                              f"{now_local:%Y%m%d}.csv")
-            if not os.path.exists(tf):
+        if t.get("has_tick_recorder") and t.get("tag") is None:
+            # tagged arms share the terminal's single recorder — no canary here.
+            # Judge by the LATEST tick file's mtime, not today's date tag: the
+            # recorder keeps appending to the previous day's file past local
+            # midnight (2026-09-16 00:41 false alarm), so a name match fails
+            # every night while the recorder is healthy.
+            ticks = glob.glob(os.path.join(t["dir"], "MQL5", "Files",
+                                           "MITEMSHUB_ticks_Volatility_75_Index_*.csv"))
+            tf = max(ticks, key=os.path.getmtime) if ticks else None
+            if tf is None:
                 print(paint("      [ALERT] TickRecorder ON but today's tick CSV missing", "r"))
                 unhealthy = True
             else:
@@ -458,7 +485,9 @@ def main() -> None:
     print(f"  >= {MIN_TRADES} closed arm-A trades with POSITIVE expectancy")
     print("  + tick reconciliation PASS (self-arms at 7d of ledger)")
     print("  + watchdog CERTIFIED  ->  live authorized at the pre-registered size")
-    print("  (C_v75 is the V75MacroEngine paper arm: telemetry only, NOT a gate input)")
+    print("  (A/B are the gate inputs; C_v75 is the V75MacroEngine paper arm:")
+    print("   telemetry only, NOT a gate input; D_fwd is the forward test of the")
+    print("   gated candidate — independent-window evidence, not a gate input)")
 
     if args.strict and unhealthy:
         print(paint("\nSTRICT: unhealthy signals present (see [1])", "r"))

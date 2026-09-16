@@ -34,13 +34,17 @@ M_SOURCE = ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI.mq5"
 V_SOURCE = ROOT / "V75MacroEngine.mq5"
 LIVE = ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_LIVE.set"
 FINAL = ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_FINAL.set"
+ARM_D = ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_ARM_D_FWD.set"
 MANIFEST = ROOT / "scripts" / "deploy_manifest.txt"
 
 EXPECTED_VERSIONS = {
-    "mql5/mitemshub_ai/mitemshubai.mq5": "26.39",
+    "mql5/mitemshub_ai/mitemshubai.mq5": "26.40",
     "v75macroengine.mq5": "2.24",
 }
 EXPECTED_MAGIC = "7788075"
+# v26.40 arm D (forward test of the gated candidate): its own magic + arm tag.
+EXPECTED_ARM_D_MAGIC = "7788150"
+EXPECTED_ARM_D_TAG = "D"
 # Keys that may legitimately differ between LIVE and FINAL (ops choices, not
 # intent drift): the tick recorder is enabled per-arm, not per-mode.
 ALLOWED_PRESET_DRIFT = {"InpTickRecordEnabled"}
@@ -139,6 +143,10 @@ def verify_mitemshubai(text: str, version: str) -> list[str]:
         "NO real orders",
         "is a Crash/Boom symbol",                        # volatility-only mandate enforced
         'PaperLog("ERA,"+APP_VERSION',                   # v26.39 ledger era provenance
+        "InpNoMomGate",                                  # v26.40 OOS-autopsy gates (inert by default)
+        "InpHtfSlopeGate",
+        "HtfSlopeOK",
+        "v26.40: InpArmTag disambiguates arms sharing one terminal+symbol",
     )
     for marker in required_markers:
         if marker not in text:
@@ -236,12 +244,55 @@ def verify_preset(path: Path, *, live: bool) -> list[str]:
     return problems
 
 
+def verify_arm_d_preset(path: Path) -> list[str]:
+    """Arm D (forward test of the gated candidate) — fail-closed preset pins.
+
+    The frozen candidate (SPRINT_REPORT finalist 1 + BOTH gates,
+    docs/OOS_AUTOPSY_20260915.md) must not drift silently, and the arm must
+    stay paper-only, collision-free beside arm B, and lab-parity flagged.
+    Changing any of these requires a deliberate protocol amendment + this pin.
+    """
+    values = read_set(path)
+    problems: list[str] = []
+    expected = {
+        "InpMagic": EXPECTED_ARM_D_MAGIC,
+        "InpArmTag": EXPECTED_ARM_D_TAG,
+        "InpLiveExecution": "false",
+        "InpTickRecordEnabled": "false",     # arm B owns the terminal's shared tick file
+        "InpSelfCorrect": "false",           # v30 self-correct has no lab counterpart
+        # frozen gated candidate (docs/OOS_AUTOPSY_20260915.md):
+        "InpPullbackMin": "0.60",
+        "InpPullbackMax": "0.70",
+        "InpTpMult": "1.6",
+        "InpPbEmaSideVeto": "true",
+        "InpNoMomGate": "true",
+        "InpHtfSlopeGate": "true",
+        "InpUseBreakout": "false",
+        "InpUseMeanRevert": "false",
+        "InpUseBandFade": "false",
+        "InpBeTriggerR": "1.0",
+        "InpProfitLockR": "0.5",
+        "InpMaxHoldBars": "20",
+        "InpMaxSpreadATRFrac": "0.18",
+        "InpAdaptiveConviction": "true",
+        "InpRiskPerTrade": "0.005",
+        "InpPaperEquity": "50.0",
+    }
+    for key, value in expected.items():
+        if values.get(key) != value:
+            problems.append(f"{path.name}: {key}={values.get(key)!r}, expected {value!r}")
+    if EXPECTED_ARM_D_MAGIC not in values.get("InpFleetMagicsCSV", ""):
+        problems.append(f"{path.name}: InpFleetMagicsCSV does not include {EXPECTED_ARM_D_MAGIC} "
+                        f"(orphan magic: invisible to the fleet guard)")
+    return problems
+
+
 def verify(deployed_live: Path | None = None) -> dict:
     problems: list[str] = []
     versions: dict[str, str] = {}
     v75_property_version: str | None = None
 
-    for path in (M_SOURCE, V_SOURCE, LIVE, FINAL):
+    for path in (M_SOURCE, V_SOURCE, LIVE, FINAL, ARM_D):
         if not path.exists():
             problems.append(f"missing artifact: {path.relative_to(ROOT)}")
 
@@ -259,6 +310,8 @@ def verify(deployed_live: Path | None = None) -> dict:
     if LIVE.exists() and FINAL.exists():
         problems.extend(verify_preset(LIVE, live=True))
         problems.extend(verify_preset(FINAL, live=False))
+    if ARM_D.exists():
+        problems.extend(verify_arm_d_preset(ARM_D))
         live_values = read_set(LIVE)
         final_values = read_set(FINAL)
         for key in sorted(set(live_values) & set(final_values)):

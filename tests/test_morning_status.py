@@ -171,3 +171,57 @@ def test_parse_mql5_log_channel_and_message():
     assert rows[1][1] == "V75MacroEngine (Volatility 75 Index,M30)"
     assert rows[0][0] == NOW.replace(hour=23, minute=30, second=6)
     os.remove(f)
+
+
+# ---------------------------------------------------------------------------
+# v26.40 arm-D discovery (InpArmTag → tagged file pair, recorder exclusion)
+# ---------------------------------------------------------------------------
+
+def write_chart(tmp_path, ea: str = EA, magic: str = "7788100",
+                arm_tag: str | None = None) -> None:
+    # terminal_inventory() scans TERM_ROOT/<terminal-hash>/MQL5/Profiles/...,
+    # so the fixture mirrors that two-level layout under tmp_path/Term.
+    term_root = os.path.join(tmp_path, "Term")
+    d = os.path.join(term_root, "FAKEHASH", "MQL5", "Profiles", "Charts", "default")
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, "chart01.chr")
+    tag_line = f"InpArmTag={arm_tag}\r\n" if arm_tag else ""
+    with open(p, "w", encoding="utf-16") as f:
+        f.write(f"; chart\r\n{ea}\r\nInpMagic={magic}\r\n{tag_line}Volatility 75 Index\r\n")
+    return term_root
+
+
+def test_discovery_finds_arm_d_via_tag(tmp_path, monkeypatch):
+    """v26.40: arm D (InpMagic=7788150 + InpArmTag=D on a MitemshubAI chart)
+    resolves to the arm-tagged file pair (SymbolTaggedFile suffixes every
+    Files output) and is excluded from the tick-recorder canary (arm B owns
+    the terminal's shared tick file)."""
+    write_chart(tmp_path, magic="7788150", arm_tag="D")
+    monkeypatch.setattr(ms, "TERM_ROOT", os.path.join(str(tmp_path), "Term"))
+    inv = ms.terminal_inventory()
+    assert len(inv) == 1
+    t = inv[0]
+    assert t["name"] == "D_fwd" and t["tag"] == "D"
+    assert t["ledger_path"].endswith("MitemshubAI_paper_Volatility_75_Index_D.csv")
+    assert t["has_tick_recorder"] is False
+
+
+def test_discovery_untagged_arm_b_unchanged(tmp_path, monkeypatch):
+    """Regression: the untagged arm-B path must resolve exactly as before."""
+    write_chart(tmp_path, magic="7788100")
+    monkeypatch.setattr(ms, "TERM_ROOT", os.path.join(str(tmp_path), "Term"))
+    inv = ms.terminal_inventory()
+    assert len(inv) == 1
+    t = inv[0]
+    assert t["name"] == "B_tp24" and t["tag"] is None
+    assert t["ledger_path"].endswith("MitemshubAI_paper_Volatility_75_Index.csv")
+    assert t["has_tick_recorder"] is True
+
+
+def test_discovery_raises_on_unregistered_tag(tmp_path, monkeypatch):
+    """Fail closed: a tagged chart whose EA has no tagged file pair registered
+    must abort loudly rather than silently read the wrong ledger."""
+    write_chart(tmp_path, ea="V75MacroEngine", magic="7788125", arm_tag="X")
+    monkeypatch.setattr(ms, "TERM_ROOT", os.path.join(str(tmp_path), "Term"))
+    with pytest.raises(SystemExit):
+        ms.terminal_inventory()

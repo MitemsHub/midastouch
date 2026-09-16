@@ -70,4 +70,4 @@ V75MacroEngine.mq5|2.24|91e78c871ed8e3fd852b75c121fe5e3faa0a5df00d94e1c607d6c85f
 #     and classify rows above it by the frozen boundary epoch. Strategy and
 #     fill model unchanged from v26.38. Validation: compile 0 errors/0
 #     warnings on 49E0 staging tree.
-mql5/MITEMSHUB_AI/MitemshubAI.mq5|26.39|568f49308587a4dc8fa3e75d50ee18c1dfa9da41cead57b225b75727298243f0
+mql5/MITEMSHUB_AI/MitemshubAI.mq5|26.40|6459f3ad8370c182c8837597eae5a554c3e2d720c0cbbdbbbbdf53227a7bb7f5

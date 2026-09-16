@@ -1,5 +1,92 @@
 # Changelog
 
+## [Hostile-regime vs overfit adjudicated: Jun-Sep 2026 is a historic one-way squeeze (R90 p95.7) but the failure is CONFIG-SPECIFIC FRAGILITY — gradient −0.714, random control fine, same thesis positive on V100 in the same window] - 2026-09-16
+
+- The program's open question (hostile window or overfit?) settled with four
+  pre-registered discriminators (docs/HOSTILE_VS_OVERFIT_20260916.md):
+  feature extremity on price alone (1 of 4 EXTREME — R90; volatility NORMAL,
+  pullback thesis still functioning), loser anatomy (one mechanism: BUYs
+  into the squeeze, −47.4R shipped; shipped|legacy24 monthly corr 0.985),
+  IS→OOS gradient across today's configs (Spearman **−0.714**, n=8 — the
+  +20R tuning finalists died hardest), random-entry control (ratio 1.086 —
+  a directionless participant fine in BOTH windows), and cross-symbol
+  simultaneity (**V100 rebuilt entry OOS +1.46R, n=39, DD 10%, in the SAME
+  calendar window**). Verdict per the frozen bar: MIXED, weighted toward
+  overfit; the regime supplied the traps, the overfit supplied the exposure.
+- All 8 fresh-batch runs reproduce the recorded rows exactly (provenance
+  proven); V100 OOS cell run once per frozen protocol (no fitting use).
+- Consequences: gate v2 pre-registers on R90-type squeeze magnitude; tuning
+  budget stays cut; arm D forward window remains the only clean judge.
+
+## [Arm D forward-test arm live: v26.40 ports the autopsy gates as inert inputs + arm-tagged files; gated candidate collects an independent OOS window under pre-registered adjudication] - 2026-09-16
+
+- **v26.40 engine port (compile 0/0, deploy-manifest re-pin `6459f3ad…`):**
+  the two OOS-autopsy participation gates are now inputs — `InpNoMomGate`
+  (vetoes direction-matching MOM combos) and `InpHtfSlopeGate` (vetoes PB
+  entries against the 24h slope of the H1 EMA100, completed bars only,
+  fail-open on data gaps) — applied post-decision exactly like the lab, with
+  vetoed band-fade plans disarmed. Both default FALSE: off = exact v26.39
+  behaviour (verified by contract test + byte-identical default path).
+  `InpArmTag` suffixes ALL Files output (ledger/telemetry/state/review/slip)
+  so arms can share a terminal+symbol; empty tag = legacy names, zero
+  migration.
+- **Arm D deployed:** magic 7788150, `InpArmTag=D`, paper-only $50, 24/7,
+  dedicated terminal 49E0 chart03 (V75, M15) — the frozen gated candidate
+  (`MitemshubAI_VOL75_ARM_D_FWD.set`, pins contract-tested): PB 0.60–0.70,
+  TP 1.6, EMA-side ON, BOTH gates ON, MR/BF/BO OFF, self-correct OFF,
+  recorder OFF (arm B owns the shared tick file). Banner verified (v26.40,
+  tagged `_D` files, era stamp 26.40), fit telemetry: min-lot stop-risk
+  $5.03 ≈ 10.1%/trade TOLERATED (R stats basis-independent).
+- **Adjudication pre-registered BEFORE the first trade**
+  (`docs/ARM_D_FORWARD_TEST.md`): monthly reads from 2026-10-01;
+  VALIDATED = n≥60 ∧ totalR>0 ∧ DD≤25% ∧ meanR≥0.05; REJECTED = n≥60 ∧
+  (totalR<0 ∨ DD>30% ∨ meanR≤0); structural aborts restart on a fresh
+  ledger, never a polluted window. Arm D is NOT a TJ1 gate input.
+- **Tooling:** morning_status discovers `D_fwd` via magic+tag (unregistered
+  tags fail closed) and skips the recorder canary for tagged arms; the
+  tick-archive canary now judges by latest-file mtime instead of today's
+  date tag (midnight false alarm). `verify_go_live_artifacts` pins the arm-D
+  preset fail-closed. Attach tool fixed to INSERT the expert block when the
+  template chart has none (previously a silent EA-less chart).
+- **Ops:** arm B found PAUSED (consec-loss breaker, loop alive) — resumes
+  next session day per v23 policy; arm A healthy (quiet-bar silence only).
+- Suites: 80 passed (go-live/era/armC/morning-status incl. 4 new arm-D
+  tests); GO-LIVE ARTIFACTS: PASS.
+
+## [V75(1s)@H1 tuning: NO-SHIP — the tuned config is WORSE out-of-sample (−6.87R) than the config it tuned (−3.97R); fresh gates with multiplicity levy did their job] - 2026-09-15
+
+### Executed — docs/V75LOW_H1_TUNING_20260915.md (frozen before any run; spec-before-import discipline)
+- **Search:** 108-run stage-1 grid (7 eligible) + 18-run stage-2 band variants (11 eligible) on the IS window (2023-12→2026-06, 2.5y). Frozen selection picked two near-twin finalists: tp 2.4 / pz 0.6 / shipped PB band (IS +20.44R, n=429, DD 24.6% — double the shipped config's IS edge).
+- **Fresh OOS gates (pre-registered with a 2.0R multiplicity levy, stricter DD 25%, 60% degradation bound, split-OOS halves):** the finalist FAILED five of six gates — OOS −6.87R, DD 37.4%, degradation breach, halves +2.74/−5.63. The tuned config is worse OOS than the untuned shipped config (−3.97R): the +10R IS gain was curve-fit.
+- **Attribution of the overfit:** TP 1.8→2.4 re-imports the legacy multiple whose V75 history IS the walkforward inversion; PLOCK 0.5→0.6 harvests gains the OOS bull regime would have extended. The split halves localize the bleed to the late window — the same Jul–Sep failure every candidate shows on every symbol.
+- **Process note:** this is what the levy is for. Without the +2.0R bar and split-halves requirement, a −6.87R candidate with one decent half could have been argued forward. Verdict NO-SHIP, shipped-at-scale config stands, forward test remains the only clean judge.
+- Artifacts: V75LOW_H1_TUNING_S1.json, V75LOW_H1_TUNING_S2.json, V75LOW_H1_TUNING_OOS.json; results in the protocol doc §5.
+
+## [Amendment C scan: home-symbol OOS fixes do NOT transfer — HTF-SLOPE worsens V75(1s)@H1 OOS (−9.30R) and destroys V100's signal cell; NO-EDGE everywhere but home] - 2026-09-15
+
+### Extension to docs/CROSS_SYMBOL_SCAN_20260915.md (frozen before runs; fresh-process, spec-before-import discipline)
+- **v75low_H1 × shipped:** ungated +10.51R IS / −3.97R OOS (fail, as before). HTF_SLOPE doubles IS (+22.16R) but its first-ever OOS is WORSE than ungated (−9.30R, DD 34.5%) — the +22.16R replication row was in-sample gate optimization, not transferable improvement. NO_MOM flips the symbol negative (−7.95R): the home symbol's OOS fix is poison here.
+- **v100 × rebuilt entry:** ungated +9.40R (DD 49.5%, 1.0-lot inflation) re-confirmed as gross signal; HTF_SLOPE −3.08R and NO_MOM −10.94R both destroy it; BOTH +4.55R halves it. No certifiable geometry at fundable scale.
+- **The meta-finding:** each symbol's edge, where one exists, has a different composition — participation gates tuned on one symbol's OOS do not transfer, and the gate matrix now provides direct evidence AGAINST the simplest overfit story (a gate that were pure IS noise could not systematically help one symbol and hurt two others). Edge remains specific to 1-tick V75 at M15; the gated candidate there stays the sole forward-test qualifier. All alternative symbol/timeframe cells: NO-EDGE under frozen gates.
+- Artifacts: AMENDMENT_C_V75LOW_H1.json, AMENDMENT_C_V100.json; results in the scan doc §7.
+
+## [MR-leg rebuild: every trend-aware variant still subtracts value (best Δ −3.1R vs bar of +2.0R) — MR stays OFF, no OOS consumed] - 2026-09-15
+
+### Amendment B to docs/SPRINT_ENTRY_REDESIGN_20260915.md (frozen before runs) + mr_mode lab knob (inert, anchors re-proven EXACT)
+- **Question:** the sprint's largest lever was disabling MR (~19 trades ≈ −10R). Can a trend-aware MR instead CONTRIBUTE? Variants frozen: flat M15 stack context (|eF−eM| ≤ 0.35·ATR), H1-EMA100 24h-slope alignment, both; × 2 PB bands × 2 TP, plus MR-off reference rows for a direct contribution metric (existence bar Δ ≥ +2.0R).
+- **Answer: no.** As-is MR: Δ −3.7 to −17.6R. Trend-filtered: Δ −3.1 to −4.2R (trend-awareness halves the bleed but cannot flip the sign — on this corpus trend_filter ≡ both, the flat-stack condition subsumes the slope condition). htf_slope alone: worse (up to −20.5R, and it destabilizes trade count via false BULL/BEAR classifications during the IS bear grind). Verdict: MR REBUILD NO-ADOPT — mean-reversion on V75 M15 does not pay even when confined to flat, trend-aligned contexts; MR stays OFF in all standing configs. Per the frozen rule, no finalist advanced and the OOS window was not consumed.
+- **Runner bug declared:** the first grid pass wrongly mapped mode=None to MR-off (duplicating references); the four true 'MR as-is' rows were added afterwards — frozen design otherwise unchanged.
+- Standing configurations unchanged: sprint winner (IS +11.89R) and autopsy-gated candidate (IS +12.74R / OOS +1.53R, forward-test qualified). Artifacts: artifacts/train/MR_REBUILD_GRID.json; Amendment B results in the sprint doc.
+
+## [OOS autopsy + participation gate: MOM-leg veto flips OOS to +1.53R; HTF-SLOPE gate doubles the H1 candidate's edge — gated candidate qualifies for forward testing] - 2026-09-15
+
+### Executed — docs/OOS_AUTOPSY_20260915.md (autopsy → frozen gate design → one-pass runs) + lab knobs (inert by default, anchors re-proven EXACT)
+- **Autopsy verdict:** the rebuilt entry's OOS loss is entirely short-side — BEARISH-classified SELLs went 1-for-10 (−6.11R, WR 10%) while BUYs broke even; the IS year's +16.46R short edge was a grinding bear market (49k→29.5k), and the OOS bull recovery (29.5k→47k) baited the family into selling every H1-classified downswing. MOM+PB was the only strategy bucket negative in BOTH windows. Hour-of-day and ATR-percentile axes inspected and rejected as overfit traps (recorded).
+- **Gates (frozen before any gated run):** HTF-SLOPE (PB entries must align with the 24h slope of H1 EMA100) and NO_MOM (veto MOM legs); BOTH pre-declared primary. Evaluation: IS preservation ≥ +8R/n ≥ 60, OOS ship gates, cross-symbol replication bar ≥ +5R.
+- **Results:** BOTH = IS +12.74R (n=116, DD 11.3%) / OOS **+1.53R (n=25, DD 3.8%)** — every gate passes, degradation ratio 0.56. Attribution: the OOS fix is entirely NO_MOM (22 OOS MOM-leg trades vetoed = exactly the −5.40R MOM+PB bleed); HTF-SLOPE alone is near-inert on the home symbol (0–2 vetoes — the H1 regime classifier already enforces most of it). Its value shows on V75(1s)@H1: 20 counter-slope trades worth −11.65R removed → **+10.51R → +22.16R IS** — the gate generalizes across symbols. Circularity caveat on record: the OOS pass is a diagnosis-then-verify loop on one window, not independent evidence — the gated candidate (rebuilt + BOTH) is qualified for FORWARD testing, not validated.
+- **Tooling traps caught before they fossilized:** (1) in-process env switching after lab import caches instrument constants — one replication attempt was invalid and redone spec-before-import; (2) the harness default `TP_MULT_CERT=2.4` is the legacy geometry, not the deployed preset's 1.8 — a default-argument call silently tests TP 2.4. All recorded rows are the corrected ones.
+- Artifacts: artifacts/train/AUTOPSY_TRADES.json, AUTOPSY_GATE_RESULTS.json, docs/OOS_AUTOPSY_20260915.md. Engine code and presets untouched.
+
 ## [H1 timeframe test on V75 (1s): cost stops binding, signal appears (+10.5R IS) — OOS persistence still fails; frozen verdict NO-EDGE] - 2026-09-15
 
 ### Amendment A to docs/CROSS_SYMBOL_SCAN_20260915.md, pre-registered before any H1 run

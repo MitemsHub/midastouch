@@ -1,8 +1,20 @@
 //+------------------------------------------------------------------+
 //|                                             MitemshubAI.mq5      |
-//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.39     |
+//|                    MITEMSHUB AI MULTI-STRATEGY ENGINE v26.40     |
 //|   Intelligent • Regime-Aware • Volatility-Only • Spike-Aware • Smart  |
 //|                                                                  |
+//| v26.40 FORWARD-TEST GATES + ARM FILES: (1) the two participation |
+//|     gates validated by the OOS autopsy (docs/OOS_AUTOPSY_20260915|
+//|     .md) ported as inputs, inert by default (off = exact v26.39  |
+//|     behaviour): InpNoMomGate vetoes any direction-matching combo |
+//|     containing a MOM leg; InpHtfSlopeGate vetoes PB-leg entries  |
+//|     whose 24h slope of H1 EMA100 opposes the trade direction.    |
+//|     Gates apply post-decision (after the regime score bonus and  |
+//|     score threshold) on direction-matching legs, matching the    |
+//|     lab implementation exactly. (2) InpArmTag: optional suffix   |
+//|     on ALL Files output (ledger/telemetry/state/review/slip) so  |
+//|     multiple arms can share one terminal+symbol without file     |
+//|     collisions. Empty tag = legacy names, zero migration.        |
 //| v26.39 LEDGER ERA TAG: PaperInit stamps an idempotent era row    |
 //|     (ERA,26.39,<boundary_epoch>,pertick-fills) into the paper    |
 //|     ledger after replay, so every future statistic can separate  |
@@ -160,7 +172,7 @@
 //|  - Entry/regime TF overrides, telemetry journal                  |
 //|  - Account-wide exposure guard across fleet magics               |
 //+------------------------------------------------------------------+
-#define APP_VERSION "26.39"
+#define APP_VERSION "26.40"
 
 //--- v25.2: single source of truth for the version string.
 //--- #property version, every log tag, and every order comment derive from
@@ -194,6 +206,10 @@ string SymbolTaggedFile(const string base, const string ext)
 {
    string tag = _Symbol;
    StringReplace(tag, " ", "_");
+   // v26.40: InpArmTag disambiguates arms sharing one terminal+symbol
+   // (arm D beside arm B on the dedicated paper terminal). Empty = legacy names.
+   if(StringLen(InpArmTag) > 0)
+      return StringFormat("%s_%s_%s%s", base, tag, InpArmTag, ext);
    return StringFormat("%s_%s%s", base, tag, ext);
 }
 
@@ -246,6 +262,9 @@ input group "=== Strategy Parameters ==="
 input double InpPullbackMin      = 0.30;
 input double InpPullbackMax      = 2.20;
 input bool   InpPbEmaSideVeto    = false;   // v26.29: veto PB when close pierces EMA20 against trend (cert-validated on V75)
+input bool   InpNoMomGate        = false;   // v26.40: veto any direction-matching combo containing a MOM leg (OOS-autopsy gate; off = v26.39)
+input bool   InpHtfSlopeGate     = false;   // v26.40: veto PB-leg entries against the 24h slope of H1 EMA100 (OOS-autopsy gate; off = v26.39)
+input int    InpHtfSlopeEma      = 100;     // v26.40: H1 EMA period for the HTF-SLOPE gate (lab EMA_SLOW=100)
 input double InpBreakoutBuffer   = 0.10;
 input int    InpBreakoutBars     = 12;
 input double InpMomBodyMin       = 0.45;
@@ -420,6 +439,7 @@ input group "=== Execution ==="
 input string InpEntryTFOverride  = "CURRENT"; // Entry timeframe: CURRENT,M1,M5,M15,M30,H1,H4,D1
 input string InpRegimeTFOverride = "CURRENT"; // Regime timeframe (default = one step above entry)
 input long   InpMagic            = 7788075;   // v26.35 FIX: default was 7788211 (orphan magic: not in the fleet CSV, invisible to the fleet guard)
+input string InpArmTag           = "";        // v26.40: optional suffix on all Files output (multi-arm per terminal+symbol); empty = legacy names
 input int    InpMaxSlippagePts   = 50;
 input int    InpWarmupBars       = 250;
 input bool   InpDrawDashboard    = true;
@@ -537,6 +557,15 @@ double g_day_start_eq=0;
 int g_cooldown=0, g_consec_loss=0, g_trades_today=0;
 bool g_paused=false;
 ENUM_REGIME g_regime = REGIME_NO_TRADE;
+
+// v26.40 HTF-SLOPE gate state: H1 EMA series over the last 26 H1 bars
+// (24-bar slope + 1 completed-bar lag + 1 forming bar), rebuilt once per H1 bar.
+#define HTF_SLOPE_BARS    24
+#define HTF_SLOPE_SERIES  26
+int      hEMA_Slope_H1     = INVALID_HANDLE;
+double   g_htf_slope_ema[HTF_SLOPE_SERIES];
+int      g_htf_slope_count = 0;
+datetime g_htf_slope_key   = 0;
 
 // band-fade state
 double g_sigma_ema=0;
@@ -773,10 +802,12 @@ int OnInit()
    hRSI_E      = iRSI(_Symbol, g_tf_entry, 14, PRICE_CLOSE);
    hATR_E      = iATR(_Symbol, g_tf_entry, InpAtrPeriod);
    hBB_E       = iBands(_Symbol, g_tf_entry, 20, 0, 2.0, PRICE_CLOSE);
+   hEMA_Slope_H1 = iMA(_Symbol, PERIOD_H1, InpHtfSlopeEma, 0, MODE_EMA, PRICE_CLOSE);   // v26.40 HTF-SLOPE gate
 
    if(hEMA_Fast_R==INVALID_HANDLE || hEMA_Mid_R==INVALID_HANDLE || hEMA_Slow_R==INVALID_HANDLE ||
       hEMA_Fast_E==INVALID_HANDLE || hEMA_Mid_E==INVALID_HANDLE || hEMA_Slow_E==INVALID_HANDLE ||
-      hRSI_E==INVALID_HANDLE || hATR_E==INVALID_HANDLE || hBB_E==INVALID_HANDLE)
+      hRSI_E==INVALID_HANDLE || hATR_E==INVALID_HANDLE || hBB_E==INVALID_HANDLE ||
+      hEMA_Slope_H1==INVALID_HANDLE)
    {
       Print("v23: Handle failed");
       return INIT_FAILED;
@@ -877,6 +908,7 @@ void OnDeinit(const int reason)
    IndicatorRelease(hEMA_Fast_R); IndicatorRelease(hEMA_Mid_R); IndicatorRelease(hEMA_Slow_R);
    IndicatorRelease(hEMA_Fast_E); IndicatorRelease(hEMA_Mid_E); IndicatorRelease(hEMA_Slow_E);
    IndicatorRelease(hRSI_E); IndicatorRelease(hATR_E); IndicatorRelease(hBB_E);
+   IndicatorRelease(hEMA_Slope_H1);
    for(int i=0;i<26;i++) ObjectDelete(0, dash_names[i]);
 
    SaveReviewState();  // v23.1: persist trade stats + intelligence on shutdown
@@ -2577,6 +2609,40 @@ double CalcATRPercentile(double current)
 }
 
 //+------------------------------------------------------------------+
+//| v26.40: HTF-SLOPE gate — 24h slope of the H1 EMA100.              |
+//| Series rebuilt once per H1 bar. CopyBuffer with ArraySetAsSeries: |
+//| slot [1] is the last COMPLETED H1 bar (shift 1), slot [0] is the  |
+//| forming bar (excluded from the slope), so the gate never sees an  |
+//| unfinished H1 close — the lab's completed-bar H1 index rule.      |
+//| Fail-open on data unavailability (warmup/history gap).            |
+//+------------------------------------------------------------------+
+bool HtfSlopeRebuild()
+{
+   datetime key = iTime(_Symbol, PERIOD_H1, 0);
+   if(key == 0) return false;                    // H1 history not available yet
+   if(key == g_htf_slope_key && g_htf_slope_count == HTF_SLOPE_SERIES) return true;
+   double buf[];
+   ArraySetAsSeries(buf, true);
+   int copied = CopyBuffer(hEMA_Slope_H1, 0, 0, HTF_SLOPE_SERIES, buf);
+   if(copied < HTF_SLOPE_SERIES) return false;
+   for(int i = 0; i < HTF_SLOPE_SERIES; i++) g_htf_slope_ema[i] = buf[i];
+   g_htf_slope_count = copied;
+   g_htf_slope_key = key;
+   return true;
+}
+
+// dir > 0 requires a rising 24h slope, dir < 0 a falling one.
+// Series index 1 = last completed H1 bar; index 1+HTF_SLOPE_BARS = 24 completed bars earlier.
+bool HtfSlopeOK(const int dir)
+{
+   if(!HtfSlopeRebuild()) return true;           // fail-open: data unavailable
+   double slope = g_htf_slope_ema[1] - g_htf_slope_ema[1 + HTF_SLOPE_BARS];
+   if(dir > 0 && slope <= 0.0) return false;
+   if(dir < 0 && slope >= 0.0) return false;
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| 5 CORE STRATEGIES                                                 |
 //+------------------------------------------------------------------+
 int StratPullback(double &score)
@@ -2803,6 +2869,23 @@ int GenerateSignal(string &sig_type)
 
    if(g_sig_is_band && (final_dir==0 || g_last_band_dir!=final_dir))
    { g_sig_is_band=false; g_sig_sl_atr=0; g_sig_tp_atr=0; }
+
+   // v26.40: OOS-autopsy participation gates (docs/OOS_AUTOPSY_20260915.md).
+   // Applied post-decision on the direction-matching legs — after the regime
+   // score bonus and the score threshold — exactly like the lab. Both inputs
+   // default false: inert, v26.39-identical behaviour when off. A vetoed
+   // band-fade plan is disarmed here so it cannot linger armed for a retry.
+   if(final_dir!=0)
+   {
+      const int gdir = final_dir;
+      if(g_sig_is_band) { g_sig_is_band=false; g_sig_sl_atr=0; g_sig_tp_atr=0; }
+      const bool has_pb  = (dirs[0]==gdir);   // PB leg fires in trade direction
+      const bool has_mom = (dirs[2]==gdir);   // MOM leg fires in trade direction
+      if(InpNoMomGate && has_mom)
+      { final_dir=0; skip_reason="gate-no-mom"; }
+      else if(InpHtfSlopeGate && has_pb && !HtfSlopeOK(gdir))
+      { final_dir=0; skip_reason="gate-htf-slope"; }
+   }
 
    if(final_dir!=0)
    {

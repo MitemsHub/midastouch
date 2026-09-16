@@ -100,7 +100,10 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
             m15_full_stack: bool = False,       # lab knob: PB requires full M15 EMA stack on trend side
             h1_sep: float | None = None,        # lab knob: override MIN_EMA_SEP for the H1 regime classifier
             disable_mr: bool = False,           # lab knob: mean-revert legs off
-            mom_confirm: bool = False) -> dict: # lab knob: PB requires a same-direction MOM body leg
+            mom_confirm: bool = False,          # lab knob: PB requires a same-direction MOM body leg
+            htf_slope_gate: bool = False,       # lab knob: PB-family entries must align with 24h slope of H1 EMA100
+            no_mom: bool = False,               # lab knob: veto any trade whose strat combo includes MOM
+            mr_mode: str | None = None) -> dict:  # lab knob: trend-aware MR (None=harness | trend_filter | htf_slope | both)
     assert_spec_integrity()
     blocked_hours = blocked_hours or set()
     m15, h1 = load("m15.csv"), load("h1.csv")
@@ -132,7 +135,8 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
 
     trades, veto = [], []
     funnel = {"score": 0, "spread-gate": 0, "risk-cap": 0, "paused": 0,
-              "auto-disable": 0, "time-block": 0, "family-throttle": 0}
+              "auto-disable": 0, "time-block": 0, "family-throttle": 0,
+              "no-mom": 0, "htf-slope": 0}
     pos = None
     cooldown_until = -1
     consec = 0
@@ -344,12 +348,24 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
                 legs.append(("MOM", 1, 3.0))
             elif body < 0 and abs(body) / rng_ > 0.55:
                 legs.append(("MOM", -1, 3.0))
+        def mr_dir_ok(mr_d):
+            # Amendment B trend-aware MR predicates; mr_mode None => always True (harness-inert)
+            if mr_mode in ("trend_filter", "both") and abs(eF[i] - eM[i]) > 0.35 * atr[i]:
+                return False
+            if mr_mode in ("htf_slope", "both"):
+                js = h1_idx(m15[i]["t"])
+                if h1[js]["t"] == m15[i]["t"] and js > 0:
+                    js -= 1
+                sl = hS[js] - hS[max(0, js - 24)]
+                if (mr_d > 0 and sl <= 0) or (mr_d < 0 and sl >= 0):
+                    return False
+            return True
         if (not disable_mr) and reg == RANGE and i >= 1 and rsi[i] is not None:
             bb_l = sma20[i] - 2 * bb_sd[i]
             bb_u = sma20[i] + 2 * bb_sd[i]
-            if closes[i - 1] <= bb_l and b["c"] > bb_l and rsi[i] < RSI_OS:
+            if closes[i - 1] <= bb_l and b["c"] > bb_l and rsi[i] < RSI_OS and mr_dir_ok(1):
                 legs.append(("MR", 1, 3.8))
-            if closes[i - 1] >= bb_u and b["c"] < bb_u and rsi[i] > RSI_OB:
+            if closes[i - 1] >= bb_u and b["c"] < bb_u and rsi[i] > RSI_OB and mr_dir_ok(-1):
                 legs.append(("MR", -1, 3.8))
         bf_geo_ok, bf_stop_f, bf_tgt_f = False, 0.0, 0.0
         if use_bandfade and reg in (RANGE, HVOL) and sig_init and warm:
@@ -421,6 +437,20 @@ def certify(equity0: float, blocked_hours: set[int] | None = None, *,
             continue
 
         strat = "+".join(n for n, d, _ in legs if d == ddir)
+
+        # ---- OOS-autopsy participation gates (docs/OOS_AUTOPSY_20260915.md) --
+        if no_mom and "MOM" in strat.split("+"):
+            funnel["no-mom"] += 1
+            continue
+        if htf_slope_gate and any(n == "PB" for n, d, _ in legs if d == ddir):
+            jg = h1_idx(m15[i]["t"])
+            if h1[jg]["t"] == m15[i]["t"] and jg > 0:
+                jg -= 1
+            slope_24h = hS[jg] - hS[max(0, jg - 24)]
+            # SELL requires falling H1 EMA100 slope; BUY requires rising
+            if (ddir > 0 and slope_24h <= 0) or (ddir < 0 and slope_24h >= 0):
+                funnel["htf-slope"] += 1
+                continue
 
         # ---- governor: auto-disable + probe ----------------------------------
         if strat in disabled:

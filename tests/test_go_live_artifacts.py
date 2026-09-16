@@ -50,14 +50,14 @@ def test_go_live_repository_artifacts_pass() -> None:
 def test_deploy_manifest_pins_both_engines_at_expected_versions() -> None:
     result = verify()
     assert result["manifest_pins_ok"], result["problems"]
-    assert result["version"] == "26.39"
+    assert result["version"] == "26.40"
     assert result["v75_version"] == "2.24"
 
 
 def test_engine_version_macros_match_pinned_versions() -> None:
     # A bump without a deliberate manifest re-pin must fail the suite —
     # this is the test that was missing while the v27.00 pin went stale.
-    assert '#define APP_VERSION "26.39"' in m_source()
+    assert '#define APP_VERSION "26.40"' in m_source()
     assert '#define ENGINE_VERSION "2.24"' in v_source()
 
 
@@ -243,6 +243,57 @@ def test_both_presets_share_the_go_live_magic() -> None:
     assert live["InpMagic"] == final["InpMagic"] == "7788075"
     assert live["InpLiveExecution"] == "true"
     assert final["InpLiveExecution"] == "false"
+
+
+def test_arm_d_forward_test_preset_is_paper_safe_and_frozen() -> None:
+    # Arm D carries the gated candidate (docs/OOS_AUTOPSY_20260915.md) into
+    # forward testing. It must stay paper-only, carry its own magic + arm tag
+    # (file-collision-free beside arm B), keep the tick recorder off (arm B
+    # owns the terminal's shared tick file), and hold the frozen geometry.
+    from scripts.verify_go_live_artifacts import read_set, verify_arm_d_preset
+    arm_d = read_set(ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_ARM_D_FWD.set")
+    assert arm_d["InpLiveExecution"] == "false"
+    assert arm_d["InpMagic"] == "7788150"
+    assert arm_d["InpArmTag"] == "D"
+    assert arm_d["InpTickRecordEnabled"] == "false"
+    assert arm_d["InpSelfCorrect"] == "false"  # no lab counterpart: off for parity
+    # frozen gated candidate: BOTH gates on, MR/BF/BO off, sprint geometry
+    assert arm_d["InpNoMomGate"] == "true"
+    assert arm_d["InpHtfSlopeGate"] == "true"
+    assert arm_d["InpUseMeanRevert"] == "false"
+    assert arm_d["InpUseBandFade"] == "false"
+    assert arm_d["InpUseBreakout"] == "false"
+    assert arm_d["InpPullbackMin"] == "0.60" and arm_d["InpPullbackMax"] == "0.70"
+    assert arm_d["InpTpMult"] == "1.6"
+    assert arm_d["InpPbEmaSideVeto"] == "true"
+    # drift from any pin fails the suite (protocol amendment required first)
+    assert not verify_arm_d_preset(ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_ARM_D_FWD.set")
+
+
+def test_participation_gates_are_inputs_inert_by_default_and_post_decision() -> None:
+    # v26.40 port of the OOS-autopsy gates: inputs exist, default OFF (exact
+    # v26.39 behaviour), and the veto applies AFTER the score decision with
+    # the band-fade plan disarmed on veto (no armed-retry straddle).
+    text = m_source()
+    assert "input bool   InpNoMomGate        = false;" in text
+    assert "input bool   InpHtfSlopeGate     = false;" in text
+    decision = text.index("int min_score_eff = EffectiveMinScore();")
+    gates = text.index("v26.40: OOS-autopsy participation gates")
+    assert decision < gates, "gates must be applied after the score decision"
+    block = text[gates:text.index("if(final_dir!=0)", text.index('"gate-htf-slope"', gates))]
+    assert "g_sig_is_band=false; g_sig_sl_atr=0; g_sig_tp_atr=0;" in block
+    assert '"gate-no-mom"' in text and '"gate-htf-slope"' in text
+
+
+def test_htf_slope_gate_uses_completed_h1_bars_and_fails_open() -> None:
+    # The gate must never read the FORMING H1 bar (the lab's completed-bar
+    # rule) and must fail OPEN when H1 data is unavailable (warmup/history
+    # gap) — a data outage must not silently change the strategy's exposure.
+    text = m_source()
+    body = text[text.index("bool HtfSlopeRebuild()"):text.index("//| 5 CORE STRATEGIES")]
+    assert "if(!HtfSlopeRebuild()) return true;" in body  # fail-open in HtfSlopeOK
+    assert "iTime(_Symbol, PERIOD_H1, 0)" in body        # H1-bar-keyed rebuild
+    assert "copied < HTF_SLOPE_SERIES) return false" in body
 
 
 def test_preset_drift_is_confined_to_declared_keys() -> None:

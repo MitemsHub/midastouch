@@ -95,7 +95,63 @@ dies".
   cycle dies in the same 3 months; whether that is a hostile regime or
   pervasive overfit is THE open question of the program.
 
-## 6. Deliverables
+## 6. Amendment C — gated variants on signal-bearing cells (2026-09-15, before any run)
+
+The autopsy's participation gates (HTF-SLOPE, NO-MOM) had not been run on
+any symbol's OOS except the home symbol. This amendment extends the scan
+to the gated variants on the two cells that ever showed signal:
+
+- **v75low_H1 × shipped config** (the only SCAN pass in the original
+  matrix) with HTF-SLOPE, NO-MOM, and BOTH. OOS runs only for SCAN
+  passers, same gates.
+- **v100 × rebuilt entry** (the +9.4R gross-signal cell) with the same
+  three gate variants — with the standing caveat: V100's 1.0-lot floor
+  makes DD structurally inflated at a $300 basis, so SCAN's DD bar is
+  expected to fail regardless; the cell is scored on signal presence
+  (totalR sign) and reported with the DD caveat.
+
+Each symbol runs in a fresh process with spec constants set before import
+(the spec-caching trap is now a recorded lesson). Frozen gates unchanged.
+
+## 7. Amendment C results (filled after the runs)
+
+**v75low_H1 × shipped (the original matrix's only SCAN pass):**
+
+| variant | IS | OOS |
+|---|---|---|
+| ungated | +10.51R, n=406, DD 25.7% — SCAN PASS | −3.97R, DD 33.8% — fail |
+| HTF_SLOPE | **+22.16R**, n=386, DD 24.3% — SCAN PASS | **−9.30R**, DD 34.5% — fail (worse than ungated) |
+| NO_MOM | −7.95R — scan fail | — |
+| BOTH | −17.88R — scan fail | — |
+
+**v100 × rebuilt entry:**
+
+| variant | IS (signal cell, DD caveat) |
+|---|---|
+| ungated | +9.40R, n=79, DD 49.5% (1.0-lot floor inflation) |
+| HTF_SLOPE | −3.08R — signal destroyed |
+| NO_MOM | −10.94R — signal destroyed |
+| BOTH | +4.55R — halved |
+
+**Verdict: still NO-EDGE under the frozen gates — and the gate matrix
+settles the transfer question in an unexpected direction.**
+- HTF-SLOPE, which doubled V75(1s)@H1's IS edge in isolation, makes its
+  OOS WORSE (−9.30R vs −3.97R) and destroys V100's signal cell (−3.08R).
+  The +22.16R replication row was in-sample optimization of a gate on
+  the same data that scored it — not transferable improvement.
+- NO-MOM, the home symbol's OOS fix, is poison on both alternative
+  symbols (V75(1s)@H1 −7.95R, V100 −10.94R): each symbol's edge, where
+  one exists, has a different composition, and home-symbol OOS fixes do
+  not transfer.
+- The one honest positive remains V100's ungated rebuilt cell (+9.40R,
+  DD-inflated by the 1.0-lot floor, re-confirmed +4.55R under BOTH) —
+  signal exists but no certifiable geometry at fundable scale.
+- Every alternative symbol/timeframe remains NO-EDGE under the frozen
+  gates; the family's tradeable edge stays specific to the 1-tick V75
+  at M15 (and even there, only the gated candidate qualifies for
+  forward testing).
+
+## 8. Deliverables
 
 `artifacts/train/CROSS_SYMBOL_SCAN.json` (gate matrix, all runs),
 changelog entry, updated OPERATING_SUMMARY question row. Engine code and

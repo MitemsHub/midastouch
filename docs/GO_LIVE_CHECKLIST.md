@@ -257,3 +257,31 @@ amendment yet; the monitor tracks it weekly.
 - B keeps paper-testing TP 2.4 until the A/B duel finishes, then is parked.
 - Withdraw weekly everything above a $100 working buffer (funding plan) — never
   drain below the $50 live floor.
+## AMENDMENT 2026-09-16 — Arm D registered (forward test of the gated candidate)
+
+- **What:** MitemshubAI **v26.40** (deploy-manifest pin `6459f3ad…`, compile
+  0/0) carrying the OOS-autopsy participation gates as inputs
+  (`InpNoMomGate`, `InpHtfSlopeGate` — inert by default, default = exact
+  v26.39 behaviour) and `InpArmTag` (suffixes ALL Files output so multiple
+  arms can share one terminal+symbol).
+- **Where:** dedicated paper terminal 49E0 (`MitemshubMT5_B`), chart
+  `Default/chart03` — Volatility 75 Index, M15 — magic **7788150**,
+  `InpArmTag=D`, paper-only, $50 virtual, 24/7. First init banner
+  2026-09-16 00:38:04 local; tagged ledger/telemetry/era verified.
+- **Preset:** `MitemshubAI_VOL75_ARM_D_FWD.set` — the frozen gated candidate
+  (SPRINT finalist 1 + BOTH gates). Preset pins are contract-tested
+  (`test_arm_d_forward_test_preset_is_paper_safe_and_frozen`); drift fails
+  the suite. TickRecorder stays OFF on arm D (arm B owns the terminal's
+  shared tick file — the recorder canary skips tagged arms).
+- **Adjudication:** pre-registered in `docs/ARM_D_FORWARD_TEST.md` BEFORE
+  the first trade; first reading 2026-10-01. **Arm D is NOT a gate input**
+  for the arm-A/B TJ1 adjudication — it is the independent-window judge of
+  the gated candidate only.
+- Morning status now discovers arm D (`D_fwd`) via `InpMagic=7788150` +
+  `InpArmTag=D` on the chart, resolving the `_D` file pair; unregistered
+  arm tags fail closed.
+- Ops note from the rollout: arm B found PAUSED (consecutive-loss breaker,
+  journal 00:30) with telemetry stale — its loop is alive (TickRecorder
+  summaries advancing); it resumes on the next session day per v23 policy.
+  Also fixed: the tick-archive canary now judges by latest-file mtime, not
+  today's date tag (midnight false alarm 00:41).
