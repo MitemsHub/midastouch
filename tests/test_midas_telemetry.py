@@ -285,9 +285,14 @@ def _ledger_grammar_consumers() -> list[str]:
 
 def test_consumer_enumerate_matches_the_hand_list() -> None:
     consumers = set(_ledger_grammar_consumers())
-    assert {"midas_verdict", "midas_parity", "v28_sweep_runner",
-            "morning_status", "midas_watchdog", "ab_adjudicate",
-            "adjudicate_arm_c", "deploy_portfolio"} <= consumers, (
+    known = {"midas_verdict", "midas_parity", "v28_sweep_runner",
+             "morning_status", "midas_watchdog", "ab_adjudicate",
+             "adjudicate_arm_c", "deploy_portfolio"}
+    # consumers are asserted only where they exist in the tree — the
+    # standalone MIDASTOUCH repo keeps a subset of the shared scripts/
+    missing_module = {n for n in known
+                      if not (REPO / "scripts" / f"{n}.py").exists()}
+    assert (known - missing_module) <= consumers, (
         "the known consumers must always be enumerated; the dynamic scan "
         "broke — fix the scan, not the list")
 
@@ -310,12 +315,19 @@ def test_every_enumerated_consumer_tolerates_appends(tmp_path):
     from v28_sweep_runner import ledger_flatness
     f = ledger_flatness(p)
     assert f["flat"] and f["closed"] == 1
-    from ab_adjudicate import parse_ledger as ab_parse
-    ab_trades, _curve, _integ = ab_parse(p)
-    assert len(ab_trades) == 1 and ab_trades[0]["r"] == -0.750
-    from adjudicate_arm_c import parse_ledger as c_parse
-    c_trades = c_parse(p, "paper")
-    assert c_trades, "arm-c reader must still pair the appended rows"
+    import importlib.util as _ilu
+
+    def _module_exists(name: str) -> bool:
+        return _ilu.find_spec(name) is not None
+
+    if _module_exists("ab_adjudicate"):
+        from ab_adjudicate import parse_ledger as ab_parse
+        ab_trades, _curve, _integ = ab_parse(p)
+        assert len(ab_trades) == 1 and ab_trades[0]["r"] == -0.750
+    if _module_exists("adjudicate_arm_c"):
+        from adjudicate_arm_c import parse_ledger as c_parse
+        c_trades = c_parse(p, "paper")
+        assert c_trades, "arm-c reader must still pair the appended rows"
     from midas_watchdog import ledger_health
     h = ledger_health(p, now_s=0.0)
     assert h["flat"] and h["closed"] == 1 and not h["problems"]
