@@ -1,8 +1,0 @@
-# Terraform state and secrets
-*.tfstate
-*.tfstate.backup
-*.tfvars
-!terraform.tfvars.example
-.terraform/
-.terraform.lock.hcl
-crash.log
