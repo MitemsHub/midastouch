@@ -427,6 +427,20 @@ Compiled 0 errors / 0 warnings via the scratch tool with before/after proof
 that the deployed paper, LIVE and parity binaries were never touched
 (VPS-era sync source intact). Per the queue: v1.17 deploys to arms only in
 its registered era, after the 2026-10-01 reading.
+**v1.17 cert chain ARMED (2026-09-18 15:42 UTC):**
+`scripts/midas_cert_chain_v117.py` (running detached) sequences the deploy-
+path certification behind the pending v1.16 baseline: (1) wait for the v1.16
+scheduler's terminal event (jsonl contract; staleness takeover at 35 min
+re-runs the v1.16 cert itself if the scheduler dies — the baseline cannot be
+lost to a dead process); (2) refresh the parity shadow to the v1.17 build
+(byte-identity verified, unchanged-build refused, compile via the scratch
+tool); (3) run the same registered harness command against the refreshed
+shadow, retry-on-flat-gate every 20 min. Ordering law: the v1.16 cert runs
+on the shadow AS-IS — the shadow is never swapped before the baseline is
+certified. 19 hermetic pins (`tests/test_midas_cert_chain_v117.py`); chain
+events append to `artifacts/midas_cert_chain_v117_*.jsonl`. The deploy path
+(v1.17 shadow certified) is thereby reached automatically at the next flat
+window even across session restarts.
 
 ## 3. Sequencing
 
