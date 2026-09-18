@@ -400,6 +400,18 @@ which is precisely the multi-axis overfitting shape the protocol's
 one-amendment-at-a-time law exists to prevent. The monotonicity endpoint
 makes P4 falsifiable without granting it authority to re-tune P1–P3.
 
+| P5 | **Adaptive trigger-threshold variant** (`MODE_ADAPTIVE`; REGISTERED 2026-09-18 on operator directive — "switch the live arm to a higher-frequency variant that fires more per day and is intelligent, learns and self-adjusts" — as a queued experiment, not a pre-reading change) | Entry density is a tunable tradeoff, not a fixed choice. Context (2026-09-18 census, this register's GO-LIVE block): ORIGINAL fires ~0.9×/day while t/m fire 26–30× more densely — and ALL 8 fixed variants are NO-SHIP on the frozen gates (`midas_sweep_verdict_20260916.json`: t and m fail G3/G4 exactly like everything else). Hypothesis: a trigger threshold θ (BB k-multiple / RSI band width) that adapts stepwise within HARD registered bounds [θmin, θmax] can reach ≥3× ORIGINAL's fill density WITHOUT failing G3/G4 — i.e. frequency bought by adaptation, not by shipping a known-bad static point | **Telemetry-first:** append `thr`, `thr_era_id`, and per-era signal-density to CLOSE rows (§1-safe, never-abort class). **Amendment — the lawfully self-adjusting engine:** `scripts/midas_adaptive.py`, a pre-registered online hill-climb (cadence: one adaptation step per 20 closed trades; fixed step δ; tie-break toward θmax = the conservative, rarer-signal end) proposes the next era's θ from trailing realized expectancy. Proposals land as artifacts + a register line each, and deploy through the EXISTING era machinery (re-splice + watchdog pin verification) — **the EA never mutates its own parameters mid-era; "self-adjusting" means an autonomous, fully-logged amendment pipeline, not in-place mutation.** Adaptation's authority is the threshold ONLY: risk %, breaker, SL/TP multipliers, session window and spread cap are outside its reach by construction | Paper trial on a dedicated arm (**M1a**, fresh ledger; ORIGINAL arm M1 stays unmodified as the control). Primary endpoint is JOINT — all three required: G3 pf ≥ 1.30 AND G4 expectancy ≥ +0.15R over the pre-registered window (the gates t/m fail today) AND fill density ≥ 3× ORIGINAL's same-period baseline. Pre-registered kill/revert rules: trailing 20-trade expectancy < −0.30R freezes adaptation at θmax for the rest of the window; any proposal crossing the hard bounds voids the experiment outright (REJECTED; re-registration requires explicit operator action); two consecutive full-loss days revert to the most conservative θ and stop adaptation (mirrors the live-arm breaker reasoning) |
+
+**Why P5 last (with one fallback):** an adapting trigger must adapt AROUND
+measured structure, not discover it — P5 composes whatever layers survive
+P1–P3 as its context signal, and inherits P4's measured k→expectancy curve
+when one exists. It is deliberately sequenced after the P-series for the
+same reason P4 is conditional. Fallback: if P4 voids per its own condition
+(fewer than three of P1–P3 survive), P5 may run directly after P3, using
+only the surviving layers as context. P5 is the first registered answer to
+the operator's frequency requirement that does not ship a NO-SHIP variant
+to make the live arm busier.
+
 ## 3. Sequencing
 
 1. **Now → 2026-10-01:** nothing deploys. R1–R4 sit in-tree compiled and
@@ -414,12 +426,14 @@ makes P4 falsifiable without granting it authority to re-tune P1–P3.
    parity-gated era), then R6/R7b/R8/R9 in operator-chosen order, each with
    its own era. Both binaries are compiled and shadow-pinned; neither
    deploys before the reading.
-4. **Then, P-series (§2b), one experiment per era, P1 → P2 → P3 → P4:**
+4. **Then, P-series (§2b), one experiment per era, P1 → P2 → P3 → P4 → P5:**
    each starts with its telemetry-first build (P-T, §1-safe appends) and
    only proceeds to its decision-path amendment if the layer's raw signal
    justifies it. The R-series order above is unaffected; the P-series
    begins only after R6/R7b/R8/R9 are all adjudicated, and the P4 row is
-   void if fewer than three of P1–P3 survive.
+   void if fewer than three of P1–P3 survive. P5 runs after P4 (or directly
+   after P3 if P4 voids) — it is the operator-directed frequency answer and
+   adapts around whatever structure the earlier P-rows measured.
 4. **Live gate (post-VALIDATED):** deploy the v1.1x line with R1–R4 + the
    offset verification per health guide §4; the GO_LIVE_CHECKLIST governs.
 
