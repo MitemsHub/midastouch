@@ -307,6 +307,37 @@ def main() -> None:
         sec5 = {"error": str(e)}
     report["sections"]["funnel_diff"] = sec5
 
+    # ---- [6] forward-test accrual, every registered arm --------------------
+    print("\n[6] FORWARD-TEST ACCRUAL (pre-registered verdict clocks)")
+    try:
+        from armd_accrual import ARMS, accrue as arm_accrue, _print as arm_print
+        sec6 = {"by_arm": {}}
+        for arm in sorted(ARMS):            # D today; E joins when its ledger exists
+            try:
+                a = arm_accrue(append=True, arm=arm)   # idempotent per arm per day
+                arm_print(a)
+                sec6["by_arm"][arm] = a
+            except SystemExit as e:         # pre-start arm or missing ledger
+                print(f"  arm {arm} unavailable: {e}")
+                sec6["by_arm"][arm] = {"error": str(e)}
+    except Exception as e:              # the weekly leg must survive any single-tool crash
+        print(f"  unavailable: {e}")
+        sec6 = {"error": str(e)}
+    report["sections"]["accrual"] = sec6
+
+    # ---- [7] MIDASTOUCH §13 monthly verdict, every ledger-bearing arm ------
+    print("\n[7] MIDASTOUCH §13 MONTHLY VERDICT (frozen gates, computed not stored)")
+    try:
+        from midas_verdict import run as midas_verdict_run
+        sec7 = midas_verdict_run()             # read-only; no artifact to drift
+    except SystemExit as e:            # no gold ledgers on this machine yet
+        print(f"  unavailable: {e}")
+        sec7 = {"error": str(e)}
+    except Exception as e:             # the weekly leg must survive any single-tool crash
+        print(f"  unavailable: {e}")
+        sec7 = {"error": str(e)}
+    report["sections"]["monthly_verdict"] = sec7
+
     # ---- actions ----------------------------------------------------------
     print("\nNEXT ACTIONS")
     acts = []
@@ -329,6 +360,16 @@ def main() -> None:
                     "precondition unmet until the amendment lands")
     elif av.startswith("WATCH"):
         acts.append(f"arm-C sizing truth table flagged {av} — review the $100 row at the next protocol review")
+    for arm, a in (sec6.get("by_arm", {}) if isinstance(sec6, dict) else {}).items():
+        av = (a.get("row", {}).get("verdict")
+              if isinstance(a, dict) and "row" in a else "")
+        if av == "VALIDATED":
+            acts.append(f"arm-{arm} forward test VALIDATED (pre-registered gates met) — open "
+                        "its forward-test doc and run the post-window review before "
+                        "any live decision cites it")
+        elif av == "REJECTED":
+            acts.append(f"arm-{arm} forward test REJECTED (pre-registered gates breached) — "
+                        "record the verdict and stand the candidate down")
     for a in acts[:6]:
         print(f"  - {a}")
     report["actions"] = acts

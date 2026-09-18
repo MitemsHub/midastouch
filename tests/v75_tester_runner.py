@@ -12,6 +12,9 @@ Hard-won gotchas encoded here:
     discriminator between what you asked to run and what actually ran.
   * The agent log is append-only: snapshot file sizes before launching and
     parse only the appended bytes, so runs never read each other's lines.
+  * A /config launch against an ALREADY-RUNNING terminal is a silent
+    single-instance no-op (2026-09-15 /portable, 2026-09-16 10:22 retry):
+    run_pass now fast-fails on it instead of burning the full timeout.
 
 Opt-in tier: set V75_TESTER_TESTS=1 (needs the local MT5 surface; two passes
 take ~3 minutes on the 71-day real-tick window that lives fully in the local
@@ -98,6 +101,38 @@ def journal_has_tag(tag: str, snaps: dict[Path, int] | None = None) -> bool:
     return False
 
 
+def _terminal_running() -> bool:
+    """Is the tester terminal's process currently alive?
+
+    Matched on the full executable path (case-insensitive), so the other MT5
+    installs on this machine (FB9A, MitemshubMT5_C) never false-positive.
+    """
+    out = subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         "(Get-CimInstance Win32_Process -Filter \"Name='terminal64.exe'\" | "
+         "Where-Object {$_.ExecutablePath} | ForEach-Object {$_.ExecutablePath})"],
+        capture_output=True, text=True, timeout=30,
+    ).stdout
+    want = os.path.normcase(str(TERMINAL_EXE))
+    return any(os.path.normcase(ln.strip()) == want for ln in out.splitlines())
+
+
+def _wait_terminal_exit(timeout_s: float) -> bool:
+    """True once the terminal is NOT running, waiting up to `timeout_s`.
+
+    The tester self-exits after each pass (ShutdownTerminal=1) but teardown
+    can lag the report by a few seconds; a pass-to-pass launch must not be
+    condemned for that. Observed full passes run ~15 s, so 30 s is generous.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if not _terminal_running():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(2.0)
+
+
 def run_pass(tag: str, tester_inputs: dict[str, str], timeout_s: int = PASS_TIMEOUT_S,
              dates: tuple[str, str] = ("2026.07.01", "2026.09.10"),
              expert: str = r"V75MacroEngine\V75MacroEngine",
@@ -121,6 +156,19 @@ def run_pass(tag: str, tester_inputs: dict[str, str], timeout_s: int = PASS_TIME
     report = report_path(tag)
     report.unlink(missing_ok=True)
     snaps = journal_snapshots()
+
+    # Single-instance fast-fail (2026-09-16: costed one 900 s timeout when the
+    # direct-launch retry hit a live terminal). A /config launch against an
+    # already-running terminal is a silent no-op — no report, no agent journal
+    # — so fail here, with the fix in the message, instead of at timeout.
+    if not _wait_terminal_exit(30.0):
+        raise RuntimeError(
+            f"terminal64.exe ({TERMINAL_EXE}) is already running — a /config "
+            f"launch would be a silent single-instance no-op. Stop the terminal "
+            f"first (its paper arm's ledger read + confirmed flat), then rerun: "
+            f"see V28_RESEARCH_PROTOCOL.md §2 terminal-host precondition and "
+            f"scripts/v28_sweep_runner.py, which enforces the stop/flat-check/"
+            f"sweep/relaunch discipline end to end.")
 
     subprocess.Popen([str(TERMINAL_EXE), f"/config:{ini_path}"])
 

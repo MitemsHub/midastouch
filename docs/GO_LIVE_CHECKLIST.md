@@ -55,13 +55,13 @@ execute until the gate says go.**
       `InpMagic=7788075`, `InpTpMult=1.8`, `InpPaperEquity=50.0` (inert in live),
       `InpFleetMagicsCSV=...,7788075,7788100` (A and B both in the account-wide
       fleet guard — both must stay in the CSV; B stays paper).
-- [ ] EA build = v26.39 (`MitemshubAI.mq5` + compiled `.ex5` synced; the same
+- [ ] EA build = v26.40 (`MitemshubAI.mq5` + compiled `.ex5` synced; the same
       build that has run paper arms — no unverified build ever goes live first).
       v26.38 is the paper fill-model parity build: hard SL/TP fill per tick at
       the resting level, mirroring broker-side resting orders (changelog
       2026-09-15). The live book's fills are unchanged by this fix.
-      v26.39 adds the ledger ERA provenance stamp (banner line `PAPER ledger
-      era stamp`); statistics consumers separate pre/post-boundary trades
+      v26.39 added the ledger ERA provenance stamp (banner line `PAPER ledger
+      era stamp`); v26.40 adds the `InpArmTag` multi-arm file suffixes; statistics consumers separate pre/post-boundary trades
       via scripts/era.py — the gate clock is post-era only.
 
 ## Procedure — terminal A, chart01, V75 M15
@@ -75,9 +75,9 @@ execute until the gate says go.**
 
    | expected line (exact markers) | meaning |
    |---|---|
-   | `MITEMSHUB AI v26.39 started ... Standard Mode` + `PAPER ledger era stamp: 26.39` | correct build |
+   | `MITEMSHUB AI v26.40 started ... Standard Mode` + `PAPER ledger era stamp: 26.40` | correct build (must match the repo's APP_VERSION; the read-only rehearsal checks this: `python scripts/go_live_rehearsal.py`) |
    | **NO `PAPER MODE:` line** | the discriminator — live, not paper |
-   | `FIT ROUTER: instruments vs a $50.00 account` (or your funded $) | live balance read |
+   | `FIT ROUTER:` line naming the symbol and a `$` balance read (wording has evolved across builds; must show the live-balance fit check) | live balance read |
    | `Volatility 75 Index min-lot stop-risk $X.XX ... TOLERATED, each trade risks Y.Y% of equity` | sizing fits at $50 (expect X ≈ 4.5–6.5, Y ≈ 9–13% depending on current ATR) |
    | `RiskCap=20%` line + `WARNING: risk cap > 10% — tiny-account mode.` | expected at $50, not an error |
    | `[SELFTEST] ... OK`, `GARCH ready`, `Telemetry -> ...`, `State -> ...` | engine initialized |

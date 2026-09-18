@@ -245,6 +245,34 @@ def test_both_presets_share_the_go_live_magic() -> None:
     assert final["InpLiveExecution"] == "false"
 
 
+def test_live_preset_carries_the_certified_geometry() -> None:
+    # 2026-09-16 rehearsal finding: the LIVE set was a 7-line stub, so a fresh
+    # attach + Load booted InpTpMult at the 2.4 default instead of the
+    # certified tp18 geometry the truth table and certified chain are built
+    # on. The executed surface's pins are mandatory now.
+    from scripts.verify_go_live_artifacts import read_set
+    live = read_set(ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_LIVE.set")
+    assert live["InpTpMult"] == "1.8"                 # certified tp18 geometry
+    assert live["InpRiskPerTrade"] == "0.005"
+    assert live["InpMaxEffectiveRiskPct"] == "20.0"
+    assert live["InpPaperEquity"] == "50.0"
+    assert "7788075" in live["InpFleetMagicsCSV"]     # A
+    assert "7788100" in live["InpFleetMagicsCSV"]     # B stays guarded
+
+
+def test_live_and_final_mirror_the_certified_surface() -> None:
+    # Both presets carry the complete executed surface (arm A's chart); the
+    # only legitimate difference is the execution switch (+ the per-arm tick
+    # recorder). A one-sided completion is intent drift by definition.
+    from scripts.verify_go_live_artifacts import read_set
+    live = read_set(ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_LIVE.set")
+    final = read_set(ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_FINAL.set")
+    keys = set(live) | set(final)
+    assert len(keys) >= 70, "preset regression to a stub"
+    differing = {k for k in keys if live.get(k) != final.get(k)}
+    assert differing <= {"InpLiveExecution", "InpTickRecordEnabled"}, differing
+
+
 def test_arm_d_forward_test_preset_is_paper_safe_and_frozen() -> None:
     # Arm D carries the gated candidate (docs/OOS_AUTOPSY_20260915.md) into
     # forward testing. It must stay paper-only, carry its own magic + arm tag
@@ -268,6 +296,127 @@ def test_arm_d_forward_test_preset_is_paper_safe_and_frozen() -> None:
     assert arm_d["InpPbEmaSideVeto"] == "true"
     # drift from any pin fails the suite (protocol amendment required first)
     assert not verify_arm_d_preset(ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_ARM_D_FWD.set")
+
+
+def test_arm_a2_restart_preset_is_paper_safe_and_frozen() -> None:
+    # Arm A2's pre-drafted preset is a BUILD CONTRACT (the forward EA does not
+    # exist yet): it must stay paper-only, carry arm A's ORIGINAL slot 7788075
+    # + tag A2 (arm B keeps 7788100; the retired arm-E magic 7788175 must
+    # never appear anywhere), $1,000 virtual basis, tick recorder off, and
+    # the frozen tp2.0 strategy surface.
+    from scripts.verify_go_live_artifacts import (
+        EXPECTED_ARM_A2_FLEET, read_set, verify_arm_a2_preset)
+    arm_a2 = read_set(ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_ARM_A2.set")
+    assert arm_a2["InpLiveExecution"] == "false"
+    assert arm_a2["InpMagic"] == "7788075"
+    assert arm_a2["InpArmTag"] == "A2"
+    assert arm_a2["InpPaperEquity"] == "1000.0"
+    assert arm_a2["InpTickRecordEnabled"] == "false"
+    # frozen tp2.0 candidate (ARM_A2_RESTART.md §2):
+    assert arm_a2["InpStrategyMode"] == "3"
+    assert arm_a2["InpStopATRMultiplier"] == "2.0"
+    assert arm_a2["InpTargetATRMultiplier"] == "2.0"
+    assert arm_a2["InpMaxHoldMinutes"] == "180"
+    assert arm_a2["InpRiskFraction"] == "0.01"
+    # fleet guard visibility: A2's slot is IN the CSV (already there as arm
+    # A's), arm D's still there, retired arm-E magic ABSENT everywhere
+    assert arm_a2["InpFleetMagicsCSV"] == EXPECTED_ARM_A2_FLEET
+    assert "7788150" in arm_a2["InpFleetMagicsCSV"]
+    assert "7788175" not in arm_a2["InpFleetMagicsCSV"]
+    # .set values must be bare: no inline ';' comment can pollute a value
+    # (the failure mode the verifier caught in the first draft of this file)
+    for k, v in arm_a2.items():
+        assert ";" not in v, f"{k}={v!r} carries an inline comment"
+    # drift from any pin fails the suite (protocol amendment required first)
+    assert not verify_arm_a2_preset(
+        ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_ARM_A2.set")
+
+
+def test_arm_a2_floor_mode_policy_is_pinned() -> None:
+    """§2 amendment (2026-09-16): the strangulation-zone contract is a pinned
+    constant set, not an EA default. If any value drifts, verification must
+    fail loudly — the policy exists so the account can always trade."""
+    from scripts.verify_go_live_artifacts import (
+        ARM_A2, EXPECTED_ARM_A2_FLEET, read_set, verify_arm_a2_preset)
+    arm_a2 = read_set(ARM_A2)
+    # frozen floor-mode policy: hard −30% drawdown stop, conviction bar ON,
+    # and the guard cap made explicit (was implicit before the amendment)
+    assert arm_a2["InpMaxTotalRiskPct"] == "15.0"
+    assert arm_a2["InpFloorModeMaxDDPct"] == "30.0"
+    assert arm_a2["InpFloorModeConviction"] == "true"
+    # materiality-conditioned conviction bar (§2 amendment 2, 2026-09-16):
+    # A2's ~1.28% min-lot overage must NOT be throttled by the strong-trigger
+    # bar (0/800 observed confluences); only a material overage pays it
+    assert arm_a2["InpFloorModeConvictionMinRiskPct"] == "2.5"
+    # full fail-closed pin check still passes with the new keys
+    assert verify_arm_a2_preset(ARM_A2) == []
+
+
+def test_floor_mode_engine_contract_in_source() -> None:
+    """The policy lives in the forward build's source, ordered exactly as the
+    contract states: identity evidence print -> hard drawdown stop -> raised
+    entry bar -> account-budget guard -> take the minimum lot."""
+    from scripts.verify_go_live_artifacts import ROOT
+    src = (ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_v28_fwd.mq5").read_text(
+        encoding="utf-8", errors="replace")
+    # inputs exist (tester-visible, so any future tester run proves its policy)
+    import re as _re
+    for key in ("InpFloorModeMaxDDPct", "InpFloorModeConviction",
+                "InpFloorModeConvictionMinRiskPct"):
+        assert _re.search(rf"input\s+\w+\s+{key}\s*=", src), key
+    # the paper path sets the trigger BEFORE sizing so the policy reads the
+    # real signal name
+    paper_path = src.find("PAPER PATH (v26.40)")
+    set_trigger = src.find("g_entry_trigger = trigger;", paper_path)
+    calc = src.find("CalculateVolume(entry, atr, volume, risk_money)", paper_path)
+    assert 0 < set_trigger < calc
+    # policy order inside the floor-mode branch
+    floor_branch = src.find("FLOOR MODE: min lot risks $")
+    halt = src.find("FloorModePolicyAllows(min_lot_risk)", floor_branch)
+    budget = src.find("AccountBudgetAllows(min_lot_risk)", floor_branch)
+    volume_take = src.find("volume = min_volume;", floor_branch)
+    assert 0 < floor_branch < halt < budget < volume_take
+    # halt fires on the hard floor vs WINDOW-START equity (g_paper_start),
+    # not current equity — no drawdown laundering across restarts
+    policy = src.find("bool FloorModePolicyAllows")
+    body = src[policy:policy + 1600]
+    assert "g_paper_start" in body and "PaperEquity()" in body
+    # the conviction bar is materiality-conditioned: the gate reads
+    # min_lot_risk/veq against InpFloorModeConvictionMinRiskPct BEFORE
+    # IsStrongTrigger — below the bar the strong class is not demanded
+    gate = src.find("InpFloorModeConviction &&")
+    gate_body = src[gate:gate + 400]
+    assert "InpFloorModeConvictionMinRiskPct" in gate_body
+    assert gate_body.index("InpFloorModeConvictionMinRiskPct")
+    assert gate_body.index("IsStrongTrigger")
+    # and the stand-down print discloses the bar it enforces
+    assert "bar) — standing down" in src
+    # tester path untouched: the research contract still blocks without the
+    # policy (parity safety)
+    assert "Research contract, byte-faithful" in src
+    assert src.find("if(!PaperActive())") < src.find("else if(min_lot_risk > risk_money")
+
+
+def test_arm_a2_cross_artifact_consistency_parity_and_accrual() -> None:
+    # The preset's strategy surface must equal the parity harness's pins
+    # exactly (the parity run and the forward preset test the SAME candidate
+    # or the precondition is meaningless), and the accrual registry must hold
+    # arm A2 pre-start (start=None, tag-A2 ledger glob).
+    import sys
+    from scripts.verify_go_live_artifacts import (
+        read_set, verify_arm_a2_consistency)
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from build_parity import INPUT_PINS as PARITY_PINS
+    from armd_accrual import ARMS
+    problems = verify_arm_a2_consistency()
+    assert problems == [], problems
+    arm_a2 = read_set(ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_ARM_A2.set")
+    for key, want in PARITY_PINS.items():
+        assert arm_a2[key] == want or (
+            abs(float(arm_a2[key]) - float(want)) < 1e-9), \
+            f"preset {key}={arm_a2[key]!r} != parity pin {want!r}"
+    assert ARMS["A2"]["start"] is None
+    assert str(ARMS["A2"]["ledger_glob"]).endswith("_A2.csv")
 
 
 def test_participation_gates_are_inputs_inert_by_default_and_post_decision() -> None:

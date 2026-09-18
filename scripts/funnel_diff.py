@@ -13,12 +13,18 @@ drill's honesty guards):
     drill finding F4)
   - rates differ > RATIO_DRIFT x                -> drifted (Outcome B input)
   - else                                        -> match (within regime)
-  - account-guard: special. Replay has no account guard (n/a). Any paper firing
-    is classified PER FIRING by timestamp against the v26.37 deploy (2026-09-15
-    12:19:45 local, when FleetOpenRisk learned to mirror the virtual book):
-    all-pre-deploy = CLASSIFIED closed class (informational, not flagged);
-    any post-deploy firing = DEFECTIVE, a NEW defect, never blended into a
-    strategy cause.
+  - account-guard: special. Replay has no account guard (n/a). Every paper
+    firing is classified PER FIRING from its own operands + the host arm's
+    ledger state at the firing instant (2026-09-16 investigation: a blunt
+    post-deploy timestamp rule mis-flagged two correct vetoes):
+      position open  AND fleet ~ $0        -> DEFECT (v26.37 mirror blind)
+      no position    AND fleet > $0        -> DEFECT (phantom fleet risk)
+      otherwise                           -> WORKING (designed veto: the
+      account-budget guard refusing a min-lot entry that busts
+      InpMaxTotalRiskPct on shrunken virtual equity — the documented
+      small-account/strangulation regime, never a strategy defect)
+    pre-v26.37-deploy firings stay the closed $0-basis class (informational).
+    Any DEFECT flags the row; WORKING vetoes are reported, never flagged.
   - meta-label / time-block / family-throttle: expected ~0 BOTH sides; nonzero
     either side = CONFIG DRIFT (the replay has no meta table either).
 
@@ -78,6 +84,77 @@ RATIO_DRIFT = 2.0
 # v26.37 deploy (FleetOpenRisk virtual-book mirror) — journal-local time.
 V37_DEPLOY = datetime(2026, 9, 15, 12, 19, 45)
 
+# The account-guard journal line carries its own evidence: build tag and the
+# three guard operands (fleet risk, candidate risk, cap).
+GUARD_LINE = re.compile(
+    r"\[v([\d.]+)\].*ACCOUNT GUARD: fleet \$([\d.]+) \+ new \$([\d.]+) "
+    r"> cap \$([\d.]+)", re.I)
+# ~$0.005 tolerance: the journal prints 2 decimals.
+EPS = 0.005
+
+
+def ledger_for_host(root: str) -> str | None:
+    """The arm's paper ledger on this host (tagged file preferred)."""
+    files = os.path.join(os.path.expandvars(root), "MQL5", "Files")
+    for pat in ("MitemshubAI_paper_*_B.csv", "MitemshubAI_paper_Volatility_75_Index.csv"):
+        hits = sorted(glob.glob(os.path.join(files, pat)))
+        if hits:
+            return hits[-1]
+    return None
+
+
+def ledger_state_at(ledger: str | None, when: datetime) -> tuple[bool, float | None]:
+    """Sequential pairing on the single-position paper book: is a position
+    open at `when`, and what was the virtual equity after the last CLOSE
+    before `when`? (The EA enforces InpSameSymbolMaxPos=1, so OPEN/CLOSE
+    sequence pairing is valid.)"""
+    if not ledger or not os.path.exists(ledger):
+        return False, None
+    open_at_t, veq = False, None
+    for line in open(ledger, encoding="utf-8", errors="replace"):
+        p = line.strip().split(",")
+        if len(p) < 8 or p[0] not in ("OPEN", "CLOSE"):
+            continue
+        try:
+            ts = datetime.fromtimestamp(int(p[1]))
+            if ts > when:
+                break
+        except (ValueError, OSError, OverflowError):
+            continue
+        if p[0] == "OPEN":
+            open_at_t = True
+        else:
+            open_at_t = False
+            try:
+                veq = float(p[7])
+            except ValueError:
+                pass
+    return open_at_t, veq
+
+
+def classify_guard_firing(firing: dict) -> tuple[str, list[str]]:
+    """The frozen taxonomy, mechanical from the firing's own evidence."""
+    notes = []
+    if firing.get("post_deploy") is None:
+        return "UNCLASSIFIED — firing time unparseable", notes
+    if not firing.get("post_deploy", True):
+        return "pre-v26.37 (closed $0-basis class)", notes
+    fleet, veq = firing.get("fleet", 0.0), firing.get("veq_at_fire")
+    open_at_t = firing.get("position_open", False)
+    if open_at_t and fleet <= EPS:
+        return "DEFECT (mirror blind: position open, fleet read $0)", notes
+    if (not open_at_t) and fleet > EPS:
+        return "DEFECT (phantom fleet risk: no open position)", notes
+    if veq:
+        cap_pct = firing["cap"] / veq * 100.0
+        new_pct = firing["new"] / veq * 100.0
+        notes.append(f"veq ${veq:.2f}; cap = {cap_pct:.1f}% of veq (InpMaxTotalRiskPct=15 "
+                     f"expected); new trade = {new_pct:.1f}% of veq")
+    else:
+        notes.append("virtual equity unavailable (no ledger evidence) — veto accepted "
+                     "on operand shape alone")
+    return "WORKING (designed veto: account-budget guard on shrunken equity)", notes
+
 LINE_TIME = re.compile(r"^\S*\s+\S+\s+(\d{2}:\d{2}:\d{2})")
 
 
@@ -86,6 +163,7 @@ def grep_host(host: str, root: str) -> dict:
     the firing timestamps for account-guard, and the journal day window."""
     counts = {k: 0 for k in PATTERNS}
     guard_fire_times: list[str] = []
+    guard_details: list[dict] = []
     days: list[str] = []
     logdir = os.path.join(os.path.expandvars(root), "MQL5", "Logs")
     for jf in sorted(glob.glob(os.path.join(logdir, "*.log"))):
@@ -100,11 +178,26 @@ def grep_host(host: str, root: str) -> dict:
             counts[k] += len(hits)
             if k == "account-guard" and hits:
                 for line in txt.splitlines():
-                    if pat.search(line):
-                        m = LINE_TIME.match(line)
-                        if m:
-                            guard_fire_times.append(f"{day} {m.group(1)}")
+                    m = pat.search(line)
+                    if not m:
+                        continue
+                    g = GUARD_LINE.search(line)
+                    tm = LINE_TIME.match(line)
+                    if tm:
+                        guard_fire_times.append(f"{day} {tm.group(1)}")
+                    if g:
+                        guard_details.append({
+                            "at": f"{day} {tm.group(1)}" if tm else day,
+                            "host": host, "build": g.group(1),
+                            "fleet": float(g.group(2)),
+                            "new": float(g.group(3)),
+                            "cap": float(g.group(4)),
+                            "post_deploy": (datetime.strptime(
+                                f"{day} {tm.group(1)}", "%Y%m%d %H:%M:%S")
+                                >= V37_DEPLOY) if tm else None,
+                            "line": line.strip()[:200]})
     return {"counts": counts, "guard_fire_times": guard_fire_times,
+            "guard_details": guard_details,
             "journal_days": sorted(set(days))}
 
 
@@ -178,24 +271,50 @@ def run(replay_path: str, append: bool = True) -> dict:
         return round(1000.0 * c / live_sig_total, 2) if live_sig_total else None
 
     table = []
-    # account-guard firings are classified BEFORE the table so the verdict word
-    # can be truthful: all-pre-deploy = closed class (informational), any
-    # post-deploy = a NEW defect (flagged).
+    # account-guard firings are classified PER FIRING from their own operands
+    # + the host arm's ledger state at the firing instant (2026-09-16: the
+    # blunt post-deploy timestamp rule mis-flagged two correct vetoes — the
+    # 15% account-budget guard refusing min-lot entries on shrunken virtual
+    # equity, i.e. the documented strangulation regime working as designed).
     guard_firings = []
     for h in hosts_out:
+        det_by_key = {d["at"]: d for d in hosts_out[h]["guard_details"]}
         for t in hosts_out[h]["guard_fire_times"]:
             try:
                 dt = datetime.strptime(t, "%Y%m%d %H:%M:%S")
             except ValueError:
                 continue
-            guard_firings.append({"at": t, "host": h,
-                                  "class": "pre-v26.37 (closed $0-basis class)"
-                                  if dt < V37_DEPLOY else "POST-v26.37 = NEW DEFECT"})
+            det = det_by_key.get(t)
+            entry = {"at": t, "host": h}
+            if det:
+                entry.update({k: det[k] for k in ("build", "fleet", "new", "cap")})
+            if det is None:
+                entry["class"] = ("pre-v26.37 (closed $0-basis class)" if dt < V37_DEPLOY
+                                  else "UNCLASSIFIED — firing line lacked operands")
+            elif not det["post_deploy"]:
+                entry["class"] = "pre-v26.37 (closed $0-basis class)"
+            else:
+                pos_open, veq = ledger_state_at(ledger_for_host(HOSTS[h]), dt)
+                det["position_open"], det["veq_at_fire"] = pos_open, veq
+                cls, notes = classify_guard_firing(det)
+                det["class"], det["notes"] = cls, notes
+                entry["class"], entry["notes"] = cls, notes
+                entry["position_open"], entry["veq_at_fire"] = pos_open, veq
+            guard_firings.append(entry)
     if live["account-guard"] and guard_firings:
-        guard_verdict = ("CLASSIFIED: all firing(s) pre-v26.37 — closed class, "
-                         "informational only"
-                         if all(f["class"].startswith("pre-") for f in guard_firings)
-                         else "DEFECTIVE — post-v26.37 firing(s) present")
+        bad = [f for f in guard_firings
+               if f["class"].startswith(("DEFECT", "UNCLASSIFIED"))]
+        working = [f for f in guard_firings if f["class"].startswith("WORKING")]
+        if bad:
+            guard_verdict = (f"DEFECTIVE — {len(bad)} of {len(guard_firings)} "
+                             "firing(s) classified DEFECT/UNCLASSIFIED")
+        elif working:
+            guard_verdict = ("CLASSIFIED: designed vetoes — account-budget guard "
+                             "refusing min-lot entries on shrunken equity "
+                             "(strangulation regime), not defects")
+        else:
+            guard_verdict = ("CLASSIFIED: all firing(s) pre-v26.37 — closed class, "
+                             "informational only")
     else:
         guard_verdict = "clean (class closed v26.37)"
     for counter in PATTERNS:
@@ -221,7 +340,8 @@ def run(replay_path: str, append: bool = True) -> dict:
         "replay": {"path": rep["path"], "tag": rep["tag"], "funnel": funnel,
                    "signal_denominator": score},
         "live": {"per_host": {h: {"counts": hosts_out[h]["counts"],
-                                  "journal_days": hosts_out[h]["journal_days"]}
+                                  "journal_days": hosts_out[h]["journal_days"],
+                                  "guard_details": hosts_out[h]["guard_details"]}
                               for h in hosts_out},
                  "signal_denominators": sigs, "signal_denominator_total": live_sig_total,
                  "note": "journals cannot be attributed per-instance (same EA/symbol "
@@ -243,7 +363,9 @@ def run(replay_path: str, append: bool = True) -> dict:
               f"({row['replay_rate_per_1k']}) | live {row['live']:>3} "
               f"({row['live_rate_per_1k']}) -> {row['verdict']}")
         for f in row.get("firings", []):
-            print(f"      firing {f['at']}: {f['class']}")
+            ops = (f" [v{f.get('build', '?')} fleet ${f.get('fleet', '?')} + new "
+                   f"${f.get('new', '?')} > cap ${f.get('cap', '?')}]")
+            print(f"      firing {f['at']}: {f['class']}{ops}")
     drifted = [r["counter"] for r in table if r["verdict"].startswith(("drifted", "DEFECTIVE", "CONFIG", "live-only"))]
     print(f"  summary: {len(drifted)} flagged" + (f": {', '.join(drifted)}" if drifted else " — funnel clean"))
 

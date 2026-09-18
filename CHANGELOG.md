@@ -1,5 +1,1417 @@
 # Changelog
 
+## [VPS-era broker-evidence LV monitor — positions/deals/equity by magic 7801601 surfaced in [3b] automatically] - 2026-09-18
+
+While hosting lasts, the VPS LV ledger is invisible locally, so the account became the evidence surface: `scripts/midas_lv_broker_monitor.py` polls the MT5 API (60 s loop, detached) and persists `artifacts/midas_lv_broker_state.json` — positions and trade deals filtered to magic 7801601, account-level balance operations captured REGARDLESS of magic (the 12:25:59Z −$10.14 withdrawal shape: money movement is account evidence, not arm evidence), equity/balance/margin, deals deduped by ticket across polls, `first_fill_seen` set on the first ENTRY deal and never unset. The monitor never writes the LV ledger (EA-owned file; pinned by test). [3b] renders any existing snapshot as the `[LV broker view]` block — account header with snapshot age, `LIVE POSITION (broker)` lines (direction/volume/entry/SL/TP/open-age), entry/exit deals with P/L, balance ops flagged as non-trading; a >5-min-old snapshot is labeled STALE and never hidden, staleness being itself the signal that the poller died. Hermeticity: the snapshot path is a module constant plus an autouse conftest fixture — the operator's real snapshot can never leak into a test run (caught by the correlation suite's flat-portfolio test during the full-tree run). Attribution rules pinned in tests/test_midas_lv_broker_monitor.py (10), rendering in tests/test_midas_lv_broker_view.py (10, including collision-freedom with arm-level `live: flat` lines). First-trade ritual Phase A adapts to broker evidence during the era (registered in the ritual doc). Full tree: 1744 passed / 15 skipped.
+
+## [VPS-hosting era: MT5 locked local algo off by design; operator chose the VPS surface; era guards shipped for watchdog + [3b] + first-trade ritual] - 2026-09-18
+
+The "remove the barricades" request surfaced the real blocker: at 12:46 the terminal's journal recorded `6898457: automated trading disabled after migration and enabled on virtual hosting` — an MT5 VPS migration had locked LOCAL algo trading off BY DESIGN (local EA + VPS EA would both trade the same hedging account; three programmatic Ctrl+E attempts correctly refused). Operator confirmed they started the migration and chose the surface: corrections land locally, then the operator's VPS sync picks up the already-verified local state (LV v1.16 `a4bf5e30`, 15.0 breaker, LIVE pins — verified byte-exact earlier). Era guards shipped: `artifacts/midas_vps_hosting.json` (operator-managed marker, the only honest source — MT5 exposes no hosting API) makes the watchdog observe-only (`VPS-HOSTING`, never remediates — a frozen local LV ledger is the era's signature, not a fault) and [3b] print the era banner with the LV-staleness exemption; the first-trade ritual gained its Phase-A broker-evidence adaptation (the python API sees account positions wherever the EA executes). All five local ledgers still fresh post-migration (paper arms collect locally; AutoTrading gates orders, not heartbeats). Cert scheduler unchanged — its flat gates handle every case. To end the era: delete the marker when the surface returns.
+
+## [first-live-trade ritual pre-registered; LOPEN grammar aligned to the EA writer (14 fields) across all three consumers] - 2026-09-18
+
+Pre-registered docs/MIDASTOUCH_FIRST_LIVE_TRADE.md before any fill: Phase A verification (row integrity, broker position cross-check, [3b]+watchdog visibility), Phase B no-interference monitoring (R5 floor %, breaker headroom, exit arithmetic), Phase C LCLOSE reconciliation with a 3-way verdict (EXPECTED/DEGRADED/MISMATCH at 20%-of-stop slippage), Phase D registration — plus the pre-declared cert-scheduler interaction (a live position legitimately delays the v1.16 cert). Writing it caught a critical latent defect: the python consumers' LOPEN contract required 15 fields while the EA v1.16 writer emits 14 — the first real fill would have been invisible to [3b] AND to the watchdog's open-position gate (a terminal restart would have been permitted over real money), and the parity harness had NO live-grammar awareness at all (a cert session could have stopped the terminal over an open live trade). All three consumers (morning_status live_grammar_view, midas_watchdog ledger_health, v28_sweep_runner ledger_flatness) aligned to the writer-exact shape (posid [2], dir [5], LCLOSE pairing by posid, 6-field LCLOSE), and the test fixtures now parse the MQ5 format strings directly — a parser/writer divergence fails the suite instead of a real position. mypy: v28_sweep_runner now fully clean.
+
+## [go-live hardening: §14 chart-identity drift checks, refused-restart counters, verified offset re-baseline, live-arm breaker amendment] - 2026-09-18
+
+Three issues found in the first hours of live operation, root-caused and fixed. (1) **Phantom escalation storm killed at the mechanism**: the 09:05–09:25 ESCALATE was banner-attribution failure — five charts print identical `mode=… | session=…` banner text with no arm tag, so the LV check matched a paper arm's PAPER banner and screamed drift. The banner drift matchers (`banners_for_pins`/`banner_drift`) were REMOVED outright — banner text cannot be attributed across identically-labelled charts — and the watchdog's drift path now keys on the CHART FILE identity (the same byte-verified `<inputs>` source [3b] uses, which caught the real 09:57 incident); the banner stays observation; a refused restart (SKIP-OPEN-POSITION) no longer increments the escalation counters (the 09:05 skip had driven a phantom ESCALATE state; counters rolled back and reset after the healthy-arm verification). (2) **Broker-offset resolution locked in**: the +0h00-vs-+2h flag was resolved by external evidence (live broker tick epochs vs NTP-checked machine UTC: broker genuinely at UTC+0; machine −0.32 s from the atomic reference) and re-baselined through the audit chain (`--verified-offset 0` two-run confirm; `last_offset_verified` evidence recorded) — an offset jump is always flagged, resolved only by evidence. (3) **Live-arm daily breaker amended review-frozen**: `InpDailyLossCapPct=3.0` (the paper default) would make one min-lot stop-out (6–9% of the $50.22 book) a daily stand-down; the LIVE arm runs **15.0** (first full loss admitted, second consecutive full-loss day vetoed — refuses the review's −45% pattern instead of starving the sample), paper arms untouched at 3.0, live chart re-spliced and verified 31/31 with the new pin. **Operational footnote:** the old-banner-code loop processes launched 2026-09-17 18:16 kept the phantom alive from memory after the fix landed — killed and replaced with a single fresh loop on the fixed code (first cycle: NONE, zero drift, zero problems); the instance lock is loop-lifetime, so the Task Scheduler's logon instance now coexists safely (a second loop exits loudly instead of double-supervising). During the phantom's entire lifetime every attempted restart hit the §14 flat gate (M1t/M1m held positions) and was refused — no terminal restart, no chart re-splice, no live-arm impact ever occurred; only counters stacked, and they were reset after verification.
+
+## [GO-LIVE — MidastouchAI v1.16 LIVE on account 140778269; live-grammar monitoring shipped] - 2026-09-18
+
+The first real-money attach of the gold EA, executed through the full registered chain: dedicated live binary (v1.16 \a4bf5e30… under Experts\\MIDASTOUCH_live — the certified shadow build; paper paths untouched), new chart05 cloned from certified chart01 geometry, preset MidastouchAI_LV_gold.set = the M1 pin set with only identity+execution deltas (tag LV, magic 7801601, InpLiveExecution=true), verified 31/31 byte-identical at boot; banner execution=LIVE confirmed, floor table min-lot risk $2.91 = 5.8% of $50.22 (inside the R5 15% cap), AutoTrading verified ON via API, watchdog flat gate + morning status upgraded to parse the LIVE LOPEN/LCLOSE grammar (a dangling LOPEN is a real position — restarts refuse over it; SKIP-OPEN-POSITION, --force override documented), [3b] shows the LIVE $$$ arm with open position, live closes and exit reasons; 12 go-live grammar pins in tests/test_midas_golive_grammar.py. Registered in the V2 register's GO-LIVE EXECUTION BLOCK; live attach authorized by the operator's explicit instruction (geometry verified before execution).
+## [v1.16 finalization + reading-blocker fix — guards before banner, compile tool, deferred-pin tolerance, reading runbook] - 2026-09-18
+
+R6 hardening finished: both INIT_FAILED preconditions moved BEFORE the init banner (a refused attach never announces a healthy start) and the stale "(calendar pending)" label removed; one line-merge corruption introduced by an edit was caught by the R6 occurrence pins before it could compile and repaired (behavioral delta: a comment). New `scripts/compile_midas.py` encodes the real MetaEditor contract (silently no-ops on sources outside the terminal MQL5 tree; scratch lives under the data folder, explicit /log, 0 errors / 0 warnings + .ex5 verified) — v1.16 recompiled clean, shadow refreshed (\a4bf5e30…), deployed binary untouched. Reading blocker resolved: the first live midas_verdict dry-run aborted all four windows on "missing from chart: InpMaxRiskPct" (repo pins advanced to v1.14 while arms run v1.10) — preset_identity now treats deferred newer-build pins as recorded evidence, never drift (unknown pins still abort; parse problems never deferrable; verdict records deferral in notes, tests both directions). All four arms read CONTINUE-UNPROVEN, abort=False — the 2026-10-01 reading is unblocked, with the reading-day runbook pre-registered at docs/MIDASTOUCH_READING_20261001.md (expected outcome stated in advance). v1.16 WF parity certification pending flatness (M1m opened the portfolio's first live M30 fill 06:15 UTC, 720-min timeout ~18:15). Also root-caused and fixed the 8 cross-suite watchdog test failures: fixture mtimes were stamped with time.time() at test runtime while decide() received an import-time NOW, so long sessions slid the 45-min fixture into the 44-min grace band — stamps now anchor to the same module NOW; full tree 1703 passed / 15 skipped.
+
+## [v1.16 — R6 executed: fail-closed preconditions (news-filter input, gold-only charter); OOS 8-mode matrix certified; operational hardening] - 2026-09-18
+
+R6 closed as a python+EA pair (never-deployed, era-gated): the EA INIT_FAILEDs on InpUseNewsFilter=true (no calendar engine exists) and on a non-gold symbol (charter), folding #35 per the register's rule; the harness mirrors both preconditions. EA compiled 0 errors / 0 warnings (verified via explicit /log capture — the stray repo-root compile_log.txt removed); shadow refreshed to v1.16 (\7132193d…); deployed binary untouched (\22f39ae0…). Before the refresh, the v1.15 shadow certified the OOS 8-mode matrix 8/8 PASS (four artifacts). Also: stale 'MidasWatchdog' scheduled task deleted (foreign repo path, minute-repeating — a second watchdog); telemetry consumer-completeness now enumerates consumers dynamically and found two the hand list missed (ab_adjudicate, adjudicate_arm_c) — all readers verified on appended grammar; version-law pin moved to 1.16.
+
+## [morning_status + harness — §1 version-awareness, offset audit chain, journal-retention guard; probe launch finding] - 2026-09-18
+
+Version transitions are now pinned to midas_verdict.py's §1 walk as the ONLY version consumer: banner_drift stays version-blind (behavioral + AST no-consumer pins, mutation-verified) and the parity harness's keyed compare stays version-agnostic — a cited v1.13 telemetry build trips nothing else. Offset state carries the raw reading chain (value/source/epoch/dir, cap 50) + last_change both-legs record, so DST flags are auditable against the journal line that produced the baseline; unstable readings never create state. New journal-retention guard alerts when today's log is missing or >90 min older than the newest ledger heartbeat (the 2026-09-17 log-rewrite incident class). Probe walk-through executed with full watchdog-pause choreography: MT5 silently ignores MidasOffsetProbe.ex5 as a launch argument (instrument finding, health guide updated — manual drag remains the certified way); machine UTC verified vs time.is; persisted +2 h baseline externally corroborated 2026-09-17 and standing. 93 tests green; no new mypy errors.
+
+## [register — phase-2 backlog drafted as §2b: P1 liquidity, P2 structure, P3 regime, P4 confluence, telemetry-first law] - 2026-09-18
+
+The review's five-layer roadmap is now four individually pre-registered experiments in the V2 register §2b, each with a falsifiable one-sentence hypothesis, python+EA planned shape, §13 endpoint vs same-window control, and a common law frozen before any code exists (P-0 endpoint, P-C control, P-S sequencing, P-N no-stacking, P-T telemetry-first). P4 (five-layer confluence) is explicitly conditional on ≥3 of P1–P3 surviving. Sequencing §3 gains the P-series queue line. Also: SHADOW_EXPERT constant + tests/test_midas_parity_paths.py (8 pins, mutation-verified) locking the live-vs-shadow load-path separation; R2 register row updated with the path-pin suite.
+
+## [parity — v1.15 shadow certification PASSED: dynamic BAR parity re-cert for the un-deployed line] - 2026-09-18
+
+## [parity — v1.15 shadow certification PASSED: dynamic BAR parity re-cert for the un-deployed line] - 2026-09-18
+
+With morning status showing all four gold arms flat (overnight M1t/M1m timeouts resolved), the flat-gated dynamic certification ran to completion against the shadow binary (v1.15, `MIDASTOUCH_parity` path): python 151 tr/+1.474R vs EA 151 tr/+1.478R, max|dR| 0.0005, keys OK, anchor reproduced — artifact `artifacts/midas_parity_result_20260918_0544.json`. Covers the whole v1.11→v1.15 un-deployed line at once; satisfies §4(b) for the R5/v1.14 era; deployed binary hash-verified untouched; register §2 baseline updated. Deploy path still waits behind the 2026-10-01 reading.
+
+## [parity — v1.13 shadow re-cert attempt: flat gate held; python-half regression proof registered] - 2026-09-17 (evening)
+
+Requested BAR-mode parity regression for the v1.11–v1.13 tree, run by the
+book (shadow path, watchdog pause, flat gate): the gate REFUSED the dynamic
+pass — M1t/M1m still hold their 15:00 fills (12h timeout ⇒ ~03:00 UTC). No
+state was touched; the pause marker was released and the terminal never
+stopped.
+
+What WAS proven while the gate held (registered in V2-register §3):
+- the python engine of record + window pins + comparison law are unchanged
+  since certification: WF REVERSE_DIRECTION regen = n=151 / +1.474R, exactly
+  certificate 1's python leg (`…_1258` PASS, max|dR| 0.0005 vs EA);
+- the full mode registry is covered same-day by the OOS 8-mode matrix
+  (`…_1348`, 8/8 PASS, 1,165 keyed trades, all anchors reproduced);
+- the 147-float `midas_parity_python_wf_rd.json` is the documented
+  pre-Amendment-2 Wilder-ATR relic (protocol stale-vintages finding), not a
+  regression baseline.
+
+Remaining for the freshly certified v1.13 baseline: one dynamic shadow-path
+WF pass once all arms are flat (command in register §3), then the deploy
+gate itself.
+
+## [tests — source-level invariant pins for the v1.11 live-path ID architecture (register R2/R3)] - 2026-09-17
+
+`tests/test_midas_live_ids.py` (11 tests) pins the R1/R2 position-handling
+remediation at the source level, so a regression fails the suite before it
+can compile into a binary:
+
+- **Selection isolation**: `SelectOurPosition()` must verify magic+symbol;
+  no bare `PositionSelect(_Symbol)` / `PositionClose(_Symbol)` anywhere in
+  comment-stripped source; every position-API touch must sit inside the
+  five sanctioned functions (selector, ID resolution, verified close,
+  exit reconciliation, restart adoption).
+- **posid-only history**: every `HistorySelectByPosition(...)` argument is
+  pinned to the literal `g_lv_posid`; external-close reconciliation must
+  key on `DEAL_POSITION_ID == g_lv_posid`.
+- **Provenance stays provenance**: `ResultDeal`/`ResultOrder` may only feed
+  `g_lv_deal`/`g_lv_order`; regex sweeps forbid any `Result*` or
+  history-deal-space assignment into `g_lv_posid`/`g_lv_ticket`.
+- **Coherent state**: the flat reset must clear all four ID fields
+together; close must operate on the held ticket.
+
+Mutation-verified: reintroducing `PositionClose(_Symbol)`, feeding a ticket
+to `HistorySelectByPosition`, or assigning `ResultOrder()` into
+`g_lv_posid` are each caught by the corresponding pin.
+
+## [MIDASTOUCH v1.15 — review P0 #2 completed: authoritative TimeUTCNow + frame-law provenance correction; NOT deployed] - 2026-09-17
+
+The R3 UTC-clock remediation is completed and made honest:
+
+- **One authoritative helper**: `UTCNow()` renamed `TimeUTCNow()` (and the
+  probe's references updated) — the single TimeGMT-backed clock for every
+  human-intent gate: daily-breaker day key, Friday force-flat, live
+  timeout (both ends), and — since v1.15 — the documented frame for the
+  session/Friday ENTRY gates' counterpart hour semantics.
+- **Provenance finding (the important correction)**: v1.12's frame law
+  claimed the bar-epoch gates classify "python-identical UTC epochs". They
+  are not UTC — `iTime` returns broker-SERVER-stamped epochs (the broker
+  feed's label frame; the CSV of record carries `+00:00` timestamps, but
+  the tester/paper bars carry the server's own stamps). Classifying those
+  epochs through a UTC structurization would shift the 06–20 window with
+  the broker's timezone — the exact review P0, hiding inside the gates the
+  v1.12 law told us not to touch. v1.15 corrects the LAW: hour gates that
+  read bar epochs use the epoch's own (server) frame; hour gates that read
+  the wall clock use `TimeUTCNow()`. The python of record classifies the
+  same broker-feed epochs (same frame) — no python code change was needed,
+  only the re-pin; both sides documented at the site.
+- Source pins updated/added in `tests/test_midas_time.py` (11): the single
+  helper (now with a stale-name sweep), end-to-end UTC for breaker/flat/
+  timeout, the frame-law pins for both epoch gates, and a cross-engine pin
+  tying the EA's epoch classification to `midas_sweep.py`'s — if either
+  side ever changes frame, the suite forces a joint re-adjudication.
+- Compiled 0/0 (EA 1225 ms, probe 513 ms); deployed binary hash-verified
+  untouched; shadow certification binary refreshed to v1.15. Era discipline
+  unchanged: nothing deploys before the 2026-10-01 reading.
+
+## [MIDASTOUCH v1.14 — protocol amendment 6 (register R5): min-lot risk refusal, python+EA one commit; NOT deployed] - 2026-09-17
+
+The first parity-gated amendment of the register, amended in-tree and
+queued behind the 2026-10-01 reading. The rule: when computed lots fall
+below the broker minimum, the trade fills only if the min-lot risk
+(stop_d × $100 × 0.01) does not EXCEED 15% of the sizing basis; otherwise
+the trade is vetoed, never silently oversized.
+
+- **python** (`scripts/midas_sweep.py`): `MAX_RISK_FRACTION=0.15`, pure
+  `minlot_risk_exceeds_cap(stop_d, basis)`, pending-fill veto (`res.vetoed`,
+  no position constructed, vetoed bar runs no signal detection — mirrors
+  the EA BAR caller's `if(!may_signal) continue`).
+- **EA** (`MidastouchAI.mq5`, v1.14, compiled 0/0, 1186 ms):
+  `InpMaxRiskPct=15.0`; BAR model vetoes the fill with ledger row
+  `SKIP,<epoch>,RISK-CAP,<tag>`; PERTICK `OpenPaperPosition` vetoes before
+  fill; live `LiveSendOrder` refuses the order against ACCOUNT equity —
+  each engine vetoes against the basis it sizes with.
+- **The cap is 15% by measurement, not by port**: the certified WF corpus
+  floors 42/151 fills at up to $277.30 = 5.5% of book, and the $50 §13
+  arms' day-one min-lot risk ($4.55 = 9.1% of basis) sits above every cap
+  below ~10%. A 1.5% cap (the V75 checklist's number) would veto 15
+  certified fills and starve the forward arms; 15% vetoes ZERO certified
+  fills (regen n=151 / +1.474R, vetoed=0) and still closes the pathology
+  the review demanded. Decision table frozen in protocol amendment 6.
+- `tests/test_midas_minlot_veto.py` (9): boundary law (strict inequality),
+  purity, counter, corpus+arm compatibility facts, and the permanent
+  regression law (certified regen unchanged, vetoed=0).
+- Deploy discipline: era-stamped fresh ledgers + shadow-path parity re-cert
+  for v1.14 BEFORE any deploy; nothing deploys before the 2026-10-01
+  reading. Deployed binary hash-verified untouched; shadow certification
+  binary refreshed to v1.14.
+
+## [morning_status — broker-vs-UTC offset tracking in [3b]: probe/banner parsing, persisted baseline, automatic DST-shift flag] - 2026-09-17
+
+- `scripts/morning_status.py` ([3b] footer, display-only): reads TODAY's
+  terminal journals for both offset writers — MidasOffsetProbe lines
+  (`offset (server-GMT) = +N h MM min`) and v1.12+ EA init banners
+  (`CLOCK: … offset=+N h MM min`, self-recording on every attach) — and
+  persists the latest stable whole-hour value to
+  `artifacts/midas_clock_offset_state.json`. A new reading ~1 h off the
+  baseline prints a `DST SHIFT` alert (UTC+2 winter / UTC+3 summer is
+  expected for NY-close-anchored gold brokers); any other move prints
+  `OFFSET CHANGE`. Fail-closed details: ±1 min sampling-artifact band
+  (TimeCurrent/TimeGMT are separate statements); non-whole-hour readings are
+  reported but never become the baseline; source classification by the
+  parenthesized `offset (server-GMT)` fingerprint (the probe's offset line
+  itself carries no "OFFSET PROBE" marker); no-reading days show the last
+  known value with age and never mutate state.
+- `tests/test_midas_clock.py`: 19 tests — grammar for both writers,
+  negative offsets, `_fmt_off` mirrors MQL5 truncation-toward-zero, the
+  artifact band, DST vs non-DST change, baseline persistence, corruption and
+  partial-state degradation, section wiring (monkeypatched state path),
+  unchanged arm health.
+- Zero new mypy errors (the line-258 find — a partial state file crashing
+  the age line — was fixed, not suppressed). Live-verified: two consecutive
+  runs on the real tree leave the state byte-identical while reporting the
+  morning probe's +2 h baseline.
+
+## [MIDASTOUCH v1.13a — V2 register §1 mechanism implemented in midas_verdict.py (cited transitions exempt, evidence recorded)] - 2026-09-17
+
+Closes the open dependency registered under R10: the ERA-note citation now
+has an enforcement-side reader.
+
+- `scripts/midas_verdict.py`: the §13 version-change abort keys on
+  **unexempted transitions** from a new `_unexempted_version_changes` walk —
+  a version change whose first ERA stamp of the new version carries
+  `telemetry-only-per-V2-register` (the v1.13 writer's note) continues the
+  window; every transition, exempted or not, is recorded in the reading's
+  evidence as `version_transitions` (from/to/line/telemetry_exempt/note).
+- **Fail-closed by construction**: citation on a non-transition re-stamp
+  exempts nothing; a truncated stamp is uncited; rollback aborts (the older
+  binary predates the register and cannot cite); one uncited leg of a chain
+  aborts the whole window. The abort message now names the unexempted legs.
+- `tests/test_midas_verdict.py`: 8 new "V2 register §1" tests pin both
+  directions — exempted transition continues (with evidence), uncited
+  transition aborts, non-transition citation ignored, chain exemption,
+  longer-note tolerance, rollback abort, fresh telemetry-only window reads
+  as a single version, malformed stamp fails closed.
+
+## [MIDASTOUCH v1.13 — register item R10 executed: telemetry ledger columns (never-abort class, NOT deployed)] - 2026-09-17
+
+First build produced under the register's standing rule (§1), exercising the
+never-abort classification end to end:
+
+- **End-of-row appends only**: paper OPEN rows (BAR + PERTICK writers) append
+  `atr_at_entry,spread_at_open`; both paper CLOSE writers append
+  `spread_at_close,slippage` (model exits: 0 by construction — recorded
+  explicitly so live slippage has a matching column). Live rows (LOPEN/LCLOSE)
+  deliberately keep their v1.11 grammar; extending them is a live-gate
+  decision. The frozen grammar heads are pinned positionally by
+  tests/test_midas_telemetry.py — insertion/reordering now fails the suite.
+- **ERA note cites the register** on the paper path
+  (`pertick-fills+telemetry-only-per-V2-register`); BAR tester ledgers keep
+  the exact parity-era note byte-for-byte. midas_verdict.py can classify this
+  version change without aborting the window once the §1 exemption lands.
+- **Consumer safety net proven, not assumed**: all five python consumers of
+  the ledger grammar are min-length + index-based (parse_ledger 12/7,
+  collect_midas_positions 12, ledger_flatness 12/8, midas_verdict 8,
+  era.parse_era_rows extras-ignored) — 10 tests feed every one of them
+  appended rows and pin identical reads.
+- Honest path: one corrupted test-file write was caught mid-turn and
+  rewritten before any run; compile clean 0/0; deployed binary untouched
+  (hash pinned); shadow certification binary refreshed to v1.13.
+
+## [Parity harness v2.1: shadow-path certification + relaunch guard; v1.12 baseline PREPARED (gate-refused)] - 2026-09-17
+
+Baseline re-certification attempt for the v1.12 tree, executed and recorded:
+
+- **Shadow-path mechanism** (`--expert-path`, default = the certified
+  deployed path): parity passes can now certify an un-deployed build at
+  `MQL5\Experts\MIDASTOUCH_parity\` without touching the live charts' load
+  path. This closes a real hazard discovered en route: the live gold charts
+  load `Experts\MITEMSHUB_AI\MidastouchAI.ex5` — the SAME path the certified
+  harness used, so any pre-v1.12 re-cert would have silently swapped the
+  binary under the live arms at relaunch (a §13 mid-window deploy).
+- **Relaunch guard + stop verification**: the `finally` relaunch now fires
+  only if this session stopped the terminal or ran passes (a flat-check
+  abort no longer bounces a healthy terminal — live-validated in this
+  session), and a failed terminal stop aborts instead of running blind.
+- **The gate outranked the run**: the certification was correctly REFUSED by
+  the flat-check gate — M1t and M1m hold their first open paper positions
+  (epochs 1789657200, no CLOSE yet). Exactly the §13 protection working;
+  the v1.12 shadow binary is compiled (0/0), installed, and the run is one
+  command away once all four arms are flat (morning status [3b] shows the
+  state). Register §2 updated with the status and the ready command.
+- tests/test_midas_parity.py: 18 passed (defaults unchanged and pinned).
+
+## [MIDASTOUCH_V2_REGISTER.md — adjudicated Phase-1 P0 register + standing telemetry/fail-closed rule] - 2026-09-17
+
+Freezes the external EA review's adjudication into a governing document:
+R1–R4 (position-ID architecture, magic isolation, UTC time engine, offset
+verification) recorded as DONE-in-tree-not-deployed with v1.12 source-line
+evidence; R5–R10 (min-lot refusal, news-filter honesty, BB experiment,
+absolute spread cap, breaker extension, startup self-test, telemetry
+columns) registered as parity-gated work queued behind the 2026-10-01
+reading; the review's factual errors (mode default, BB "bug", severity
+frame) recorded with evidence. §1 of the register states the standing
+telemetry/fail-closed rule — identical-ticks test, never-aborts/always-
+aborts lists, and the ERA-note mechanism (`telemetry-only-per-V2-register`)
+that midas_verdict.py will follow once implemented — frozen BEFORE the
+first version transition it must classify.
+
+## [MIDASTOUCH v1.12 — UTC time engine for live-path wall-clock gates + broker-offset verification (NOT deployed)] - 2026-09-17
+
+Implements the review's P0 #2 ("your UTC clock isn't actually UTC") with a deliberate
+two-clock frame law instead of a blanket conversion — because two of the four affected
+gates are parity-frozen on the label frame and MUST NOT move:
+
+- **The frame law**: signal-bar EPOCH classification (session 06–20, Friday cutoff — both
+  BAR and PERTICK) stays on `iTime` labels, because python classifies those same epochs
+  (Amendment 2; converting them would silently re-shape every researched session statistic
+  and break bit-level BAR parity). Live-path wall-clock decisions move to `TimeGMT()` via
+  a single `UTCNow()` helper: the daily-breaker day key, the Friday force-flat, and the
+  live position's 12h timeout (both ends of the comparison). The staleness guard stays on
+  `TimeCurrent()` deliberately (it measures gaps in the server tick stream — its own
+  frame), as do ledger row stamps (provenance consistency).
+- **Verification surface**: the init banner prints a `CLOCK:` line (server, GMT, derived
+  offset) on every attach; new `MidasOffsetProbe.mq5` script walks the operator through
+  the pre-live-gate offset check (mqlGMT vs an external UTC clock; note the offset; re-run
+  after DST). Documented as health guide §4.
+- **Pinned by source tests** (`tests/test_midas_time.py`, 9): UTCNow is single and
+  TimeGMT-backed; both parity gates classify epochs and never touch the wall clock; the
+  breaker/Friday-flat/timeout sites use UTCNow end-to-end and never structurize
+  `TimeCurrent()`; staleness keeps the server frame; the probe exists.
+- **Verification**: both files compile clean (0 errors / 0 warnings) via MetaEditor CLI in
+  a scratch folder — deployed 1.10 binary byte-identical before/after (sha256 pinned),
+  scratch removed. One real compile catch: MQL5's `%` is integer-only (probe fix).
+- Same deploy discipline as v1.11: zero effect on the running paper portfolio (live-path
+  only); deploying = new §13 era, do it deliberately at the live gate.
+
+## [MIDASTOUCH v1.11 — live-path position-ID isolation + magic-number position select (NOT deployed)] - 2026-09-17
+
+Implements the two confirmed P0 items from the external EA review (order/deal/position-ID
+conflation; `PositionSelect(_Symbol)` trusting any position on the symbol). Zero effect on
+the running portfolio: `LiveOnTick()` executes only when `InpLiveExecution=true &&
+!InpBarModel` (EA:626) — all four gold arms are paper mirrors and never touch this code.
+
+- **Three DISTINCT ID spaces, no conflation**: `g_lv_posid` (POSITION_IDENTIFIER — the ONLY
+  history-reconciliation key for `HistorySelectByPosition`), `g_lv_ticket` (selected
+  position ticket, positioning context), `g_lv_order`/`g_lv_deal` (entry provenance).
+  The old `ResultDeal() ?: ResultOrder()` assignment into one variable is gone.
+- **`SelectOurPosition()` is the only way live code touches a position**: adoption scans
+  `PositionsTotal()` matching symbol AND `InpMagic`; once IDs are held it re-verifies the
+  exact ticket+identifier+magic every call (O(1), and makes the external-close check
+  correct — the old early-exit would have masked a server-side SL/TP close). All
+  `PositionSelect(_Symbol)` call sites replaced; `PositionClose(_Symbol)` replaced by
+  `PositionClose(g_lv_ticket)` after verification, with a CLOSE ABORT if the position
+  vanished mid-retry (external close reconciles via `LiveCheckExits` instead).
+- **Recovery hardening**: `LiveRecoverState` and post-fill adoption now resolve the entry
+  deal from open history (`DEAL_ENTRY_IN`) and refuse to adopt foreign positions.
+- **Ledger grammar (live rows only)**: `LOPEN` now carries posid, order, deal tickets
+  explicitly; `LCLOSE` carries the position identifier. No python tooling parses
+  LOPEN/LCLOSE yet (verified) — no consumer breaks.
+- **Version honestly bumped** `MIDAS1.10 → MIDAS1.11` (`#property version` kept equal to
+  `APP_VERSION` per the HUD law test). Deploying this binary to an arm chart is a §13
+  version change: fresh ledger, window re-accrues from zero — deploy deliberately at the
+  live gate, not silently.
+- **Verification**: compiled clean (0 errors / 0 warnings) via MetaEditor CLI in a scratch
+  folder — the deployed 1.10 binary is byte-identical before/after (sha256 pinned), scratch
+  removed. Python suite green (123 tests incl. the HUD law).
+
+## [[3b] correlation view: same-direction, same-bar opens across the §14 portfolio] - 2026-09-17
+
+Day one proved the need (M1t + M1m opened the same LONG on the same signal
+bar): the portfolio's exposure is sometimes the cluster's SUM, not one arm's
+risk, and nothing displayed that.
+
+- `scripts/morning_status.py` — [3b] now collects open positions across all
+  gold arms (dangling OPEN rows = live positions, EA row grammar:
+  dir 1=BUY/-1=SELL) and clusters them: same direction, opened within
+  900 s = one M15 bar (the shared signal bar by construction). Each exposed
+  arm's block prints `live cluster: N arms LONG/SHORT within 15 min (tags)`
+  and the section ends with a footer listing every cluster. **Display-only
+  by design** — correlation never marks the section unhealthy: the §14 modes
+  are certified individually and a shared signal is expected portfolio
+  behavior, not drift.
+- `tests/test_midas_correlation.py` (11): cluster boundary (inclusive at
+  900 s, refused at 901 s), opposite directions never cluster, distant opens
+  don't merge through the anchor, LONG+SHORT clusters coexist, collector
+  grammar (closed pairs excluded, corrupt rows skipped, missing ledgers
+  skipped), and section integration — including that the fixture must build
+  each arm's chart from ITS OWN repo .set (building M1t from M1's pins is
+  fixture drift, and [3b] correctly flagged it as preset DRIFT).
+
+## [Watchdog reboot-survival: logon-task autostart + single-instance lock] - 2026-09-17
+
+The restart that morning reaped the watchdog loop and the arms ran ~70 min
+unguarded; the closeout's "launch the .bat after every reboot" step is now
+the machine's job, not the operator's memory:
+
+- `scripts/register_midas_watchdog_task.ps1` — registers the per-user
+  scheduled task **MIDAS Watchdog Autostart** (interactive logon trigger,
+  RunLevel Limited, no elevation — the user session per §12, never a service
+  context) launching the certified `start_midas_watchdog.bat` from the repo
+  root. Idempotent re-run replaces the task; `-Unregister` is the off
+  switch. Pure ASCII so Windows PowerShell 5.1 parses it without a BOM.
+  Registered on the machine 2026-09-17 (State Ready; verified principal/
+  trigger/action) and end-to-end: a detached .bat launch booted the loop,
+  polled all four arms (action NONE, last_ok refreshed), and survived the
+  spawning console.
+- `scripts/midas_watchdog.py` — **single-instance lock**: the `--loop` path
+  holds `artifacts/midas_watchdog.lock` on an OS handle for its whole life
+  (byte-range lock; a crash releases it implicitly — no stale lock exists),
+  writes its PID, and a second loop of any origin (logon task + manual
+  double-click) exits loudly instead of doubling restart decisions. One-shot
+  commands (`--status`, `--pause/--resume`, single checks) never take the
+  lock. Live-verified: second `--loop` refused while held, lock free after
+  release.
+- `tests/test_midas_watchdog.py` (+4, 31 total): acquire/PID write, second
+  acquire refused, crash-release semantics, main-loop take/release on
+  Ctrl+C, refusal path, and the registration script's contract (per-user
+  interactive principal, .bat entry point, no elevation, -Unregister
+  present).
+- Docs: health guide §3 (what the task is, how to verify/register/remove,
+  the lock) and the one-minute routine (reboot step is now "nothing"),
+  protocol §12 operator contract (autostart + lock registered).
+
+## [§13 monthly verdict automated: scripts/midas_verdict.py — thresholds frozen, tool read-only] - 2026-09-17
+
+The closeout registered the verdict tool as the next small one; shipped with
+the gates as read-only constants so the tool can never redefine them:
+
+- `scripts/midas_verdict.py` — per-arm §13 adjudication from the ledger of
+  record: n/totalR/meanR/DD from post-era CLOSE rows (CLOSE-veq path,
+  peak-to-trough, like armd_accrual), tag-driven discovery across the whole
+  §14 portfolio, and the frozen mapping verbatim (VALIDATED n≥60 ∧ totalR>0 ∧
+  DD≤25% ∧ meanR≥0.05; REJECTED n≥60 ∧ (totalR<0 ∨ DD>30% ∨ meanR≤0);
+  CONTINUE-UNPROVEN otherwise). **The verdict is computed, never stored** —
+  no artifact to drift; `--json` prints the full evidence record for
+  citations; `--tag` judges one arm.
+- **Structural aborts are evidence-backed, not decorative** (§13's abort rows,
+  both directions suppressed): [3b] `preset_identity` DRIFT/UNVERIFIABLE vs
+  the arm's own repo .set; §12 watchdog escalation (state ≥3 consecutive
+  restups, or DRIFT/ESCALATE last action) or missing §12 artifacts; EA version
+  change inside one ledger (distinct ERA-stamp versions = abort); corrupt
+  CLOSE rows or a nonpositive-veq row (DD denominator) abort the read. An
+  aborted window always shows CONTINUE-UNPROVEN + reasons — a polluted window
+  is never judged, so drift can neither launder a VALIDATED nor hide a
+  REJECTED (retirement stays data-backed; the family always gets its clean
+  window after the certified chain re-accrues).
+- `scripts/era.py` — family rule registered: `midastouchai` is per-tick in
+  all eras (same shape as V75MacroEngine); MIDASTOUCH ERA stamps carry the EA
+  VERSION, consumed for §13 aborts, never as an era divider.
+- `scripts/paper_weekly.py` — section [7] runs the monthly verdict every
+  Sunday (read-only; no-ledgers is a disclosed skip, never a crash).
+- `tests/test_midas_verdict.py` — 27 offline tests: gate values pinned
+  verbatim, every verdict boundary (n=59/60, DD=25.0/25.1/30.0/30.1,
+  meanR=0/0.049/0.05), DD math, both suppression directions, abort evidence
+  chain, discovery gaps, era-registry extension, weekly wiring, CLI JSON.
+- First live read (2026-09-17): M1/M1t/M1s/M1m all n=0/60,
+  CONTINUE-UNPROVEN, zero aborts — exactly the §13 day-zero expectation.
+
+## [§14 portfolio LIVE: four certified gold arms; tooling upgraded to N-arm] - 2026-09-17
+
+Operator direction: 3–4+ trades/day (the single arm's measured ~0.6/day was
+rejected as too passive). Response — widen the frozen forward test to a
+**portfolio of four certified strategies** (legal only pre-first-fill;
+protocol **Amendment 5 / §14** frozen with the ledger provably at 0 fills,
+verbatim gates and constants, modes per the OOS-anchored sweep: ORIGINAL
++ REVERSE_TRIGGER + SHORT_ONLY + MACRO_ONLY ≈ 3.5 trades/day aggregate,
+≈+2.0R/2wk; the only busier variant, REVERSE_BOTH, stays excluded for its
+measured −19.3R). Shipped:
+
+- `mql5/MIDASTOUCH/MidastouchAI_{M1o,M1t,M1s,M1m}_gold.set` — four certified
+  presets (only InpArmTag/InpMode differ; magic identical), copied to
+  `MQL5\Presets`.
+- `scripts/deploy_portfolio.py` — the certified deploy: flat-check →
+  watchdog pause → PID-exact stop → clone chart01 into chart02/03/04 with
+  unique ids + per-arm tag/mode → per-arm preset-identity verification
+  BEFORE relaunch (all three OK, 30 inputs byte-identical) → relaunch.
+  The live M1 arm untouched.
+- **Multi-arm watchdog (§14 obligation)**: `midas_arms()` discovers the
+  whole portfolio tag-driven; drift attribution matches each arm's pins to
+  its own journal banner (mode+session) so an arm is never blamed for a
+  neighbor's drift; liveness rides the WORST ledger; ANY remediation is a
+  portfolio-wide stop gated on EVERY ledger flat; per-arm re-splice from
+  the arm's own preset (`preset_for_tag`). One shared escalation counter.
+- **[3b] portfolio**: one health block per arm, each verified against its
+  own preset; header numbered when multiple.
+- **Flat-check gates**: `v28_sweep_runner.inventory_arms` now inventories
+  gold arms beside V75 arms (every paper book gates every stop); parity
+  harness prints the portfolio composition.
+- **Live state**: 4 arms running — M1 (mode=0), M1t (mode=2), M1s (mode=5),
+  M1m (mode=6), all PAPER, all flat, four ledgers born
+  (`ERA,MIDAS1.10` + EQ,50.00); watchdog poll NONE across all four; [3b]
+  4× green; 82 tests passing. §13 adjudication now per-arm at n≥60 —
+  first readings expected in weeks, not months.
+
+## [Tabletop drift drill: both defense legs exercised on a throwaway fixture] - 2026-09-17
+
+- `scripts/midas_drift_drill.py` — a self-contained sandbox drill replaying
+  the 09:57-style preset-drift incident against the REAL watchdog and [3b]
+  code: chart tamper vs still-pinned running EA (leg asymmetry), drifted
+  reboot (watchdog DRIFT → PID stop → certified re-splice w/ backup →
+  relaunch), and recovery (RECOVERED + counter reset + [3b] OK).
+  All external effects redirected (stop/relaunch stubbed, state/journal/
+  chart in `artifacts/_tt_sandbox`, removed after); the driver asserts the
+  real chart is byte-identical at exit. Full capture in the thread.
+
+## [Operator health guide for the gold arm] - 2026-09-17
+
+- `docs/MIDASTOUCH_HEALTH_GUIDE.md` — self-service walkthrough of the three
+  health surfaces (morning status [3b], the Experts log, the ledger) with
+  real captured output, healthy/unhealthy line-by-line tables, the
+  two-ledger health questions (alive via mtime, honest via OPEN/CLOSE
+  pairing), watchdog artifacts, and the one-minute daily routine.
+
+## [MidastouchAI v1.10: display-only HUD via the certified chain; engine re-certified on the new binary] - 2026-09-17
+
+- `mql5/MIDASTOUCH/MidastouchAI.mq5` — v1.09 → **v1.10**: display-only HUD
+  (`Comment`, zero `Comment()` calls before): mode + registry name, session,
+  virtual equity / start, position state, trades n/30 gate clock (§13 reads
+  at n≥60, shown on the HUD), wins, cumR, and last engine action (open /
+  close w/ R, stashed SIGNAL, spread-cap veto, stale-feed skip, live
+  LOPEN/LCLOSE). STRICTLY display-only: HUD state is a strict subset of the
+  ledger (OPEN/CLOSE/EQ/ERA + pinned inputs); refresh hooks only on
+  live-path events (init, 15-min heartbeat, PERTICK OnTick); `HudUpdate()`
+  returns immediately in the strategy tester so parity ledgers stay
+  byte-identical. Also fixes the stale `#property version` (had said 1.05
+  since v1.06; now 1.10, pinned equal to APP_VERSION by test).
+- `tests/test_midas_hud.py` — 11 offline source tests pinning the HUD law:
+  tester-gating, ledger-backed-state-only allowlist, single `Comment(`,
+  BAR-mode functions pristine except BarManage's documented post-close
+  epilogue, watchdog-stable banner tokens, no HUD inputs/file access, and
+  EA-inputs ≡ preset-keys (30 ≡ 30, splice-chain coupling).
+- `scripts/midas_parity.py` — cosmetic: harness prints no longer hardcode
+  the EA version.
+- **Certified chain executed in order**: compile 0 errors/0 warnings →
+  watchdog `--pause` → flat-check (gold ledger flat) → PID-exact terminal
+  stop → v1.10 .ex5 deployed to BOTH Experts paths (`MITEMSHUB_AI\` for the
+  tester layout, `MIDASTOUCH\` for symmetry) → §13 fresh-ledger abort (prior
+  ledger archived `artifacts/paper_ledgers/…pre-v110_20260917_142946.csv`)
+  → `set_chart_preset.py` byte-exact re-splice (30 inputs, backup kept) →
+  relaunch → boot banner `[MIDAS1.10]` verified pin-for-pin (mode=0,
+  session=06-20, execution=PAPER, exec-model=PERTICK), watchdog drift `[]`.
+- **Engine re-certified on v1.10** (`artifacts/midas_parity_result_20260917_1435.json`):
+  WF REVERSE_DIRECTION — python 151 / +1.474R vs EA v1.10-BAR 151 / +1.478R,
+  all keys agreeing, max |dR| = 0.0005R, **first-run PASS** → the HUD is
+  behavior-neutral by measurement, not by argument.
+- Honesty note: the compile tooling builds in place, so no v1.09 binary or
+  source copy survives (the `--Source` is overwritten before the build);
+  v1.09's rollback verifier remains the parity harness itself. The v1.10
+  delta is enumerated display-only code, pinned by `tests/test_midas_hud.py`.
+- End state: arm flat, veq 50.00, `closed: 0/30` — gate clock restarted
+  cleanly per §13; watchdog healthy, 0 consecutive restups; suites 77 green.
+
+## [2026-09-17 closeout: drift incidents, watchdog shakedown, parity certification] - 2026-09-17
+
+- `docs/MIDASTOUCH_CLOSEOUT_20260917.md` — full-day closeout in the house
+  format: both drift incidents (09:57 unregistered mode-flip, 11:11
+  code-defaults reattach) with zero-fills verification in both windows, the
+  watchdog shakedown including the on-camera 11:42 auto-remediation
+  (detect → stop → re-splice → relaunch → RECOVERED), the 150-vs-147 parity
+  root-cause (three stale vintages compared positionally — no live EA defect)
+  with the three certificates (WF / OOS / full 8-mode registry — 1,165 keyed
+  trades, worst |dR| = 0.0005R), the §13 verdict-rule freeze, and the [3b]
+  preset-identity guard. End-of-day state: arm flat at veq 50.00, 0 closed
+  trades, watchdog clean, no promotion — ALL-8-MODES NO-SHIP stands.
+
+## [Full-registry parity matrix: 8/8 modes PASS on OOS (protocol §11, Certificate 3)] - 2026-09-17
+
+- `scripts/midas_parity.py` — full-registry matrix (`--mode` repeatable,
+  EA mode-enum map, per-mode tester tags + sandbox-ledger rotation,
+  one watchdog-paused session; `matrix_verdict()` requires every mode PASS
+  and every frozen sweep anchor reproduced). Pinned by 6 new tests
+  (mode-code/tag maps, aggregation, anchor reader) — 18 harness tests total.
+- **Certificate 3** (`artifacts/midas_parity_matrix_oos_20260917_1348.json`):
+  8/8 registry modes PASS over OOS in real ticks — 1,165 vs 1,165 keyed
+  trades, worst per-mode max |dR| = 0.0005R, all 8 sweep anchors
+  reproduced exactly (losers included: REVERSE_BOTH −19.307R,
+  LONG_ONLY −1.950R). Engine parity now covers the whole registry;
+  ALL-8-MODES NO-SHIP stands, no promotion.
+
+## [Second parity certificate: OOS window PASS first-run (protocol §11, Certificate 2)] - 2026-09-17
+
+- `scripts/midas_parity.py` — window-parametrized (`--window wf|oos`,
+  per-window tester tag/calendar, EA mode-enum map; WF certificate defaults
+  untouched, 12 pinned harness tests still green).
+- **OOS certificate PASS on the first run**
+  (`artifacts/midas_parity_result_20260917_1336.json`): python 108 / +8.199R
+  vs EA v1.09-BAR 108 / +8.202R — count equal, all 108 pairs keyed identical
+  (open/close times, direction), max |dR| = 0.0005R ≤ 0.01R. Cross-check:
+  the python regen reproduces the sweep's OOS anchor (n=108, +8.199R)
+  exactly. Engine parity now certified on both sides of the window split —
+  the harness is not overfit to WF. Scope unchanged: engine parity only,
+  ALL-8-MODES NO-SHIP stands.
+
+## [M1 forward verdict rule frozen BEFORE first fill (protocol §13, Amendment 4)] - 2026-09-17
+
+- `docs/MIDASTOUCH_PROTOCOL.md` §13 — arm-D rulebook ported verbatim:
+  VALIDATED n≥60 AND totalR>0 AND DD≤25% AND meanR≥0.05; CONTINUE-UNPROVEN
+  for n<60 / gray zones; REJECTED n≥60 AND (totalR<0 OR DD>30% OR meanR≤0).
+  Frozen with the ledger holding zero fills (verified at write time).
+  Monthly readings from 2026-10-01; weekly [3b] glances are ops, never
+  judgment. Structural aborts (fresh-ledger restart): [3b] ledger problems,
+  preset DRIFT, escalated watchdog, loaded-but-dead engine, EA version
+  change. Scope honesty: the arm tests the FAMILY (unselected ORIGINAL),
+  not a promotable mode — the ALL-8-MODES NO-SHIP verdict stands either
+  way; VALIDATED advances to the pre-registered live-sizing path only.
+- Basis disclosure carried from arm D: min-lot stop-risk ≈$5.87 on the $50
+  book (≈11.7%/trade, tolerated); R statistics are basis-invariant.
+- Closeout next-session snapshot updated: (c) is now "adjudication
+  pre-registered, §13", first reading 2026-10-01.
+
+## [Morning status [3b] preset-identity check: chart inputs verified byte-exact vs repo .set] - 2026-09-17
+
+- `scripts/morning_status.py` — new `preset_identity()` in [3b]: all 30 EA
+  inputs on the chart .chr compared byte-exact against
+  `mql5/MIDASTOUCH/MidastouchAI_M1_gold.set` (missing/extra keys, value
+  differences incl. reformatting, conflicting duplicate rows). Drift prints
+  `preset DRIFT ...` and marks the arm unhealthy; unreadable repo preset
+  reports UNVERIFIABLE (fail-closed — a lost pins file is the failure class
+  this guard exists to catch). Complements the watchdog's banner leg (4
+  pins, auto-remediation) as the independent full-inputs observation layer
+  (protocol §12, closeout addendum 3).
+- `tests/test_morning_status_preset.py` — 11 cases: pure semantics (OK on
+  byte-identical, drift on pinned change / reformatting / missing / extra /
+  duplicate, UNVERIFIABLE on unreadable pins, group headers ignored) plus
+  two end-to-end [3b] tests; chart fixtures self-maintained against the
+  real .set so a pin edit cannot silently invalidate them.
+
+## [MIDAS watchdog registered as standing infrastructure (protocol §12) with parity-session pause discipline] - 2026-09-17
+
+- `docs/MIDASTOUCH_PROTOCOL.md` §12 — registers `scripts/midas_watchdog.py`
+  as permanent paper-arm infrastructure: liveness leg (ledger-mtime
+  heartbeat, 35+10 min tiers, flat-check-gated PID-exact restart, escalate
+  at 3, weekend guard), config-drift leg (journal banner vs repo preset
+  pins, re-splice before relaunch, LIVE-is-drift, broken-pins observe-only),
+  and the **operative pause discipline**: `--pause`/`--resume` around every
+  parity/tester session or deliberate terminal stop; the certified parity
+  harness holds the marker itself and never lifts a manual pause; pausing
+  does not sanction hand edits on the live chart (certified chain only).
+- Operator contract documented: user-launched `start_midas_watchdog.bat`
+  (`--loop 600`), log/state artifacts; `--status`/`--dry-run`/`--force`/
+  `--reset-state` for inspection and emergencies.
+- Closeout addendum (2) appended: watchdog shakedown history (caught the
+  11:11 drift live, full remediation loop on camera), snapshot of what
+  runs now, artifacts index refreshed (EA v1.09, parity v2 + certificate,
+  watchdog paths).
+
+## [MIDAS parity certified: 150-vs-147 root-caused to stale vintages + positional zip; keyed harness v2 ships PASS] - 2026-09-17
+
+- **Root cause of the recorded 150-vs-147 parity failure** (run3): three
+  stale vintages, not an EA defect. The frozen python artifact reproduces
+  only under pre-amendment-2 Wilder ATR (verified exact 147-match); the
+  SMA-ATR engine of record yields 151 trades / +1.47R on WF. The run3
+  harness predated the v1.04+ BAR-parity engine (no InpBarModel, no
+  InpWindowStart/End pins) and zipped trades positionally, quantizing
+  SL/TP/timeout outcomes against the wrong partner after trade 0.
+- `scripts/midas_parity.py` v2 — regenerates python R from the engine of
+  record (selftest-gated), pins the full BAR contract (InpBarModel=true,
+  InpWindowStart/End = python t0/t1), aligns trades **by key**
+  (open/close ct + direction; positional zip is fail-closed illegal
+  evidence), reads EA evidence from the agent sandbox ledger (ticket join)
+  with journal fallback, rotates stale sandbox ledgers before each pass,
+  extends tester ToDate past the research window (03.31 truncation dropped
+  the WF tail trade; certified passes use 04.03), flat-checks the gold
+  ledger explicitly (inventory_arms only sees V75 charts), and pauses the
+  paper arm's watchdog for the session.
+- **CERTIFIED PASS** (`artifacts/midas_parity_result_20260917_1258.json`):
+  python 151 / +1.474R vs EA v1.09-BAR 151 / +1.478R — all 151 pairs keyed
+  identical on open/close times and direction, max |dR| = 0.0005R ≤ 0.01R.
+  Scope: ENGINE parity — the ALL-8-MODES NO-SHIP verdict stands; no
+  promotion (docs/MIDASTOUCH_PROTOCOL.md §11, Amendment 3, append-only).
+- `tests/test_midas_parity.py` — 12 offline tests pinning the keyed
+  alignment law (key agreement required even when R matches; keyless
+  journal sources can never PASS), and the v2 input contract.
+
+## [MIDASTOUCH gold-arm watchdog shipped: heartbeat auto-recovery + banner-vs-pins drift remediation] - 2026-09-17
+
+- `scripts/midas_watchdog.py` — the EA's 15-min ledger heartbeat (OnTimer EQ
+  touch, every terminal state) is the liveness signal. Staleness beyond
+  ~45 min triggers a flat-check-gated, PID-exact terminal restart (the
+  v28_sweep_runner discipline: a dangling OPEN or an unreadable/rowless
+  ledger fails closed — never restart a book we cannot prove is flat),
+  escalating after 3 consecutive restups without observed recovery.
+- **Config-drift leg:** the terminal journal's latest `MIDASTOUCH started`
+  banner is compared against the repo preset pins (mode / session /
+  execution / exec-model). Any mismatch — e.g. the 11:11 code-defaults
+  reattach (mode=1, $1000 basis, 25 min after the pinned restore) — is
+  remediated by the same restart **with the pins re-spliced into the chart
+  before relaunch** (a defaults-running instance would clobber the chart on
+  graceful exit). `execution=LIVE` is drift by definition. Caught and fixed
+  live during the shakedown: drift detected → stop → resplice → relaunch →
+  pinned banner 11:42:52 → `RECOVERED` counter reset on the next poll.
+- Guards: weekend no-restart (flat book, closed market), pause marker for
+  parity sessions (`--pause`/`--resume`), `--dry-run`/`--force`, escalation
+  state + last-action artifacts (`artifacts/midas_watchdog_state.json`,
+  `midas_watchdog_last_action.json`).
+- `morning_status` [3b] gains the watchdog line (escalation = arm
+  unhealthy); `start_midas_watchdog.bat` runs the 10-min loop from the
+  user's session (agent-spawned processes get reaped — start it yourself).
+- Tests: 21 offline tests pinning the tiers, the flat gate, weekend and
+  escalation guards, fail-closed parsing, banner drift parsing, the
+  resplice (with restore-on-verify-fail), and observe-only pin errors;
+  37/37 with the morning-status suite.
+
+## [MIDASTOUCH M1 arm: config drift caught and restored to pins; parity build v1.09 synced into the repo] - 2026-09-17
+
+- **Drift caught:** the gold paper arm's last attach (09:57) ran `mode=2
+  REVERSE_TRIGGER, session 12-16` — an unregistered variant left by the
+  interrupted parity session (v1.04→v1.09 iterations re-used the live chart
+  as a test bench). Zero fills in the drift window; ledger integrity intact.
+- **Restored via the certified chain:** `MidastouchAI_M1_gold.set` rewritten
+  as the complete 30-key pin set (mode=0 ORIGINAL, session 06-20, $50
+  virtual, PERTICK, `InpLiveExecution=false` hard), spliced with
+  `set_chart_preset.py` (chart backup kept), terminal recycled (flat-checked
+  first). Boot banner 10:57:15 verified pin-for-pin; morning status [3b]
+  green (veq 50.00, flat, 0/30 clock not started).
+- **Repo synced:** deployed v1.09 source (BAR-mode parity model + live-order
+  path behind `InpLiveExecution`, window-enforced BAR replay, watchdog
+  heartbeat) copied from the terminal tree to `mql5/MIDASTOUCH/
+  MidastouchAI.mq5` — the repo had been stale at v1.03.
+- **Standing rule restated:** parity passes run in the tester only; the live
+  chart changes exclusively through the preset + splice tool + banner check.
+- Live-trading answer unchanged and grounded: **not yet** — zero closed
+  forward trades exist under the frozen gates; the clock starts at the first
+  fill on the now-clean arm.
+
+## [MIDASTOUCH: gold pivot complete — indices program stopped & archived, gold engine v1.03 paper-live on XAUUSDmicro] - 2026-09-16
+
+- **Program pivot per operator directive**: synthetic indices (V75/V28) work
+  stopped — scheduled tasks disabled, all four paper arms flat-checked and
+  their charts disarmed across all three terminal installs (backups kept),
+  five ledgers archived with checksums (`archive/v75_ledgers_20260916/`,
+  closeout `docs/V75_CLOSEOUT_20260916.md`). Nothing deleted.
+- **Ground-truth probe** (`scripts/deriv_symbol_probe.py`): XAUUSD confirmed
+  on the real account; **cost toll 0.69% of a typical H1 stop** (vs 5.6%
+  that killed V75-1s). Floor math: XAUUSD min-lot risks ~$49.6/trade, but
+  **XAUUSDmicro risks ~$5.0/trade → tradeable at the real $50.22 account**.
+  Feed: H1 continuous 2024-04-10→2026-09-16 (one disclosed 112-day broker
+  hole before that); validated history in `data/forex/xauusd/`.
+- **Playbook** (`docs/MIDASTOUCH_GOLD_PLAYBOOK.md`) measured from our own
+  14,414 H1 bars: vol peak 13:00–15:00 UTC, spread ~$0.10 steady ($0.17
+  rollover worst).
+- **Frozen protocol + honest sweep** (`docs/MIDASTOUCH_PROTOCOL.md`,
+  `scripts/midas_sweep.py`): gates frozen pre-run, 8 modes × 4 windows on
+  50k M15 bars — **all 8 NO-SHIP** (best SHORT_ONLY PF 1.343 refused by G6
+  era-alternation). Two append-only amendments (pending-fill fidelity;
+  bounded SMA-ATR parity fix forcing a full symmetric re-sweep — no gate
+  shopping).
+- **`MidastouchAI.mq5` v1.03** (`mql5/MIDASTOUCH/`): gold-pinned by charter,
+  paper-default, compiles 0/0. Parity campaign vs the python engine:
+  +1-bar fill skew fixed (same-bar evaluate-and-fill); Wilder-ATR
+  history-depth divergence root-caused → bounded SMA-ATR(14) on both sides,
+  after which **entries align exactly**; outcome-level drift remains (150
+  vs 147) — certification parity NOT yet claimed, next session's task.
+- **Gold paper arm LIVE**: chart01 = XAUUSDmicro M15, MidastouchAI v1.03,
+  paper, $50 virtual equity mirroring the real account floor. Banner
+  `[MIDAS1.03] … symbol=XAUUSDmicro (GOLD-OK) … execution=PAPER`, ledger
+  `MIDASTOUCH_paper_XAUUSDmicro_M1.csv` initialized.
+- `morning_status.py` section **[3b] MIDASTOUCH GOLD ARM** added (chart
+  health, gold-charter check, ledger age/integrity/live/R); 16/16 existing
+  tests pass. Full record: `docs/MIDASTOUCH_CLOSEOUT_20260916.md`.
+
+## [A2 ATTACHED AND TRADING — the forward clock is running; §11 regime hypothesis pre-registered, run, and REFUSED] - 2026-09-16
+
+- **Arm A2 is live** (21:15:32 terminal-local): the attach that was queued as
+  "an operator step" turned out to be automatable — stopped the 49E0 terminal,
+  spliced the A2 expert block (built from the verifier-pinned preset, all 28
+  keys, magic/tag/tp2 asserted) into `chart01.chr` ahead of the window
+  section, relaunched. Banner: `[v28.10] MITEMSHUB V75 MACRO started |
+  mode=3 | experiment=ARM_A2_REVERSE_BOTH_TP20 | … | risk=1.00%`, PAPER
+  resume $1000.00, FILTER TABLE consult-only. Gate 4 recorded — all four
+  start-day gates DONE. Pre-edit chart backup:
+  `<data folder>/…chart01.chr.pre_A2_20260916.bak`.
+- Arm D resumed cleanly through the attach and two subsequent research
+  stop/start cycles; the sweep runner's ledger-flat verification passed on
+  every cycle (A2 flat, D flat, zero dangling OPENs).
+- Labels: `morning_status.MAGICS` and `v28_sweep_runner.KNOWN_MAGICS` now map
+  7788075 -> A2_fwd (arm A retired, archived). 30/30 on those suites.
+- **§11 regime test** (the REVERSE_TRIGGER gem): pre-registered BEFORE any
+  conditional data existed (two frozen candidates: R1 macro-direction state,
+  R2 ATR-percentile HIGH/LOW; frozen gate: uplift >= +0.10R, CI excluding
+  zero, both split halves, n>=40). Built `v28_regime_rerun.py` (tagged
+  single-sided passes + terminal restore, flat-check fail-closed) and
+  `v28_regime_test.py` (EA-faithful macro oracle from M15 bars — the
+  ReadMacroDirection close[1]-vs-EMA20 rule — with fail-closed coverage
+  after the fresh90 bars file silently answered 2025 trades with 2026 bars).
+  Deterministic re-runs matched the registry exactly (267/232/521 fills).
+  **VERDICT: REFUSED** — R1 negative in every window; R2 sign-stable in wf
+  but CI-spanning and significantly negative in is180. The is-window losses
+  DO classify (HIGH-vol), but that regime carried the wf gains: the
+  conditional edge itself flips across eras. No threshold-shopping; the
+  ALIGNED_DOWN observation is a seed for a new registration only.
+- Artifacts: `regime_rerun_*_*.json`, `regime_test_verdict.json`,
+  protocol §11 + §11.1.
+
+## [ML signal filter rides on A2 from day one: bucket table built and shipped PASSIVE; EA consult leg live; veto authority gate-frozen] - 2026-09-16
+
+- The §10 recon rewrote the design before anything shipped: the 15-feature
+  GBC's P(win) does not rank out-of-window (calibration flips between folds;
+  mean wf AUC 0.476) — shipping it as the floor-mode bar would have put
+  demonstrated non-skill in charge of vetoes. But a large SIMPLE structure
+  exists (side x 6h-block buckets span P(win) 0.32-0.90 vs 0.56 baseline),
+  and the sweep contains only M30_REVERSED_EXTREME signals, so conviction
+  class stays rule-based.
+- `scripts/signal_filter_table.py` (protocol §10.7, frozen on the recon):
+  bucket table with Laplace shrinkage (alpha=5), min-n=15 with GLOBAL
+  fallback, muted buckets ship exactly 0.50 ("no opinion"), and a five-leg
+  activation gate (n>=500, coverage>=50%, wf AUC>0.55 in >=5/6 folds, mean
+  >0.55, worst fold >= -0.05R). First build: gate FAIL (4/5 legs fail) ->
+  shipped **PASSIVE** (8 buckets + GLOBAL fallback) to
+  mql5/MITEMSHUB_AI/MitemshubAI_filter_table_A2.csv and the 49E0 Files dir.
+- EA: `LoadFilterTable` (banner-proven: FILTER TABLE line names buckets,
+  global rate, ACTIVATION, and consult-only status), `FilterConsultAllows`
+  in the floor-mode policy — prints FILTER CONSULT and writes FCONSULT
+  ledger rows on every floor-mode evaluation; in PASSIVE it can NEVER veto
+  (mirrored and pinned by test, including p=0.0 and the muted 0.50 case).
+  Veto authority activates only on an ACTIVATION=ACTIVE file, which only
+  `--certify` on gate-passing fresh re-run data can produce.
+- Forward build compiled clean; parity re-run PASS (n=27, max |dR|=0.0063) —
+  the tester path is untouched by the paper-only consult code. 13 new tests;
+  131/131 across the seven touched suites. Protocol §10.7, ARM_A2_RESTART
+  §2 note, and the silent-OSError hardening note for v28_signal_filter
+  (observed: two external pipeline runs read n=0 mid-parity when the agent
+  log was locked — read_log must distinguish empty from unreadable before
+  the builder can trust a zero).
+
+## [Floor-zone boundaries computed live and wired into morning status section [4]] - 2026-09-16
+
+- New `scripts/floor_zone.py`: the exact boundary chain per engine x symbol —
+  min-lot dollar risk from the EA's own formula ((stop / tick_size) x
+  calibrated tick value x volume_min), floor onset = risk / risk_fraction,
+  STRANGULATION crossover = risk / budget (15%), per-arm halt floor =
+  window-start x (1 - 30%). Tick value mirrors CalibratedTickValue() with the
+  5% identity rule — verified load-bearing live: the raw broker value (0.0001)
+  understates V75 risk 100x vs the geometric value (0.01). ATR is Wilder-
+  smoothed at the last CLOSED bar of each engine's anchor TF (v28/v75macro =
+  2.0x H1(14); pullback = 1.7x M15(14) with the swing-widening disclosure —
+  a floor estimate, never hidden). MT5 python access is injected and
+  fail-closed: no terminal -> disclosed UNKNOWN, never a guessed boundary.
+- Morning status gains section [4] FLOOR ZONES: per-engine boundary rows and
+  a per-arm verdict (TRADING / FLOOR_MODE / STRANGULATED / HALTED / UNKNOWN)
+  from the ledger veq; STRANGULATED/HALTED flag unhealthy for --strict.
+- Live first read (2026-09-16): pullback min-lot $5.07 -> strangulation
+  $33.82, B_tp24 veq $40.20 = FLOOR_MODE; v28 min-lot $12.75 -> onset
+  $1,274.84, strangulation $84.99; D_fwd/C_v75 UNKNOWN pre-first-fill.
+  Numbers reconcile with the observed guard firings ($4.64-$6.10 at Sep-15
+  ATR -> $30.93 crossover, the arm-A anchor, pinned as a test).
+- Two findings the tests now pin: (1) for a $50-start pullback arm the halt
+  floor ($35) sits ABOVE the strangulation crossover ($30.93-$33.82) — the
+  structural-abort halt fires BEFORE the slow strangle completes, which is
+  the policy intent (restart, don't die locked out); (2) at current ATR the
+  v28 floor-onset ($1,274.84) is ABOVE A2's $1,000 basis — A2 will run in
+  floor mode from day one, i.e. min-lot trades at ~1.28% risk under the
+  conviction bar and budget guard (functioning, not strangled; the guard
+  cap is $150 vs ~$12.75 min-lot risk). 13 new tests; 118/118 across the
+  six touched suites; go-live verifier PASS.
+
+## [Floor-mode policy implemented in the engine guard: hard drawdown stop + raised entry bar replace the silent veto; parity re-verified] - 2026-09-16
+
+- The promised strangulation-zone fix is now engine code. Floor mode = the
+  broker minimum lot risking more than the strategy fraction of virtual
+  equity (paper path only; the tester path keeps the research contract
+  byte-faithful). In floor mode the paper engine takes the minimum lot ONLY
+  if two new gates pass, both printing their operands loudly:
+  (1) FLOOR MODE HALT — virtual equity at or below 30% below window-start
+  equity (g_paper_start, preserved across ledger resume: no drawdown
+  laundering) halts entries; restart is a structural abort on a fresh ledger;
+  (2) FLOOR MODE conviction bar — only strong BB+RSI springboards
+  (M30_REVERSED_BB_UPPER/LOWER+RSI class) pay the floor's ~10x risk premium;
+  plain *_EXTREME signals stand down. The account-budget guard then applies
+  exactly as before, print shape untouched for funnel_diff.
+- Order enforced and pinned: identity evidence (g_entry_trigger set before
+  sizing on the paper path) -> halt -> conviction -> budget -> take min lot.
+  A2's $1,000 basis never enters floor mode; the policy exists so the
+  account can trade at ANY balance — the user's principle, in code.
+- Pinned: A2 preset carries InpMaxTotalRiskPct=15.0 (now explicit, was an
+  implicit default), InpFloorModeMaxDDPct=30.0, InpFloorModeConviction=true;
+  verifier pins extended and PASS; two new tests pin the preset values and
+  the engine contract (policy order, g_paper_start baseline, tester-path
+  separation). Compile 0 errors/0 warnings; parity re-run PASS (n=27, max
+  |dR|=0.0063) proving the tester path untouched; 112/112 across the six
+  touched suites.
+
+## [Arm A stopped and its slot freed for A2: EA disarmed from FB9A profile, final ledger verified in artifacts] - 2026-09-16
+
+- Ground-truth first: arm A runs on FB9A (Program Files MT5, co-hosting arm
+  C) — and that terminal was ALREADY stopped (no process; last EA journal
+  write 17:47 today, paper CSV frozen since 09-15 21:44). The live-stop
+  requirement was therefore already satisfied; the remaining risk was the
+  saved profile: FB9A's Default `chart01.chr` still carried arm A's expert
+  block (MitemshubAI.ex5, InpMagic=7788075) and would have auto-resumed the
+  strangled arm on next launch.
+- Disarmed with a byte-precise splice of the `<expert>…</expert>` block
+  (magic-asserted before cutting; BOM and chart body verified after:
+  58,540 -> 52,442 bytes). Arm C's expert on chart03 verified untouched.
+  Pre-edit chart backup: `artifacts/paper_ledgers/armA_FB9A_chart01_chr_backup_20260916.chr`
+  (sha256 4ced7443…). Final ledger archive re-verified byte-identical to the
+  FB9A source (sha256 393c0830…, 43 rows, last row the v26.39 ERA marker).
+- Fleet map corrected on the record: 49E0 = MitemshubMT5_B install hosting
+  arm D (running, flat: 0 outstanding OPENs), 71BF = MitemshubMT5_C (stopped,
+  arm B), FB9A = Program Files MT5 (stopped; arm C armed, arm A now disarmed).
+  The A2 chart slot is 49E0's spare Vol75 chart (EA-less) — attaching A2
+  needs no FB9A action. `morning_status.py` inventory is discovery-based, so
+  arm A drops out automatically; its stale co-hosting comment updated.
+  `verify_go_live_artifacts.py` PASS re-confirmed after the change.
+
+## [ML signal-filter track started: protocol §10 pre-registered, pipeline built, first walk-forward gate run = FAIL (no ship)] - 2026-09-16
+
+- **§10 pre-registered BEFORE any training** (V28_RESEARCH_PROTOCOL.md):
+  decision-time features only (last CLOSED M15 bar; peak_r/hold/exit reason
+  are outcomes and forbidden), walk-forward expanding folds with a 1-month
+  embargo, a 30-trades-per-(month × geometry-cell) group cap against the
+  sweep's re-run duplication, frozen sklearn config, and a mechanical ship
+  gate (≥5/6 folds improved, aggregate uplift ≥ +0.10R, keep-rate ≥ 0.35).
+  Deployment order frozen: wf gate → fresh re-run check → shadow on arm A2 →
+  only then a preset amendment shipping a frozen P(win)-bucket table.
+- **Dataset honestly counted: 799/8,426 trades (9.5%) carry decision-time
+  journal evidence.** The registry's 8,426 trades carry money-PnL arrays only;
+  per-trade telemetry (OPEN/CLOSE lines: side, trigger, entry/SL/TP, R,
+  peak_r, hold, exit reason) exists only where agent journals survive — today
+  that is 937 paired trades, of which 817 join REVERSE_BOTH rows (12 OOS-role
+  excluded by rule, 108 no-registry-row) and 799 featurize inside bar
+  coverage. Coverage grows ONLY by deterministic §2 re-runs; every report
+  prints the ratio.
+- **First walk-forward run: gate FAIL — ships nothing.** 2/6 folds improved;
+  aggregate uplift −0.025R vs the take-everything baseline; keep-rate 0.73
+  passed. The remaining folds' expR is dominated by a few fat wins the model
+  cannot see coming from decision-time features at this coverage. Per §10.4
+  there is no re-tuning against these folds; the pipeline is deterministic
+  (seeded) and reproduces the verdict exactly on re-run.
+- New `scripts/v28_signal_filter.py` (journal parsing against the real agent
+  log shapes — reason-word CLOSE lines, mid-line sim timestamps — registry
+  join with full coverage accounting, ATR/RSI/range/vol-regime decision-time
+  features, purged folds, gate) + 17 offline tests (real-shape parsing pins,
+  leakage pin: perturbing the entry bar must not move the features, embargo
+  and cap discipline, frozen gate constants, synthetic end-to-end).
+  173/173 across the eight touched suites.
+
+## [Forward build MitemshubAI_v28_fwd assembled, compiled, and PASSED parity] - 2026-09-16
+
+- **The A2 blocker is cleared.** `mql5/MITEMSHUB_AI/MitemshubAI_v28_fwd.mq5`
+  (APP_VERSION 28.10): v28 strategy core verbatim + the v26.40 paper module
+  ported (virtual equity, per-tick hard SL/TP mirror with STOP-before-TP,
+  tagged ledger, fleet-mirror account guard, floor-mode sizing so the account
+  is tradeable at any balance) + the per-close `Trade R:` parity line. Compiled
+  clean: 0 errors, 0 warnings.
+- **Parity: PASS** (`artifacts/v28_research/armE_parity_20260916_181219Z.json`):
+  research `[v28.00]` vs forward `[v28.10]` on the held wf window with identical
+  inputs — 27/27 trades aligned in order, max |dR|=0.0063 ≤ 0.02, totalR +3.0280
+  vs +3.0293 (|d|=0.0013 ≤ 0.05), input pins verified from both reports. §2's
+  byte-faithful claim is now measured, not asserted. A2 start-gate 1 SATISFIED.
+- **The harness's fail-closed design earned its keep twice**: the first live
+  run came back INCONCLUSIVE because (a) no EA ever emitted the `Trade R:`
+  line parity requires — the forward build now emits it, and (b) the agent's
+  flush lag truncated the journal read (13 of 27 lines) and the identity parser
+  didn't know the MITEMSHUB banner. Evidence layer rebuilt: tag-addressed
+  journal segments (init banner `experiment=<tag>` bounds the pass),
+  sign-tolerant regexes (`%+.4f` prints a leading `+` — the original `-?`
+  class parsed zero forward lines), CLOSE-line R fallback for the research
+  build (which has no Trade R line), and a flush-lag stability loop that
+  stops once the R count is stable across two reads. 6 new tests pin the
+  contracts the live run earned; 156/156 across the seven touched suites.
+
+## [ARM A2 RESTART authorized: REVERSE_BOTH tp2.0 at a $1,000 basis; arm E superseded; strangulation diagnosis closed the loop] - 2026-09-16
+
+- **User decision (2026-09-16)**, following the full program audit: arm A
+  (pullback, TPx1.8, $50 basis) is structurally dead — 14 forward trades,
+  -4.16R, DD 55%, and BELOW the strangulation crossover ($30.93 needed vs
+  $30.73 held): it can never trade again at its config. Arms A+B are the
+  pullback family's forward record: -6.2R over 24 trades. The restart
+  repurposes arm A's window and fleet slot for the program's only supported
+  positive finding: **V28 REVERSE_BOTH sl2.0/tp2.0/h180/r1%**.
+- **docs/ARM_A2_RESTART.md** frozen BEFORE any A2 data: basis change
+  rationale ($50 virtual makes min-lot ~10% risk; $1,000 makes it ~0.5% —
+  an accounting unit, not capital; stats stay R-denominated), arm identity
+  (magic 7788075 = arm A's ORIGINAL slot, tag A2, fresh ledger + clock),
+  arm-D verdict gates verbatim, plus a NEW standing structural abort: the
+  budget guard's effective cap below observed min-lot risk for 14
+  consecutive days = restart, not pause. Expected duration 7-15 months,
+  but the clock starts when the build lands — not after arm D adjudicates.
+- **Arm E superseded (append-only note in its proposal)**: same candidate,
+  amended start gate; its build contract + parity harness + verifier design
+  carry over to A2 unchanged in content. Arm E never opened a window.
+- **`MitemshubAI_VOL75_ARM_A2.set`** pre-drafted (build contract): tp2.0
+  surface, magic 7788075, tag A2, $1,000 paper equity, fleet CSV without
+  the retired arm-E magic. Two near-miss errors caught before they
+  propagated: the first draft assigned arm B's magic (7788100) to A2 —
+  collision with the live arm B; and the retired 7788175 initially lingered
+  in the fleet CSV.
+- **Accrual registry**: E retired, A2 registered pre-start (start=None,
+  _A2.csv glob, fails closed); verifier `verify_arm_a2_preset` +
+  `verify_arm_a2_consistency` (parity-pin equality, registry pre-start);
+  weekly leg iterates the registry so A2 joins automatically on start day.
+- Tests retargeted and green: 46/46 in the two touched suites; go-live
+  verifier PASS with A2 pins live.
+
+## [Arm-E preset pre-drafted + verifier pins: every start-day artifact now exists except the init banner] - 2026-09-16
+
+- **`mql5/MITEMSHUB_AI/MitemshubAI_VOL75_ARM_E.set`** pre-drafted as a BUILD
+  CONTRACT (the forward EA does not exist yet): the frozen tp2.0 v28 strategy
+  surface (mode 3, sl 2.0 / tp 2.0 / hold 180 / risk 1%), paper-only, magic
+  **7788175** (+25 offset; collision-free beside A/B/C/D), tag E (suffixes
+  all Files output so the accrual registry's `_E.csv` glob can only match
+  arm E), fleet CSV extended with E's magic, tick recorder off (arm B owns
+  the shared file), 24/7 session. The verifier itself caught the first
+  draft's inline `;` comments — MT5 .set values must be bare; commentary now
+  lives on its own lines.
+- **`verify_arm_e_preset`** added to `scripts/verify_go_live_artifacts.py`
+  (fail-closed pin set mirroring arm-D's verifier) plus
+  **`verify_arm_e_consistency`**: the preset's strategy surface must equal
+  `build_parity.INPUT_PINS` exactly (parity run and forward preset test the
+  SAME candidate or the precondition is meaningless), and the accrual
+  registry must hold arm E PRE-START (start=None, `_E.csv` glob) — starting
+  the clock without the parity pass + banner now fails verification.
+- Pinned by two new tests (paper-safe + frozen pins + bare values +
+  fleet membership; cross-artifact consistency incl. parity-pin equality).
+  Go-live verifier: PASS with the new checks live; doc §8 .set line filled;
+  136/136 across the six suites.
+
+## [Build-parity shadow-window harness built for arm-E's §3 hard start precondition] - 2026-09-16
+
+- **`scripts/build_parity.py`** (built pre-start, designed and frozen before
+  first use): runs the research build (`MitemshubAI_v28`) and the forward
+  build on IDENTICAL inputs — the exact §3 pinned tp2.0 surface via
+  `candidate_inputs()` — over the same held shadow window (default `wf`),
+  then diffs the two trade sets per trade: (side, entry_time) must align in
+  order and per-trade R must match within frozen tolerances (0.02R per trade,
+  0.05R cumulative, n≥10 — tolerance cannot be laundered across many trades).
+- **Verdict classes, mechanical and fail-closed**: PASS / FAIL_TRADE_SET /
+  FAIL_R_SEQUENCE / INCONCLUSIVE_{ZERO_TRADES,LOW_TRADES,EVIDENCE} — missing
+  identity lines, report/journal R disagreement, or unparseable evidence are
+  INCONCLUSIVE, never "passing"; inconclusive never opens the window.
+- **Guards**: the `oos` block is refused outright (spent one-shot window);
+  research==forward is refused (two runs of one ex5 certify nothing); both
+  .ex5 files must exist BEFORE the terminal is stopped (never stop a live
+  arm for a run that cannot happen); both passes' REPORT input dumps must
+  carry the §3 pins (numeric-normalized — what actually ran, not the INI).
+- **Terminal discipline**: reuses the sweep runner's own — terminal identity,
+  arm inventory, every ledger flat (override recorded), stop, both passes,
+  relaunch — and the registry is NOT touched (parity is a precondition
+  artifact, not a §5 experiment). Receipt: `artifacts/v28_research/armE_parity_*`.
+- **Test-pinned** (17 offline tests): normalization alignment + disagreement
+  refusal, every verdict class, cumulative-drift laundering case, input pins
+  (exact + numeric-equivalent + drift + missing), all three pre-terminal
+  refuses, frozen exit codes (0/10/11), artifact naming. 134/134 across the
+  six suites; arm-E §3/§8 updated with the start-day command.
+
+## [armd_accrual generalized to an ARMS registry: arm E supported pre-start, Sunday leg iterates every registered arm] - 2026-09-16
+
+- **`scripts/armd_accrual.py` is now the all-arms forward-test accrual tracker**
+  (per the arm-E pre-draft §6 note, landed pre-start rather than at start):
+  `ARMS` declares each arm's doc citation, pre-registered gates, window start,
+  ledger glob, and accrual artifact. `accrue(append, force, arm="D")` keeps
+  the old arm-D contract byte-compatible; the CLI gains `--arm` (default D).
+- **Arm E registered pre-start, failing closed**: gates frozen verbatim from
+  arm D (`ARME_TP20_FORWARD_PROPOSAL` §4), `start: None`, ledger glob
+  `SET-ON-START-DAY*` — `accrue(arm="E")` raises SystemExit until start day,
+  so no zero row and no clock can start by accident. First successful accrual
+  records `window_start=<date>` in-row and derives the clock from it (§8's
+  only registry actions on start day: real terminal id + confirmed init date).
+- **Rows carry the arm tag; artifacts are per-arm** (ARMD_ACCRUAL.jsonl /
+  ARME_ACCRUAL.jsonl) — independent windows never blend. Today's D row
+  force-stamped once to complete its tag.
+- **Weekly leg §[6] generalized**: iterates `sorted(ARMS)` with per-arm
+  SystemExit isolation (pre-start E degrades to a recorded `unavailable`
+  note), section key renamed `armd_accrual` -> `accrual` with `by_arm`, and
+  NEXT ACTIONS now name the arm each VALIDATED/REJECTED verdict belongs to.
+  Live run proven: D accrues, E refused loudly, leg completed.
+- Tests: registry freeze (verbatim citations, gate identity), E pre-start
+  fail-closed, E first-accrual window-start stamping, per-arm artifact
+  isolation, weekly-leg structural pins. 117/117 across the five suites.
+
+## [Account-guard post-v26.37 firings reclassified: designed vetoes, not defects — funnel-diff classifier replaced with operand+ledger taxonomy] - 2026-09-16
+
+- **Investigation verdict: classification bug, not guard defect.** The drill-era
+  rule ("any post-v26.37 firing = DEFECTIVE") mis-flagged correct vetoes:
+  - 2026-09-15 19:30:00 (v26.37, new $6.10 > cap $4.61) and 20:15:00 (v26.38,
+    new $4.64 > cap $4.61) — both on the FIXED builds, `fleet $0.00` truthful
+    (ledger: no position open), cap $4.61 = $30.73 × 15% exactly (arm A virtual
+    equity after that day's −1.271R close; `InpMaxTotalRiskPct=15` from the
+    chart surface). The candidates were min-lot entries at 19.9% of equity —
+    correctly refused by the **account-budget guard** (the documented
+    small-account/strangulation regime), not the fleet-mirror guard.
+  - Two further firings today (15:15/15:30, v26.39) classify identically.
+- **Classifier rewritten** (`scripts/funnel_diff.py`): per-firing classification
+  from the firing line's own operands (build, fleet/new/cap) + the host arm's
+  ledger state at the firing instant (OPEN/CLOSE sequence pairing, single-
+  position book). Taxonomy: position-open ∧ fleet≈$0 → DEFECT (mirror blind);
+  no-position ∧ fleet>$0 → DEFECT (phantom fleet); otherwise WORKING (designed
+  veto). Unparseable time fails to UNCLASSIFIED; pre-deploy firings keep the
+  closed $0-basis class; anything unprovable never silently reads WORKING.
+- Artifact of record rewritten: `funnel_diff_20260916.json` — account-guard row
+  now "CLASSIFIED: designed vetoes ... not defects"; summary flags only
+  `paused` (pre-existing LOW-COUNT row, unchanged).
+- Pinned by `tests/test_funnel_diff_guard.py` (8 tests: the four live WORKING
+  firings, both DEFECT mechanical cases, fail-closed paths, frozen deploy
+  boundary, ledger pairing). Suite green: 113/113 across the five project
+  suites.
+
+## [Dead scheduled tasks deregistered: MQL5Verify, SyntheticIndicesLiveAutoScorer, SyntheticIndicesLiveTickCollector — all OS-Disabled since Aug, action scripts already deleted in 7f25ce0; definitions exported for the record] - 2026-09-16
+
+- **Forensics before deletion:** all three tasks were already **Disabled** by
+  the OS, last ran 2026-08-21 (before the Aug 24 cleanup), and their action
+  wrappers (`run-mql5-verify-task.ps1`, `run-live-score-loop-task.ps1`,
+  `run-live-tick-collector-task.ps1`) were deliberately removed in commit
+  `7f25ce0` ("Remove obsolete tick collection scripts and old artifacts") —
+  the tick-collection/autonomous-live era they served is superseded by
+  EA-side tick recording, the manifest-pinned deploy gate, and the current
+  operating rhythm (morning_status daily + Sunday paper pipeline).
+- **Action:** each task's XML definition exported to
+  `artifacts/v75_replay/dead_task_definitions_20260916/` for the record,
+  then unregistered. Task Scheduler now contains exactly one project task:
+  **SyntheticIndicesPaperPipeline** (Ready, Sundays 06:30). Historical
+  references in `docs/PHASE5_SUMMARY.md` left untouched (phase record).
+- **None recreated:** nothing in the current frozen pipeline cites these
+  functions; recreating a task whose action script no longer exists would
+  only manufacture a new silent-failure surface.
+
+## [Go-live rehearsal executed read-only: 5/6 PASS — and it caught the LIVE preset stub booting TP 2.4 instead of the certified tp18 geometry, plus the v26.40 build missing from terminal A] - 2026-09-16
+
+- **New tool `scripts/go_live_rehearsal.py`** — a repeatable, read-only dry run
+  of every GO_LIVE_CHECKLIST verification step: terminal-A process identity,
+  journal account authorization, repo LIVE preset values, deployed Common
+  copy byte-identity, verify_go_live_artifacts, and a banner-marker rehearsal
+  against the SAME terminal + EA build the live attach will use. Artifact:
+  `artifacts/v75_replay/go_live_rehearsal_YYYYMMDD.json`, exit 0 iff all pass.
+- **LANDMINE #1 (preset stub, FIXED):** the shipped LIVE preset was a 7-line
+  stub — a fresh attach + Load would have booted `InpTpMult` at the **2.4
+  default** instead of the adjudicated tp18 geometry the truth table and
+  certified chain are built on. Both presets are now completed from arm A's
+  executed chart surface (79 keys each; only InpLiveExecution + the tick
+  recorder differ); the deployed Common copy is re-synced byte-identical; and
+  `verify_go_live_artifacts` now REQUIRES the certified pins (TpMult 1.8,
+  risk 0.005, 20% cap, fleet CSV with A+B) so a stub can never pass again.
+- **LANDMINE #2 (stale build, OPEN):** terminal A's newest banner is v26.39 —
+  the manifest-certified v26.40 build was never deployed to FB9A. This is the
+  rehearsal's remaining FAIL, by design: run the deploy sync (sync-mt5.ps1,
+  manifest-pinned v26.40), then re-run the rehearsal for a fresh v26.40
+  banner. The banner marker surface itself is proven (all 10 checklist
+  strings found live, including the evolved FIT ROUTER wording and the
+  phantom "State ->" line the checklist prose carried — now corrected).
+- **Rehearsal robustness, learned from the live logs:** inits can be
+  truncated mid-sequence (terminal stop), so markers aggregate across ALL of
+  the day's banner blocks; the version check reads the NEWEST banner (the
+  build an operator would see) against repo APP_VERSION; the PAPER MODE:
+  discriminator is validated in the paper banner so the live absence-check
+  is a real detector, not a no-op.
+- **Tests:** 8 new offline tests (synthetic UTF-16 journals, truncated-init
+  aggregation, newest-banner version semantics, stub refusal, discriminator
+  validation, subprocess whitelist pinning the read-only contract); suites
+  119/119 green.
+
+
+## [Arm-E tp2.0 forward-test proposal PRE-DRAFTED: verdict gates frozen before any forward data, thin-sample disclosure built in, start gated on arm D's adjudication + a hard build-parity pass] - 2026-09-16
+
+- **`docs/ARM_E_TP20_FORWARD_PROPOSAL.md`** — the arm-D discipline applied to
+  the tp2.0 cell (the one-shot's chosen candidate) BEFORE it earns a window:
+  frozen gates (n ≥ 60, totalR > 0, DD ≤ 25%, meanR ≥ 0.05; abort at 30%),
+  monthly reads, structural-abort restart rule, and an expected-duration
+  statement (7–15 months at the family's observed rates) written now so it
+  cannot disappoint later.
+- **Thin-sample disclosure built in (quote-verbatim rule):** tp2.0's only
+  independent evidence is the 12-trade OOS sample (+0.225R, PF 1.07 — CI
+  includes zero); "proven/validated/profitable" are banned phrasings until
+  arm E's own window resolves; strongest permitted phrasing is "directionally
+  positive, thin, forward test pending".
+- **Selection provenance recorded as the disclosure's backbone:** every held
+  number (is180/wf/family) participated in choosing the cell — the forward
+  window is the only evidence tp2.0 will ever earn that it did not help
+  select itself.
+- **Two structural pre-declarations:** the program holds exactly two forward
+  tests (arm D's candidate, arm E's tp2.0) and at most one open verdict at a
+  time (arm E starts only after arm D's adjudication or structural restart);
+  and a hard build-parity precondition — the research build's trade set must
+  be reproduced by the forward EA on a held shadow window before the window
+  opens, else the test would verify nothing.
+- **Nothing runs yet:** STATUS is PRE-DRAFT; fill-in checklist at §8.
+
+## [Arm-D accrual wired into the Sunday pipeline end-to-end: weekly §[6] verified live, SyntheticIndicesPaperPipeline task registered — the documented schedule had NO task behind it] - 2026-09-16
+
+- **Verified the wiring live:** `paper_weekly.py` §[6] runs `armd_accrual.accrue`
+  (idempotent per day), embeds the row + pre-registered verdict in the report
+  artifact, and propagates VALIDATED/REJECTED into NEXT ACTIONS; a missing
+  ledger degrades to `unavailable`, never kills the leg. Structural test pins
+  all of it (`test_paper_weekly_has_the_armd_leg_and_survival_catch`).
+- **Root cause found:** the ops doc's "Sunday 06:30 pipeline" and
+  `paper_pipeline_weekly.cmd` had **no registered scheduled task** behind
+  them — and all three existing tasks (MQL5Verify, LiveAutoScorer,
+  LiveTickCollector) point at `run-*-task.ps1` wrappers **deleted from the
+  repo**; the scheduler layer has been silently dead since ~Sep 4 (sched log
+  last write Sep 4, pipeline_state stale).
+- **Fix:** registered **SyntheticIndicesPaperPipeline** (Sundays 06:30 local,
+  StartWhenAvailable, 2 h cap, user-level) → `run-paper-pipeline-task.ps1` →
+  `.venv` `paper_pipeline.py`, appended to
+  `artifacts/v75_replay/paper_pipeline_sched.log`. Wrapper proven with a live
+  run: rc=0, log grown, pipeline_state refreshed.
+- **Surfaced, not fixed (owner decisions):** the three dead task wrappers
+  (recreate or deregister), and the funnel-diff leg's **account-guard
+  DEFECTIVE** signal (post-v26.37 firings on 2026-09-15) — an open ops item
+  that now resurfaces every Sunday via this task.
+
+## [Go-live engineering audit: live order path confirmed broker-side resting SL/TP, artifacts PASS on v26.40, checklist version pins fixed] - 2026-09-16
+
+- **Audit origin:** the 2026-09-16 access-point-hopping investigation showed a
+  ~5-minute server-side feed stop while holding a position would blind EA-side
+  exit management; the mitigation is broker-side resting SL/TP attached at
+  entry.
+- **Verified, no code change needed:** both live order paths
+  (`MitemshubAI.mq5` standard 3059-60, VOL75 3239-40) submit SL/TP inside the
+  market order itself — resting broker-side protection exists from the fill;
+  `ValidStopForModify` guards every subsequent `PositionModify`.
+- **`verify_go_live_artifacts.py`: PASS** — v26.40 compiled and synced, LIVE
+  preset byte-identical to repo, deploy-manifest pins match.
+- **Operator trap fixed:** the checklist's banner expectations still said
+  v26.39 while the verified build is v26.40 — build pin, banner strings, and
+  build-history note updated so go-live day's own string check cannot fail
+  spuriously.
+
+## [OOS one-shot SPENT on tp2.0 (user-authorized): +$20.55 / +0.225R over 12 trades — frozen verdict CONTINUE_THIN, positive OOS sign, interior NOT retired] - 2026-09-16
+
+- **The spend:** `REVERSE_BOTH_sl2_tp2_h180_r0.01`, executed through the sweep
+  runner (arm D flat-verified pre-stop, banner-verified post-relaunch, canary
+  armed). Reason recorded in the spend token: best wf cell, solo permutation
+  p = 0.051, survives every leave-one-out drop.
+- **Registry row V28-0061:** n = 12, pnl **+$20.55**, R **+0.225**, PF 1.07 —
+  the only positive REVERSE_BOTH-family OOS row in the registry.
+- **Frozen decision: CONTINUE_THIN** — the sign survived out-of-sample but
+  n = 12 < 30 cannot carry a proposal (pre-scoped when the rule was frozen).
+  OOS for this interior is now closed forever; the token and the registry row
+  are the permanent receipts. Nothing was tuned against the window.
+- **Post-spend standing:** is180 family p = 0.0000 (SUPPORTED); wf family
+  p = 0.066 borderline (hangs on the sl1.0 cell alone, per the leave-one-out
+  diagnostic); single OOS sample positive. The path to live remains arm D's
+  frozen forward window (n ≥ 60, R > 0, DD ≤ 25%); the go-live engineering
+  track (fill model, server-side SL/TP, kill-switch, sizing caps) proceeds in
+  parallel per user authorization.
+
+## [Family test extended to held windows + leave-one-cell-out sensitivity: is180 SUPPORTED at p≈0, wf negative verdict shown to hang on the sl1.0 cell alone (OOS refused in code)] - 2026-09-16
+
+- **Held-window extension (protocol §9 amendment 4a):** `wf-family` now takes
+  `--window wf|is90|is180` and **refuses OOS in code, unconditionally** —
+  amendment 3's one-shot rule owns that window. is180 result: 10 distinct
+  trade sets, 306 pooled trades, family +$18.51/trade (p05 +$5242, profitable
+  share 1.000) vs ORIGINAL −$27.03 (profitable share 0.000), mean diff
+  +$45.55/trade, permutation p = 0.0000 → **FAMILY_EDGE_SUPPORTED**.
+- **Leave-one-cell-out diagnostic (test-pinned):** on wf, dropping sl1.0 flips
+  the verdict (p 0.066 → **0.029**, SUPPORTED); all other drops stay
+  0.051–0.065; sl1.0 alone is a wf loser (−$2.37/trade, p = 0.32) — the same
+  cell the IS adjudication flagged as §6 one-window-wins noise. No distinct
+  cell passes solo (best tp2.0 p = 0.051). Recorded as an honest borderline
+  input to the amendment 3 spend decision; the bar is NOT re-tuned.
+- **Tooling:** 7 new offline tests (OOS refusal ×2, is180 aggregation, window-
+  suffixed artifact names, LOO carrier identification, solo diagnostics);
+  suites 99/99 green across v28 research, sweep runner, and go-live artifacts.
+
+## [Family-level wf significance test for the REVERSE_BOTH interior: dedupe-to-distinct-trade-sets, pooled bootstrap, permutation vs ORIGINAL — verdict FAMILY_EDGE_NOT_SUPPORTED at p=0.066 against a +$18/trade level gap] - 2026-09-16
+
+- **The test (frozen and test-pinned BEFORE the first live run; protocol §9
+  amendment 4 + `v28_research.py wf-family`):** the mode's wf rows are deduped
+  to distinct trade sets (identical (n, pnl) signatures verified
+  trade-by-trade, collapsed to the baseline-geometry representative, collision
+  fails closed), pooled into one per-trade family sample, bootstrapped against
+  zero and against the ORIGINAL wf pool, and compared by a one-sided
+  permutation test of the mean-per-trade difference. Verdict bar (all
+  required): >= 100 pooled distinct trades, family p05 > 0, profitable share
+  >= 0.80, mean above ORIGINAL's, permutation p <= 0.05. Descriptive, not a
+  gate: it consumes no OOS resource and can never promote.
+- **Result (15 wf rows -> 12 distinct trade sets, 335 pooled distinct
+  trades):** family +$5.02/trade (p05 -$17.04, profitable 0.948) vs ORIGINAL
+  -$13.08/trade (p05 -$808.47, profitable 0.106); mean diff +$18.10/trade,
+  permutation p = 0.066 -> **FAMILY_EDGE_NOT_SUPPORTED** (family p05 <= 0;
+  p > 0.05).
+- **Reading, recorded with the result:** the level separation is large and
+  one-sided (consistent with the mode-level wf finding), but the refusal is
+  the honest one — the interior deliberately contains wf-losing cells (sl1.0,
+  h30 sign-flip; h60/h90/h360 bootstrap unprofitable) and its distinct
+  information is thinner than 335 trades suggest (exit inertness). A tight
+  interior would pass; this one carries its dead cells. Nothing retired: the
+  §9 amendment 3 one-shot OOS rule remains the family's only OOS path,
+  unspent.
+- **Tooling:** `wf-family` subcommand with --mode/--baseline (defaults
+  V28_REVERSE_BOTH vs V28_ORIGINAL); byte-deterministic artifact
+  (`wf_family_significance.json`, timestamp-free); docstring states both
+  directions of the unpaired test's honesty (conservative across pools,
+  approximate within the family pool). 8 new offline tests pin the collapse,
+  the collision refusal, determinism/directionality of the permutation
+  statistic, the verdict mapping, the sample floor, and artifact
+  byte-stability; suites 66/66 green.
+
+## [OOS one-shot rule pre-registered for the REVERSE_BOTH interior: mechanical eligibility from held windows, single-use spend token, frozen decision mapping — the only positive outcome is a forward-test proposal, never a ship] - 2026-09-16
+
+- **The rule (frozen BEFORE any interior OOS row exists; protocol §9
+  amendment 3 + `v28_research.py oos-oneshot`, code-checked):** a cell earns
+  the interior's single OOS run iff it holds is180+wf evidence with is R ≥
+  +2.0, wf R ≥ +1.5, wf sign matching is, and wf DD ≤ 20% — computed
+  mechanically from the registry, with two structural exclusions: the
+  baseline (its stage-1 OOS row already exists) and trade-identical
+  duplicate-exit rows (tp3/5/6: one strategy under three labels must not
+  multiply the shot's choices). Six cells eligible today: sl1.5, sl2.5,
+  tp2.0, h120, h240, sl3.0.
+- **Single-use, whole-interior:** spending requires an explicit --cell plus a
+  recorded --reason (auditable against the frozen bar); the spend token AND
+  any interior OOS registry row both block a second run, so deleting the
+  token cannot re-arm it. One run spends the shot whatever the outcome.
+- **Frozen decision mapping:** OOS DD > $3 000 (30% of the frozen deposit) →
+  FAMILY_RETIRED; pnl > 0 ∧ R > 0 ∧ n ≥ 30 → EARNED_FORWARD_TEST_PROPOSAL
+  (authorizes *drafting* an arm-D-style fresh-window proposal — not live
+  orders, not preset changes); positive but n < 30 → CONTINUE_THIN (recorded,
+  no action — a 90-day window yields ~12 family trades, so the promotion
+  sample gate can never be met by this block; that is why the shot is a
+  final historical verdict, not a promotion input); pnl ≤ 0 → FAMILY_RETIRED.
+  A retirement closes the interior's OOS consideration forever; no rows are
+  deleted and no history is rewritten.
+- **Self-review caught a label-gaming hole before any run:** the duplicate-
+  exclusion (3) was added after seeing the first dry-run list tp3/5/6 as
+  separate choices — they are the baseline's trade set relabeled, and the
+  frozen rule now says so explicitly. Dry-run verified against the live
+  registry (6 eligible, exclusions firing); 9 new offline tests pin the
+  eligibility bar, exclusions, decision mapping, spend requirements, and the
+  spent-shot refusal (v28 suite 44/44). Nothing ran against OOS; the token is
+  unspent and the block stays reserved.
+
+## [V28 stage-2 evidence completed: TP/hold walk-forward rows close the §5 matrix — the frozen default geometry (sl2/tp4/h180) is the wf optimum on every axis, TP inertness above 3 ATR transfers exactly, and both IS extremes (h360, h30) die out-of-regime] - 2026-09-16
+
+- **Executed:** the ten remaining sweep cells (tp2/3/5/6, h30/60/90/120/240/360)
+  ran on `wf` through the permanent runner
+  (`v28_sweep_runner.py exit-sweep --window wf`, registry V28-0051 → V28-0060,
+  arm D flat pre-stop, banner + $50.00 veq verified post-relaunch, OOS
+  untouched). All 15 sweep cells now hold is + wf evidence; registry at 60
+  records, re-exported.
+- **TP axis:** inertness above 3 ATR transfers exactly — tp3/4/5/6 identical on
+  wf as on is (+2.516R), a structural property of the exits. tp2.0 is the best
+  wf cell of the whole sweep (+3.03R) and the only live TP cell on either
+  window.
+- **Hold axis:** the IS h120 dip is absent on wf — confirmed noise per §6. The
+  wf surface rises monotonically to the h180/h240 plateau (+2.52/+2.48R); both
+  IS extremes die out-of-regime (h30 sign-flips to −0.57R; h360 degrades to
+  6.7% of its IS edge) — the same lesson the SL axis taught (IS champions are
+  regime artifacts; the interior is what holds).
+- **Synthesis:** the frozen default geometry (sl2/tp4/h180) sits at or beside
+  the wf peak on all three axes. No re-selection is authorized or suggested;
+  the stage-2 conclusion is that the mode carries the edge and the baseline is
+  already inside the flat region. Gate verdicts unchanged (all cells REFUSED:
+  missing oos evidence, thin samples); the OOS block stays reserved.
+- **Tooling note:** the runner's first real command surfaced a CLI defect — a
+  plain `nargs='*'` made the top parser reject the subcommand's `--survivors`;
+  fixed with `argparse.REMAINDER`, parser extracted as `build_parser()`, and
+  pinned by two new pass-through tests (runner suite 14/14, v28 suite 35/35).
+  Protocol §9 amendment 2 records the full matrix.
+
+## [V28 sweep discipline graduated into a permanent protocol tool: scripts/v28_sweep_runner.py pins exact terminal identity, discovers arms from chart profiles, and refuses to stop the terminal unless every hosted paper ledger is provably flat] - 2026-09-16
+
+- **The tool:** `scripts/v28_sweep_runner.py` (registered in
+  V28_RESEARCH_PROTOCOL.md §2) wraps any v28_research command in the full
+  stop → flat-check → sweep → always-relaunch discipline. Verified live:
+  `status` discovers D_fwd from the 49E0 chart profile (magic 7788150, tag D,
+  21 ERA rows) and reports FLAT with exit 0. Two live-caught defects fixed in
+  the same session: origin.txt is UTF-16 with BOM (a utf-8 read garbles the
+  path and silently finds no data folder), and a ledger file with zero
+  recognizable rows is not evidence of flatness — the gate fails closed on it.
+- **The flat gate mirrors the EA's own restore rule** (MitemshubAI
+  `PaperInit` adopts a dangling OPEN row as a live virtual position): flat =
+  zero OPEN rows without a matching CLOSE, by ticket. An unreadable, corrupt,
+  or row-less ledger refuses the sweep; `--i-have-verified-flat` exists for
+  verified emergencies and records itself in the artifact.
+- **Terminal identity is exact-path, not name-shaped:** PIDs match on the
+  full executable path (case-insensitive), so FB9A and MitemshubMT5_C can
+  never be caught in the sweep window (the 10:22 retry was an exact-path
+  launch against the wrong host's twin — identity, not shape, is the pin).
+- **Always-relaunch is structural:** the `finally` block relaunches whatever
+  the sweep does — including a crash of the sweep subprocess (rc=4 with the
+  error recorded). Every run writes
+  `artifacts/v28_research/sweep_runner_last_run.json`: terminal identity,
+  arm inventory, per-arm flatness evidence, override flag, command, rc,
+  relaunch — the sweep window on a paper-arm host is now auditable.
+- **The `_tmp` orchestrator is retired** to
+  `scripts/_deprecated_v28_sweep_orchestrator.py` with a deprecation header;
+  12 offline tests (`tests/test_v28_sweep_runner.py`) pin the gate: dangling
+  OPEN refusal, ticket pairing, fail-closed, chart discovery, override
+  recording, stop/sweep/relaunch ordering, relaunch-on-crash.
+
+## [V28 SL axis walk-forward completed: the IS champion dies out-of-regime (sl1.0 +11.12R IS → −0.52R wf, sign flip) while the whole SL interior holds (+1.7 to +2.8R) — edge confirmed at the mode level, not the geometry level] - 2026-09-16
+
+- **Executed per V28 §5 step 2** (wf, same geometry, no edits; OOS untouched):
+  the four unregistered SL-axis cells ran on the wf window via
+  `scripts/_tmp_v28_wf_sl_cells.py` under the full stop/flat/relaunch
+  discipline — arm D's ledger read and confirmed flat before the terminal stop
+  (16 rows, all ERA stamps, zero OPEN/CLOSE), all four passes registered
+  (V28-0047 → V28-0050), banner + $50.00 veq verified after relaunch.
+- **The finding:** the sweep's tighter-is-better IS gradient does not survive
+  its own extreme — sl1.0 (+11.12R IS, the sweep headline) is **negative on wf
+  (−0.52R, P&L sign flip vs IS)**, the §6 one-window-wins noise signature,
+  with a −679.86 max drawdown to boot. The interior is flat, not peaked:
+  sl1.5/2.0/2.5/3.0 wf R spans 1.69–2.84R with no monotone structure (IS
+  ordering nearly inverts — sl1.5, mid-pack in IS, is the best wf cell). No
+  geometry re-selection authorized; the durable fact is that the REVERSE_BOTH
+  signal family carries a positive wf edge across the whole SL interior while
+  ORIGINAL loses on the same window.
+- **Gate status unchanged:** every cell still REFUSED (missing oos evidence,
+  samples below 30). The wf rows close the §5 evidence gap so no future
+  decision can cite a missing-wf refusal as the blocker; they do not argue a
+  ship. Registry: 50 records; protocol §9 amended with the full is→wf table.
+
+## [V28 stage-2 exit-sweep adjudicated: SL axis monotonic (tighter = better), TP inert past 3 ATR, hold non-monotonic — every cell REFUSED by the frozen gate; sweep-host mixup corrected (the tester terminal hosts arm D, not arm B)] - 2026-09-16
+
+- **Sweep executed and reconciled:** the detached orchestrator recovered cleanly
+  after the session died mid-flight — its 10:48 run stopped the sweep host, ran
+  all 14 remaining is180 cells (~17 s/pass, rc=0) and relaunched the terminal;
+  arm D re-initialized at 10:52:25 (banner verified, $50.00 virtual equity
+  restored, flat, 0 positions). The 10:22 direct-launch retry had hit the
+  known single-instance no-op and burned one 900 s timeout — that trap has now
+  recurred twice, so per the protocol's own escalation note the guard is IN the
+  runner: `run_pass` fast-fails with the fix in the message when the tester
+  terminal is already running, and waits out per-pass self-exit teardown so
+  passes 2..n are never condemned for it. 4 new offline tests; suite 35/35.
+- **Registry corrected on arm identity:** the sweep host (`MitemshubMT5_B`,
+  data folder 49E0…) carries ONLY `_D`-tagged arm files (magic 7788150) — it
+  is **arm D's** host; arm B ($40.20, 10 closed) lives on `MitemshubMT5_C`,
+  which the sweep never touched. The protocol §2 note and the orchestrator's
+  banner-verification instruction both named arm B/wrong equity — corrected in
+  the protocol, and the stop/flat/relaunch discipline is unchanged (it was
+  arm D that was flat and correctly restored). Arm A/B telemetry silence since
+  the 10:00 bar is the known quiet-bars pattern (tick archives 7 s fresh);
+  morning-status health otherwise green.
+- **Verdict (mechanical, frozen gate): the sweep found NO promotable config.**
+  SL axis (tp4/h180): strictly monotonic — sl1.0 +11.12R → sl3.0 +4.40R, same
+  n=29 trade sets, tighter stops realize more of the same signal. TP axis:
+  inert above 3 ATR (tp3–tp6 byte-identical rows — a determinism check passing,
+  not an edge); tp2.0 +7.12R is the only live cell. Hold axis: non-monotonic
+  (h120 dips below h90) — the §6 noise signature, not a candidate. All 15
+  cells REFUSED: the 14 new is-only cells lack wf/oos evidence by design, and
+  the baseline (the only candidate with all three roles) fails OOS outright
+  (−20.17 net, −0.185R ratio-sum, −0.2021 money-implied, n 29/27/12 below the
+  30-trade gate). REVERSE_BOTH remains the direction-level finding (the only
+  mode positive across is90/is180/wf; ORIGINAL −8.13R on the same is180
+  window), not a promotable config; the OOS block was not consumed.
+- Recorded in `V28_RESEARCH_PROTOCOL.md` §9 with the full matrix; registry
+  exported (46 records → registry.csv/json); `promote` refusal on
+  `REVERSE_BOTH_sl2_tp4_h180_r0.01` captured verbatim.
+
+## [Ancient-window validation adjudicated: ALL configs FAIL on untouched 2025-04→07 history — the family's edge is epoch-specific to the trained era; arm D's forward accrual is the only path to live] - 2026-09-16
+
+- The last truly independent historical test executed under a protocol frozen
+  before data collection (docs/ANCIENT_WINDOW_VALIDATION_20260916.md):
+  broker-native V75(1s) M15 2025-04-20→2025-07-26 (9312/9312 bars, D1/D2
+  provenance PASS) with 8 months of native H1 warm-up — a window that predates
+  the entire optimization program and was never loaded by any study.
+- Frozen configs, no search: shipped n=32 −10.09R (totalR/meanR FAIL);
+  rebuilt and gated each n=1 −0.67R (starved — the 0.60–0.70 ATR PB band and
+  MOM-leg combos almost never form in that era; funnel anatomy recorded).
+  Frozen mapping outcome: ALL FAIL → epoch-specific edge. No
+  re-parameterization authorized; arm D (docs/ARM_D_FORWARD_TEST.md) remains
+  the only path to live.
+- POST-HOC (labeled, no runs): the ancient window is itself a historic one-way
+  squeeze (+121% in-window, lower absolute vol than Jun–Sep 2026) — the same
+  R90 signature as the hostile window. Two independent eras, one mechanism,
+  sharpening participation-gate v2's target to an R90-magnitude filter.
+- New tooling: scripts/ancient_window_run.py (frozen-config batch runner with
+  the lab's cross-instrument spec guard), scripts/armd_accrual.py (daily
+  arm-D tracker emitting the pre-registered VALIDATED/REJECTED/CONTINUE
+  verdict into artifacts/ARMD_ACCRUAL.jsonl, idempotent per day).
+
 ## [Hostile-regime vs overfit adjudicated: Jun-Sep 2026 is a historic one-way squeeze (R90 p95.7) but the failure is CONFIG-SPECIFIC FRAGILITY — gradient −0.714, random control fine, same thesis positive on V100 in the same window] - 2026-09-16
 
 - The program's open question (hostile window or overfit?) settled with four

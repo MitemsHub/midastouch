@@ -9,7 +9,22 @@ WFO folds or backtest runs.
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_lv_broker_snapshot(monkeypatch, tmp_path):
+    """VPS-era hermeticity (2026-09-18): the operator's real LV broker
+    snapshot (artifacts/midas_lv_broker_state.json) must never leak into a
+    test run. Point morning_status at a nonexistent temp path unless a test
+    writes its own fixture file there."""
+    import morning_status as _ms
+
+    monkeypatch.setattr(
+        _ms, "LV_BROKER_STATE_PATH", str(tmp_path / "lv_broker_state.json"))
+    yield
 
 
 @pytest.fixture(autouse=True)

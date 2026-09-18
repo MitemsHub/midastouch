@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +36,7 @@ V_SOURCE = ROOT / "V75MacroEngine.mq5"
 LIVE = ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_LIVE.set"
 FINAL = ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_FINAL.set"
 ARM_D = ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_ARM_D_FWD.set"
+ARM_A2 = ROOT / "mql5" / "MITEMSHUB_AI" / "MitemshubAI_VOL75_ARM_A2.set"
 MANIFEST = ROOT / "scripts" / "deploy_manifest.txt"
 
 EXPECTED_VERSIONS = {
@@ -45,9 +47,25 @@ EXPECTED_MAGIC = "7788075"
 # v26.40 arm D (forward test of the gated candidate): its own magic + arm tag.
 EXPECTED_ARM_D_MAGIC = "7788150"
 EXPECTED_ARM_D_TAG = "D"
+# Arm A2 (restart of arm A's strangled slot at a $1,000 basis; user decision
+# 2026-09-16, docs/ARM_A2_RESTART.md): strategy surface = candidate_inputs(
+# "V28_REVERSE_BOTH", tp2.0); inherits arm A's ORIGINAL fleet slot 7788075
+# (arm B keeps 7788100 — collision-free); paper-only. Supersedes the arm-E
+# pre-draft (retired magic 7788175 must never re-enter any fleet CSV).
+EXPECTED_ARM_A2_MAGIC = "7788075"
+EXPECTED_ARM_A2_TAG = "A2"
+EXPECTED_ARM_A2_FLEET = "7788010,7788025,7788050,7788075,7788100,7788150"
 # Keys that may legitimately differ between LIVE and FINAL (ops choices, not
 # intent drift): the tick recorder is enabled per-arm, not per-mode.
 ALLOWED_PRESET_DRIFT = {"InpTickRecordEnabled"}
+
+
+def _num_eq(a: str, b: str) -> bool:
+    """Numeric-normalized preset comparison: "2" == "2.0" == "2.00"."""
+    try:
+        return abs(float(a) - float(b)) < 1e-9
+    except (TypeError, ValueError):
+        return a == b
 
 
 class VerificationError(Exception):
@@ -238,6 +256,18 @@ def verify_preset(path: Path, *, live: bool) -> list[str]:
         "InpDrawHud": "true",
         "InpLiveExecution": "true" if live else "false",
     }
+    if live:
+        # 2026-09-16 rehearsal finding: the LIVE set was a 7-line stub, so a
+        # fresh attach + Load booted InpTpMult at the 2.4 default instead of
+        # the certified tp18 geometry the truth table and certified chain are
+        # built on. The preset must now carry the executed surface's pins.
+        expected.update({
+            "InpTpMult": "1.8",                      # certified tp18 geometry
+            "InpRiskPerTrade": "0.005",
+            "InpMaxEffectiveRiskPct": "20.0",
+            "InpPaperEquity": "50.0",
+            "InpFleetMagicsCSV": "7788010,7788025,7788050,7788075,7788100",
+        })
     for key, value in expected.items():
         if values.get(key) != value:
             problems.append(f"{path.name}: {key}={values.get(key)!r}, expected {value!r}")
@@ -287,12 +317,113 @@ def verify_arm_d_preset(path: Path) -> list[str]:
     return problems
 
 
+def verify_arm_a2_preset(path: Path) -> list[str]:
+    """Arm A2 (REVERSE_BOTH tp2.0 restart at a $1,000 basis) — fail-closed
+    preset pins.
+
+    The preset was drafted as a BUILD CONTRACT before the forward EA existed;
+    the build now exists (MitemshubAI_v28_fwd, APP_VERSION 28.10) and passed
+    parity on 2026-09-16 (artifacts/v28_research/armE_parity_20260916_181219Z.json).
+    Strategy values are pinned equal to the parity harness's candidate_inputs
+    surface (build_parity.INPUT_PINS + InpRiskFraction) so the parity run and
+    the forward preset can never silently diverge. Changing any value here
+    requires a dated amendment to docs/ARM_A2_RESTART.md plus this pin.
+    """
+    values = read_set(path)
+    problems: list[str] = []
+    expected = {
+        "InpLiveExecution": "false",        # paper-only, always
+        "InpMagic": EXPECTED_ARM_A2_MAGIC,
+        "InpArmTag": EXPECTED_ARM_A2_TAG,
+        # strategy surface — EXACTLY the parity harness's pins:
+        "InpStrategyMode": "3",             # V28_REVERSE_BOTH
+        "InpStopATRMultiplier": "2.0",
+        "InpTargetATRMultiplier": "2.0",    # the candidate: tp2.0
+        "InpMaxHoldMinutes": "180",
+        "InpRiskFraction": "0.01",
+        "InpAllowLong": "true",
+        "InpAllowShort": "true",
+        "InpLegacyV27ModifyClose": "false",
+        "InpResearchLogging": "true",       # parity's Trade R evidence
+        # paper basis & routing — mirror arm D:
+        "InpPaperEquity": "1000.0",
+        "InpPaperSpreadMult": "1.0",
+        "InpSameSymbolMaxPos": "1",
+        "InpFleetMagicsCSV": EXPECTED_ARM_A2_FLEET,
+        # account-budget guard + floor-mode policy (§2 amendment 2026-09-16):
+        # the guard cap and the hard drawdown stop are frozen so the
+        # strangulation-zone contract is a pinned constant, not a default
+        "InpMaxTotalRiskPct": "15.0",
+        "InpFloorModeMaxDDPct": "30.0",
+        "InpFloorModeConviction": "true",
+        # materiality-conditioned conviction bar (§2 amendment 2026-09-16):
+        # the bar applies only above this overage — at A2's ~1.28% it must
+        # NOT bind (0/800 observed strong confluences would throttle the arm)
+        "InpFloorModeConvictionMinRiskPct": "2.5",
+        # collection & ops:
+        "InpSessionStartHour": "0",
+        "InpSessionEndHour": "0",
+        "InpTickRecordEnabled": "false",    # arm B owns the shared tick file
+    }
+    for key, value in expected.items():
+        if values.get(key) != value:
+            problems.append(f"{path.name}: {key}={values.get(key)!r}, expected {value!r}")
+    # Every fleet CSV that names an arm must name E too — an orphan magic is
+    # invisible to the fleet guard (the arm-D verifier's orphan check, from E's side).
+    return problems
+
+
+def verify_arm_a2_consistency() -> list[str]:
+    """Cross-artifact coherence (pre-start): preset vs parity pins vs the
+    accrual registry. Runs even before any terminal exists — these are repo
+    files. Fails closed if the artifacts have not been created yet."""
+    problems: list[str] = []
+    try:
+        if str(ROOT / "scripts") not in sys.path:
+            sys.path.insert(0, str(ROOT / "scripts"))
+        from build_parity import INPUT_PINS as PARITY_PINS
+    except Exception as e:
+        return [f"arm-A2 consistency: build_parity import failed: {e}"]
+    pv = read_set(ARM_A2) if ARM_A2.exists() else {}
+    if not ARM_A2.exists():
+        problems.append(f"missing artifact: {ARM_A2.relative_to(ROOT)}")
+        return problems
+    for key, want in PARITY_PINS.items():
+        got = pv.get(key)
+        if got is None:
+            problems.append(f"{ARM_A2.name}: parity pin {key} missing from preset")
+        elif not (got == want or _num_eq(got, want)):
+            problems.append(f"{ARM_A2.name}: {key}={got!r} diverges from the parity "
+                            f"harness pin {want!r} — preset and parity run would "
+                            f"test different candidates")
+    # accrual registry: arm A2 registered, pre-start (start None), correct glob
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from armd_accrual import ARMS
+        e = ARMS.get("A2")
+        if e is None:
+            problems.append("accrual ARMS registry has no arm A2 entry")
+        else:
+            if e.get("start") is not None:
+                problems.append(f"accrual ARMS arm A2 start={e.get('start')!r}: the "
+                                f"registry claims the window is OPEN pre-start — "
+                                f"set start=None until the parity pass and init "
+                                f"banner exist")
+            glob_str = str(e.get("ledger_glob", ""))
+            if not glob_str.endswith("_A2.csv"):
+                problems.append(f"accrual ARMS arm A2 ledger_glob={glob_str!r} does "
+                                f"not read the tag-A2 ledger (_A2.csv)")
+    except Exception as ex:
+        problems.append(f"arm-A2 consistency: armd_accrual import failed: {ex}")
+    return problems
+
+
 def verify(deployed_live: Path | None = None) -> dict:
     problems: list[str] = []
     versions: dict[str, str] = {}
     v75_property_version: str | None = None
 
-    for path in (M_SOURCE, V_SOURCE, LIVE, FINAL, ARM_D):
+    for path in (M_SOURCE, V_SOURCE, LIVE, FINAL, ARM_D, ARM_A2):
         if not path.exists():
             problems.append(f"missing artifact: {path.relative_to(ROOT)}")
 
@@ -319,6 +450,9 @@ def verify(deployed_live: Path | None = None) -> dict:
                 continue
             if live_values[key] != final_values[key]:
                 problems.append(f"LIVE/FINAL drift in {key}: {live_values[key]!r} != {final_values[key]!r}")
+    if ARM_A2.exists():
+        problems.extend(verify_arm_a2_preset(ARM_A2))
+    problems.extend(verify_arm_a2_consistency())
 
     result = {
         "version": versions.get("mql5/mitemshub_ai/mitemshubai.mq5"),

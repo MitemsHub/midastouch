@@ -161,10 +161,12 @@ def evaluate_terminal(tdir: str, ea: str, version: str, src_sha: str,
         return False, [f"init banner {banner_ts:%H:%M:%S} with NO journal processing after it "
                        "- the loaded-but-dead signature (v27, 2026-09-13)"], {}
 
-    # C7 - telemetry written after the banner
-    telem = os.path.join(tdir, "MQL5", "Files", EA_FILES[ea][1])
+    # C7 - telemetry written after the banner (EA_FILES carries per-family
+    # filenames as dicts since the arm-D tagging landed — index by key, not slot)
+    telem_name = EA_FILES[ea]["telem"] if isinstance(EA_FILES[ea], dict) else EA_FILES[ea][1]
+    telem = os.path.join(tdir, "MQL5", "Files", telem_name)
     if not os.path.exists(telem):
-        return False, [f"no telemetry file ({EA_FILES[ea][1]})"], {}
+        return False, [f"no telemetry file ({telem_name})"], {}
     if os.path.getmtime(telem) <= banner_ts.timestamp():
         return False, [f"telemetry last written before the v{version} init banner "
                        "- no bar produced telemetry since init"], {}
