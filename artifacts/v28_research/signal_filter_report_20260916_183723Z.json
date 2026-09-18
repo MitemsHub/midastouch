@@ -1,0 +1,34 @@
+{
+  "generated": "2026-09-16T18:37:23.939277+00:00",
+  "protocol": "V28_RESEARCH_PROTOCOL.md \u00a710 (pre-registered 2026-09-16)",
+  "feature_version": "v1-decision-time",
+  "model_version": "gbc-frozen-20260916",
+  "candidate": "V28_REVERSE_BOTH",
+  "coverage": {
+    "journal_trades_paired": 72,
+    "journal_dropped": 0,
+    "candidate_trades_from_journal": 72,
+    "featurized": 32,
+    "excluded: entry bar outside bar coverage": 40,
+    "registry_denominator": 8426,
+    "coverage_ratio": 0.0038
+  },
+  "dataset_n": 32,
+  "trigger_vocab": [
+    "M30_REVERSED_EXTREME"
+  ],
+  "folds": [],
+  "gate": {
+    "verdict": "FAIL",
+    "legs": {},
+    "n_folds": 0
+  },
+  "ship_verdict": "FAIL",
+  "honesty": [
+    "coverage 32/8426 (0.4%) \u2014 grows only by \u00a72 re-runs",
+    "training data is REVERSE_ONLY-sweep-shaped; the filter is candidate-specific until its own evidence says otherwise",
+    "the filter only removes trades; it inherits \u00a79's evidence status"
+  ],
+  "runtime_s": 1.3,
+  "dataset_snapshot": "C:\\Users\\USER\\AppData\\Local\\Temp\\pytest-of-USER\\pytest-81\\test_run_pipeline_end_to_end_s0\\ds.jsonl"
+}

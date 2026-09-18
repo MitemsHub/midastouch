@@ -1,0 +1,149 @@
+{
+ "window": "wf",
+ "mode": "V28_REVERSE_BOTH",
+ "baseline_mode": "V28_ORIGINAL",
+ "wf_rows_read": 15,
+ "distinct_trade_sets": 12,
+ "duplicates_collapsed": 3,
+ "cells": [
+  {
+   "experiment_id": "V28-0020",
+   "hypothesis": "REVERSE_BOTH_sl2_tp4_h180_r0.01",
+   "sweep_axis": null,
+   "trades": 27,
+   "money_implied_r": 2.4758,
+   "collapsed_duplicates": 3,
+   "bootstrap_profitable_share": 0.801
+  },
+  {
+   "experiment_id": "V28-0047",
+   "hypothesis": "REVERSE_BOTH_sl1_tp4_h180_r0.01",
+   "sweep_axis": "sl_atr",
+   "trades": 29,
+   "money_implied_r": -0.6906,
+   "collapsed_duplicates": 0,
+   "bootstrap_profitable_share": 0.434
+  },
+  {
+   "experiment_id": "V28-0048",
+   "hypothesis": "REVERSE_BOTH_sl1.5_tp4_h180_r0.01",
+   "sweep_axis": "sl_atr",
+   "trades": 27,
+   "money_implied_r": 2.7589,
+   "collapsed_duplicates": 0,
+   "bootstrap_profitable_share": 0.754
+  },
+  {
+   "experiment_id": "V28-0049",
+   "hypothesis": "REVERSE_BOTH_sl2.5_tp4_h180_r0.01",
+   "sweep_axis": "sl_atr",
+   "trades": 27,
+   "money_implied_r": 1.9746,
+   "collapsed_duplicates": 0,
+   "bootstrap_profitable_share": 0.802
+  },
+  {
+   "experiment_id": "V28-0050",
+   "hypothesis": "REVERSE_BOTH_sl3_tp4_h180_r0.01",
+   "sweep_axis": "sl_atr",
+   "trades": 27,
+   "money_implied_r": 1.6669,
+   "collapsed_duplicates": 0,
+   "bootstrap_profitable_share": 0.807
+  },
+  {
+   "experiment_id": "V28-0051",
+   "hypothesis": "REVERSE_BOTH_sl2_tp2_h180_r0.01",
+   "sweep_axis": "tp_atr",
+   "trades": 27,
+   "money_implied_r": 2.9652,
+   "collapsed_duplicates": 0,
+   "bootstrap_profitable_share": 0.845
+  },
+  {
+   "experiment_id": "V28-0055",
+   "hypothesis": "REVERSE_BOTH_sl2_tp4_h30_r0.01",
+   "sweep_axis": "hold_min",
+   "trades": 32,
+   "money_implied_r": -0.5779,
+   "collapsed_duplicates": 0,
+   "bootstrap_profitable_share": 0.318
+  },
+  {
+   "experiment_id": "V28-0056",
+   "hypothesis": "REVERSE_BOTH_sl2_tp4_h60_r0.01",
+   "sweep_axis": "hold_min",
+   "trades": 29,
+   "money_implied_r": 0.33,
+   "collapsed_duplicates": 0,
+   "bootstrap_profitable_share": 0.586
+  },
+  {
+   "experiment_id": "V28-0057",
+   "hypothesis": "REVERSE_BOTH_sl2_tp4_h90_r0.01",
+   "sweep_axis": "hold_min",
+   "trades": 29,
+   "money_implied_r": 0.874,
+   "collapsed_duplicates": 0,
+   "bootstrap_profitable_share": 0.654
+  },
+  {
+   "experiment_id": "V28-0058",
+   "hypothesis": "REVERSE_BOTH_sl2_tp4_h120_r0.01",
+   "sweep_axis": "hold_min",
+   "trades": 29,
+   "money_implied_r": 1.8243,
+   "collapsed_duplicates": 0,
+   "bootstrap_profitable_share": 0.804
+  },
+  {
+   "experiment_id": "V28-0059",
+   "hypothesis": "REVERSE_BOTH_sl2_tp4_h240_r0.01",
+   "sweep_axis": "hold_min",
+   "trades": 26,
+   "money_implied_r": 2.4358,
+   "collapsed_duplicates": 0,
+   "bootstrap_profitable_share": 0.763
+  },
+  {
+   "experiment_id": "V28-0060",
+   "hypothesis": "REVERSE_BOTH_sl2_tp4_h360_r0.01",
+   "sweep_axis": "hold_min",
+   "trades": 26,
+   "money_implied_r": 0.4968,
+   "collapsed_duplicates": 0,
+   "bootstrap_profitable_share": 0.536
+  }
+ ],
+ "pooled_trades": 335,
+ "family": {
+  "mean_per_trade": 5.0218,
+  "bootstrap": {
+   "iterations": 2000,
+   "p05": -17.04,
+   "p50": 1686.23,
+   "p95": 3494.47,
+   "profitable_share": 0.948
+  }
+ },
+ "baseline": {
+  "experiment_id": "V28-0017",
+  "hypothesis": "ORIGINAL_sl2_tp4_h180_r0.01",
+  "trades": 27,
+  "mean_per_trade": -13.0752,
+  "bootstrap": {
+   "iterations": 2000,
+   "p05": -808.47,
+   "p50": -340.15,
+   "p95": 91.77,
+   "profitable_share": 0.106
+  }
+ },
+ "mean_diff_per_trade": 18.097,
+ "permutation_p_one_sided": 0.066,
+ "verdict": "FAMILY_EDGE_NOT_SUPPORTED",
+ "reasons": [
+  "family bootstrap p05 <= 0",
+  "permutation p 0.066 > 0.05"
+ ]
+}

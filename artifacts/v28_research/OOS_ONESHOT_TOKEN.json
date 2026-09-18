@@ -1,0 +1,21 @@
+{
+ "spent": true,
+ "spent_at": "2026-09-16 14:33:20",
+ "spent_for": "REVERSE_BOTH_sl2_tp2_h180_r0.01",
+ "decision": "CONTINUE_THIN",
+ "reason": "Held-window evidence complete: best wf cell (mir +2.97, solo permutation p=0.051), survives every leave-one-out drop; frozen bar met mechanically. Spending the interior's single OOS run per protocol section 9 amendment 3 with user authorization 2026-09-16.",
+ "eligible_at_spend": [
+  "REVERSE_BOTH_sl1.5_tp4_h180_r0.01",
+  "REVERSE_BOTH_sl2.5_tp4_h180_r0.01",
+  "REVERSE_BOTH_sl2_tp2_h180_r0.01",
+  "REVERSE_BOTH_sl2_tp4_h120_r0.01",
+  "REVERSE_BOTH_sl2_tp4_h240_r0.01",
+  "REVERSE_BOTH_sl3_tp4_h180_r0.01"
+ ],
+ "oos": {
+  "n": 12,
+  "pnl": 20.55,
+  "r": 0.225,
+  "max_dd": 150.44
+ }
+}

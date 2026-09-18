@@ -1,0 +1,72 @@
+{
+ "ts": "2026-09-16T22:03:45+00:00",
+ "protocol": "docs/MIDASTOUCH_PROTOCOL.md (frozen 2026-09-16)",
+ "data": "data/forex/xauusd/XAUUSD_{H1,M15}.csv (validated)",
+ "verdict": "ALL 8 MODES NO-SHIP on frozen gates G1-G7; gates unchanged, no tuning after OOS",
+ "modes": {
+  "ORIGINAL": {
+   "verdict": "NO-SHIP",
+   "reasons": [
+    "G3 pf=1.089 < 1.30",
+    "G4 expectancy 0.0474 < +0.15R"
+   ]
+  },
+  "REVERSE_DIRECTION": {
+   "verdict": "NO-SHIP",
+   "reasons": [
+    "G3 pf=1.222 < 1.30",
+    "G4 expectancy 0.0923 < +0.15R"
+   ]
+  },
+  "REVERSE_TRIGGER": {
+   "verdict": "NO-SHIP",
+   "reasons": [
+    "G3 pf=1.089 < 1.30",
+    "G4 expectancy 0.0433 < +0.15R"
+   ]
+  },
+  "REVERSE_BOTH": {
+   "verdict": "NO-SHIP",
+   "reasons": [
+    "G2 OOS net_r not positive",
+    "G3 pf=0.796 < 1.30",
+    "G4 expectancy -0.0952 < +0.15R",
+    "G5 dd 31.46R > 12R",
+    "G6 positive windows 0/4 < 3"
+   ]
+  },
+  "LONG_ONLY": {
+   "verdict": "NO-SHIP",
+   "reasons": [
+    "G2 OOS net_r not positive",
+    "G3 pf=0.852 < 1.30",
+    "G4 expectancy -0.0652 < +0.15R"
+   ]
+  },
+  "SHORT_ONLY": {
+   "verdict": "NO-SHIP",
+   "reasons": [
+    "G3 pf=1.289 < 1.30",
+    "G4 expectancy 0.1362 < +0.15R",
+    "G6 positive windows 2/4 < 3"
+   ]
+  },
+  "MACRO_ONLY": {
+   "verdict": "NO-SHIP",
+   "reasons": [
+    "G3 pf=1.08 < 1.30",
+    "G4 expectancy 0.0415 < +0.15R",
+    "G5 dd 13.09R > 12R"
+   ]
+  },
+  "TRIGGER_ONLY": {
+   "verdict": "NO-SHIP",
+   "reasons": [
+    "G3 pf=1.004 < 1.30",
+    "G4 expectancy 0.0008 < +0.15R",
+    "G5 dd 19.91R > 12R",
+    "G6 positive windows 2/4 < 3"
+   ]
+  }
+ }
+}

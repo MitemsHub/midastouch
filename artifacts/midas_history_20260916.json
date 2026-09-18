@@ -1,0 +1,201 @@
+{
+ "ts": "2026-09-16T21:53:02+00:00",
+ "symbols": {
+  "XAUUSD": {
+   "H1": {
+    "file": "data\\forex\\xauusd\\XAUUSD_H1.csv",
+    "bars": 14414,
+    "dropped_prefix": 724,
+    "first": "2024-04-10T13:00:00+00:00",
+    "last": "2026-09-16T20:00:00+00:00",
+    "reference_only": false,
+    "research_note": "research span starts 2024-04-10T13:00:00+00:00; dropped 724-bar prefix before the broker feed hole",
+    "checks": {
+     "span_days": {
+      "ok": true,
+      "detail": 889.3
+     },
+     "V1_count_vs_calendar": {
+      "ok": true,
+      "detail": "14414 bars, expected ~14628, ratio 0.99"
+     },
+     "V2_gaps": {
+      "ok": true,
+      "detail": "0 broken gaps (>4d or non-monotonic); median dt 3600s"
+     },
+     "V3_ohlc_sanity": {
+      "ok": true,
+      "detail": "0 malformed bars"
+     },
+     "V4_dow": {
+      "ok": true,
+      "detail": "Saturday 0/14414, Sunday 218/14414"
+     }
+    },
+    "all_ok": true
+   },
+   "M15": {
+    "file": "data\\forex\\xauusd\\XAUUSD_M15.csv",
+    "bars": 50000,
+    "dropped_prefix": 0,
+    "first": "2024-08-02T17:30:00+00:00",
+    "last": "2026-09-16T20:45:00+00:00",
+    "reference_only": false,
+    "research_note": null,
+    "checks": {
+     "span_days": {
+      "ok": true,
+      "detail": 775.1
+     },
+     "V1_count_vs_calendar": {
+      "ok": true,
+      "detail": "50000 bars, expected ~50968, ratio 0.98"
+     },
+     "V2_gaps": {
+      "ok": true,
+      "detail": "0 broken gaps (>4d or non-monotonic); median dt 900s"
+     },
+     "V3_ohlc_sanity": {
+      "ok": true,
+      "detail": "0 malformed bars"
+     },
+     "V4_dow": {
+      "ok": true,
+      "detail": "Saturday 0/50000, Sunday 744/50000"
+     }
+    },
+    "all_ok": true
+   },
+   "D1": {
+    "file": "data\\forex\\xauusd\\XAUUSD_D1.csv",
+    "bars": 800,
+    "dropped_prefix": 0,
+    "first": "2023-11-06T00:00:00+00:00",
+    "last": "2026-09-16T00:00:00+00:00",
+    "reference_only": true,
+    "research_note": null,
+    "checks": {
+     "span_days": {
+      "ok": true,
+      "detail": 1045.0
+     },
+     "V1_count_vs_calendar": {
+      "ok": true,
+      "detail": "800 bars, expected ~896, ratio 0.89"
+     },
+     "V2_gaps": {
+      "ok": false,
+      "detail": "1 broken gaps (>6d or non-monotonic); median dt 86400s"
+     },
+     "V3_ohlc_sanity": {
+      "ok": true,
+      "detail": "0 malformed bars"
+     },
+     "V4_dow": {
+      "ok": true,
+      "detail": "Saturday 0/800, Sunday 133/800"
+     }
+    },
+    "all_ok": false
+   }
+  },
+  "XAUUSDmicro": {
+   "H1": {
+    "file": "data\\forex\\xauusd\\XAUUSDmicro_H1.csv",
+    "bars": 7329,
+    "dropped_prefix": 0,
+    "first": "2025-06-22T22:00:00+00:00",
+    "last": "2026-09-16T20:00:00+00:00",
+    "reference_only": false,
+    "research_note": null,
+    "checks": {
+     "span_days": {
+      "ok": true,
+      "detail": 450.9
+     },
+     "V1_count_vs_calendar": {
+      "ok": true,
+      "detail": "7329 bars, expected ~7406, ratio 0.99"
+     },
+     "V2_gaps": {
+      "ok": true,
+      "detail": "0 broken gaps (>4d or non-monotonic); median dt 3600s"
+     },
+     "V3_ohlc_sanity": {
+      "ok": true,
+      "detail": "0 malformed bars"
+     },
+     "V4_dow": {
+      "ok": true,
+      "detail": "Saturday 0/7329, Sunday 112/7329"
+     }
+    },
+    "all_ok": true
+   },
+   "M15": {
+    "file": "data\\forex\\xauusd\\XAUUSDmicro_M15.csv",
+    "bars": 29242,
+    "dropped_prefix": 0,
+    "first": "2025-06-22T22:00:00+00:00",
+    "last": "2026-09-16T20:45:00+00:00",
+    "reference_only": false,
+    "research_note": null,
+    "checks": {
+     "span_days": {
+      "ok": true,
+      "detail": 450.9
+     },
+     "V1_count_vs_calendar": {
+      "ok": true,
+      "detail": "29242 bars, expected ~29624, ratio 0.99"
+     },
+     "V2_gaps": {
+      "ok": true,
+      "detail": "0 broken gaps (>4d or non-monotonic); median dt 900s"
+     },
+     "V3_ohlc_sanity": {
+      "ok": true,
+      "detail": "0 malformed bars"
+     },
+     "V4_dow": {
+      "ok": true,
+      "detail": "Saturday 0/29242, Sunday 448/29242"
+     }
+    },
+    "all_ok": true
+   },
+   "D1": {
+    "file": "data\\forex\\xauusd\\XAUUSDmicro_D1.csv",
+    "bars": 387,
+    "dropped_prefix": 0,
+    "first": "2025-06-22T00:00:00+00:00",
+    "last": "2026-09-16T00:00:00+00:00",
+    "reference_only": true,
+    "research_note": null,
+    "checks": {
+     "span_days": {
+      "ok": true,
+      "detail": 451.0
+     },
+     "V1_count_vs_calendar": {
+      "ok": true,
+      "detail": "387 bars, expected ~387, ratio 1.00"
+     },
+     "V2_gaps": {
+      "ok": true,
+      "detail": "0 broken gaps (>6d or non-monotonic); median dt 86400s"
+     },
+     "V3_ohlc_sanity": {
+      "ok": true,
+      "detail": "0 malformed bars"
+     },
+     "V4_dow": {
+      "ok": true,
+      "detail": "Saturday 0/387, Sunday 65/387"
+     }
+    },
+    "all_ok": true
+   }
+  }
+ }
+}
