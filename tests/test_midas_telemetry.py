@@ -147,7 +147,7 @@ def test_version_bumped_and_property_consistent() -> None:
     define = re.search(r'#define\s+APP_VERSION\s+"MIDAS(\d+)\.(\d+)"', s)
     assert prop and define
     assert prop.groups() == define.groups(), "#property version must equal APP_VERSION"
-    assert prop.group(1) + "." + prop.group(2) == "1.17", "P5 telemetry rides v1.17"
+    assert prop.group(1) + "." + prop.group(2) == "1.18", "NOFILL diagnostics ride v1.18"
 
 
 # --- the safety net: every python consumer tolerates the appended rows --------
@@ -334,3 +334,100 @@ def test_every_enumerated_consumer_tolerates_appends(tmp_path):
     # morning_status.collect_midas_positions + deploy_portfolio (via
     # v28_sweep_runner.ledger_flatness) are covered by the tests above and
     # by the dynamic-enumerate pin; their grammars share the readers here.
+
+
+# --- v1.18 NOFILL diagnostics (register review item 1) ------------------------
+
+def test_nofill_row_written_from_pertick_path_only():
+    """DiagMaybeWrite appends to the paper ledger from the PERTICK paths
+    (TrackFreshM15Bar gates + sizing vetoes + LiveOnTick breaker) and is
+    hard-gated OFF in the tester and BAR replay — certified ledgers must
+    stay byte-identical."""
+    b = body("DiagMaybeWrite")
+    assert "MQL_TESTER" in b, "tester gate required"
+    assert "InpBarModel" in b, "BAR-replay gate required"
+    assert "g_nofill_signal == 0" in b, "no rows on zero-activity days"
+    assert "86400" in b, "daily cadence on UTC days"
+    for fn in ("TrackFreshM15Bar", "OpenPaperPosition", "LiveOnTick"):
+        assert "DiagMaybeWrite" in body(fn), f"{fn} must account its vetoes"
+    assert "DiagMaybeWrite" not in body("OnBarReplay"), \
+        "BAR parity replay must never write NOFILL rows"
+
+
+def test_nofill_reason_grammar_is_pinned():
+    """TextVeto's four strings are the ledger/HUD vocabulary — every veto
+    classifies into exactly one, and the counters split trigger-less bars
+    from mode-refused ones."""
+    b = body("TextVeto")
+    for tok in ("NO-SIGNAL(0,0)", "NO-TRIGGER(mac=", "MACRO-DIVERGENCE(trg=",
+                "MISMATCH(mac="):
+        assert tok in b, f"reason token {tok} frozen"
+    body2 = body("TrackFreshM15Bar")
+    assert "g_nofill_notr++" in body2 and "g_nofill_mism++" in body2
+
+
+def test_nofill_format_string_shape():
+    """The NOFILL row: prefix + epoch + exactly 8 counters, comma grammar,
+    appended by PaperLog. Positional indexes here and in
+    morning_status.nofill_summary must stay in lockstep."""
+    code = strip_comments(src())
+    m = re.search(r'"NOFILL,%I64d((?:,%d){8})"', code)
+    assert m, "NOFILL format: epoch + exactly 8 comma-separated %%d counters"
+    assert m.group(1).count("%d") == 8
+
+
+def test_nofill_rows_are_inert_to_every_consumer(tmp_path):
+    """NOFILL rows in a real-grammar ledger change nothing: verdict stats,
+    parity pairing, flatness, and the [3b] collector all stay clean."""
+    rows = [f"ERA,MIDAS1.18,{era_mod.ERA_EPOCH},"
+            "pertick-fills+telemetry-only-per-V2-register+diag-nofill",
+            "NOFILL,1789657200,17,17,0,0,0,0,0,0",
+            _appended_open("M1"), _appended_close(),
+            "NOFILL,1789660800,9,9,0,0,0,0,0,0",
+            "EQ,50.00"]
+    p = str(_write(tmp_path, rows))
+    s = arm_statistics(p)
+    assert s["n"] == 1 and not s.get("problems"), "NOFILL never counts as a trade"
+    assert parse_ledger(p)[0]["r"] == -0.750
+    from v28_sweep_runner import ledger_flatness
+    f = ledger_flatness(p)
+    assert f["flat"] and not f["problems"]
+    from morning_status import nofill_summary
+    agg = nofill_summary(p, now_ts=1789660800 + 60)
+    assert agg["signal"] == 26 and agg["mismatch"] == 26
+    assert "session" in agg and agg.get("friday") == 0
+
+
+def test_v118_era_note_carries_both_tags():
+    """The v1.18 ERA note must carry BOTH citations: the §1 telemetry tag
+    (version transition stays never-abort) and the diag-nofill tag (this
+    diagnostics build)."""
+    code = strip_comments(src())
+    assert 'era_note += "+telemetry-only-per-V2-register";' in code
+    assert 'era_note += "+diag-nofill";' in code
+    assert '"MIDAS1.18"' in code, "APP_VERSION bumped"
+    # the init writer composes the ERA row with the composed note
+    assert 'StringFormat("ERA,%s,%I64d,%s"' in code
+
+
+def test_v118_transition_exempted_both_directions(tmp_path):
+    """The real deployment path: v1.17 → v1.18 with the double-cited ERA
+    row is exempt; the same transition uncited still aborts."""
+    rows = [f"ERA,MIDAS1.17,{era_mod.ERA_EPOCH},"
+            "pertick-fills+telemetry-only-per-V2-register"]
+    for i in range(30):
+        rows.append(f"CLOSE,{1789657200 + i * 3600},{1789657200 + i * 3600},"
+                    f"SL,4320.00000,1.000,1.50,50.00,45.45571,0.50,2.00,0,{i}")
+    rows.append(f"ERA,MIDAS1.18,{1789657200 + 30 * 3600},"
+                "pertick-fills+telemetry-only-per-V2-register+diag-nofill")
+    for i in range(30, 61):
+        rows.append(f"CLOSE,{1789657200 + i * 3600},{1789657200 + i * 3600},"
+                    f"SL,4320.00000,1.000,1.50,50.00,45.45571,0.50,2.00,0,{i}")
+    s = arm_statistics(str(_write(tmp_path, rows)))
+    assert s["n"] == 61
+    assert sorted(s["era_versions"]) == ["MIDAS1.17", "MIDAS1.18"]
+    assert s.get("problems", []) == [], "cited v1.18 transition is never-abort"
+    rows[31] = f"ERA,MIDAS1.18,{1789657200 + 30 * 3600},pertick-fills"
+    s2 = arm_statistics(str(_write(tmp_path, rows)))
+    assert any("version change" in p for p in s2.get("problems", [])), \
+        "uncited v1.18 transition still aborts"

@@ -1252,6 +1252,32 @@ def correlate_midas_positions(positions: list[dict],
             for (e, d), tags in sorted(groups.items()) if len(tags) > 1]
 
 
+def nofill_summary(path: str, now_ts: float | None = None) -> dict | None:
+    """v1.18 NOFILL diagnostics tail: sum the last 24h of daily NOFILL rows
+    (the EA writes one per UTC day; consumers difference consecutive rows
+    for intervals, but a daily row IS the interval for [3b])."""
+    try:
+        cutoff = (now_ts or datetime.now().timestamp()) - 86400
+        agg: dict[str, int] = {}
+        with open(path) as f:
+            for line in f:
+                p = line.strip().split(",")
+                if len(p) >= 10 and p[0] == "NOFILL":
+                    try:
+                        if int(p[1]) >= cutoff:
+                            for key, v in zip(
+                                    ("signal", "mismatch", "no_trigger",
+                                     "session", "friday", "spread",
+                                     "riskcap", "breaker"),
+                                    map(int, p[2:10])):
+                                agg[key] = agg.get(key, 0) + v
+                    except ValueError:
+                        continue
+        return agg or None
+    except OSError:
+        return None
+
+
 def _print_midas_arm(td: str, txt: str, multi: bool = False,
                      ordinal: int = 1, positions: list[dict] | None = None) -> bool:
     """One arm's health block (the §13-era single-arm body, per arm)."""
@@ -1342,6 +1368,11 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
     veq_s = f"{veq:.2f}" if veq is not None else "n/a"
     start_s = f" (start {start:.2f})" if start is not None else ""
     print(f"  ledger: {os.path.basename(ledger_path)} | age {age_s} | veq {veq_s}{start_s}")
+    nf = nofill_summary(ledger_path)   # v1.18: why-no-trade accounting, 24h
+    if nf:
+        top = sorted(nf.items(), key=lambda kv: -kv[1])[:4]
+        print("  no-fill (24h): " + ", ".join(f"{k}={v}" for k, v in top)
+              + "  (NOFILL diagnostics — reasons the engine did not trade)")
     if is_live:
         # The LIVE arm's block: open positions from dangling LOPEN rows, equity
         # is the BROKER ACCOUNT (the virtual EQ rows are inert in live mode).

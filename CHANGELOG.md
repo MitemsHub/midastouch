@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-09-18 — v1.18 NOFILL diagnostics + external-review adjudication
+
+- Every veto in the PERTICK signal path now logs its reason (honest HUD
+  `VETO <reason>` lines) and a daily NOFILL ledger row records the veto
+  census (8 counters) — "why didn't it trade" is now evidence, not memory.
+- Live-order terminal failure records retcode+description (g_lv_last_error).
+- Review items adjudicated with measured evidence: Mode 7 refuted (sweep:
+  half the R, worse pf), spread cap 5.0% refuted (p99 spread $0.51 vs $0.38
+  cap — the cap only bites in the news tail), hardcoded ATR band refuted by
+  its own study (no band improves return; artifact registered).
+- v1.18 compiled 0/0 via the scratch tool; deployed binaries untouched;
+  era note carries +telemetry-only-per-V2-register+diag-nofill (never-abort
+  both directions, pinned); 23 telemetry pins green.
+
 ## 2026-09-18 — AutoTrading silent stand-down found and closed (LV live)
 
 - Found: terminal global AutoTrading OFF 08:40→17:39 UTC — MT5 silently refuses
