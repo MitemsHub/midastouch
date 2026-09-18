@@ -1,0 +1,15 @@
+# MITEMSHUB signal-filter bucket table — consult-only unless ACTIVATION=ACTIVE
+# version,bucket_side,bucket_tod,p_win,source
+# ACTIVATION=PASSIVE
+# meta
+version=bucket-side-tod-v0,global_rate=0.5645
+# global_rate=0.5645
+BUY,0,0.4051,BUCKET
+BUY,1,0.5882,BUCKET
+BUY,2,0.7563,BUCKET
+BUY,3,0.6771,BUCKET
+SELL,0,0.8760,BUCKET
+SELL,1,0.3264,BUCKET
+SELL,2,0.5065,BUCKET
+SELL,3,0.6269,BUCKET
+*,*,0.5645,GLOBAL

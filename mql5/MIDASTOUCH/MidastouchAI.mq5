@@ -34,7 +34,7 @@
 //| passing forward gate, in its own reviewed build.                 |
 //+------------------------------------------------------------------+
 #property copyright "MIDASTOUCH"
-#property version   "1.05"
+#property version   "1.16"   // v1.16: R6 fail-closed preconditions (news-filter input, gold-only charter)
 // Tester agents wipe their Files sandbox at pass start: this property makes
 // the tester copy the recorded-spread series from <data>\MQL5\Files into the
 // agent for every BAR-mode pass (name must be the literal staged file).
@@ -75,11 +75,13 @@ input group "=== Gates (playbook policies) ==="
 input int                 InpSessionStartHour = 6;     // UTC, entries allowed from
 input int                 InpSessionEndHour   = 20;    // UTC, entries until (exclusive)
 input double              InpSpreadCapPctStop = 1.5;   // veto if spread > this % of stop
-input int                 InpFridayCutoffHour = 20;    // UTC; no new entries after
-input bool                InpUseNewsFilter    = false; // HONEST: calendar integration pending
+input int                  InpFridayCutoffHour = 20;    // UTC; no new entries after
+input bool                 InpUseNewsFilter    = false; // R6: INIT_FAILED when true — no calendar engine exists (never set true)
+
 input int                 InpStaleMinutes     = 30;    // no M15 bar for N min -> stand down
 input group "=== Risk ==="
 input double              InpRiskPercent      = 1.0;
+input double              InpMaxRiskPct       = 15.0;  // v1.14 amendment 6: veto if even min-lot risk exceeds this % of the sizing basis (MEASURED default — protocol amendment 6 decision table; 1.5% would starve the $50 arms and veto certified fills)
 input group "=== Paper / Live ==="
 input bool                InpLiveExecution    = false; // false=paper mirror | true=REAL orders (v1.08+)
 input double              InpPaperEquity      = 1000.0;
@@ -114,6 +116,7 @@ ulong          g_pp_ticket = 0;
 double         g_paper_eq = 0.0, g_paper_start = 0.0;
 double         g_cum_r = 0.0;
 int            g_trades = 0, g_wins = 0;
+string         g_last_action = "boot";   // v1.10 HUD: last engine action (display only)
 
 //--- bar-replay parity state (v1.04, EXEC BAR model)
 long           g_sp_t[];         // spread-file bar open times (strictly ascending)
@@ -133,8 +136,20 @@ datetime       g_win_t0 = 0, g_win_t1 = 0;  // v1.09: EA-enforced research windo
 
 // v1.08 live order path state (PERTICK + InpLiveExecution only; paper
 // mirror keeps its own g_pp_* state so both can run in parallel).
-ulong  g_lv_ticket = 0;              // real position ticket (0 = flat)
-int    g_lv_dir = 0;
+//
+// v1.11 POSITION-ID ARCHITECTURE: order/deal/position IDs are three
+// DISTINCT ID spaces on a netting-vs-hedging-agnostic account and are no
+// longer conflated in one variable. g_lv_posid is the ONLY key used for
+// history reconciliation (HistorySelectByPosition takes the position
+// IDENTIFIER); g_lv_ticket is the selected POSITION ticket (positioning
+// context only); the entry order and entry deal tickets are kept purely
+// for ledger provenance. On a netting account the position ticket equals
+// the position identifier; on hedging accounts they can differ.
+ulong  g_lv_posid  = 0;              // POSITION_IDENTIFIER for history reconciliation (0 = flat)
+ulong  g_lv_ticket = 0;              // selected POSITION ticket (positioning context)
+ulong  g_lv_order  = 0;              // entry order ticket (provenance)
+ulong  g_lv_deal   = 0;              // entry deal ticket (provenance)
+int    g_lv_dir = 0;                 // live direction (telemetry columns: atr_at_entry + spread_at_open appended in v1.13)
 double g_lv_entry = 0, g_lv_sl = 0, g_lv_tp = 0, g_lv_stop = 0, g_lv_vol = 0;
 datetime g_lv_open_time = 0;
 datetime g_lv_expiration = 0;    // research timeout mirrored on the real position
@@ -149,12 +164,56 @@ double DollarPerUnit()
    return DollarPerUnitPerLot(dpu) ? dpu : 0.0;
 }
 
-#define APP_VERSION  "MIDAS1.09"
+#define APP_VERSION  "MIDAS1.16"   // v1.16: R6 fail-closed preconditions (news-filter input, gold-only charter) — behavior on certified paths unchanged
 #define SPREAD_FLOOR 0.10              // $ — MUST equal midas_sweep.SPREAD_FLOOR
 #define LEDGER_BASE  "MIDASTOUCH_paper"
 
 //+------------------------------------------------------------------+
 string VersionTag() { return "[" + APP_VERSION + "]"; }
+
+// v1.10: registry mode names for the HUD (display only; the banner keeps the
+// numeric mode= so the watchdog's banner parser stays version-stable).
+string ModeName(const int m)
+{
+   switch(m)
+   {
+      case MODE_ORIGINAL:          return "ORIGINAL";
+      case MODE_REVERSE_DIRECTION: return "REVERSE_DIRECTION";
+      case MODE_REVERSE_TRIGGER:   return "REVERSE_TRIGGER";
+      case MODE_REVERSE_BOTH:      return "REVERSE_BOTH";
+      case MODE_LONG_ONLY:         return "LONG_ONLY";
+      case MODE_SHORT_ONLY:        return "SHORT_ONLY";
+      case MODE_MACRO_ONLY:        return "MACRO_ONLY";
+      case MODE_TRIGGER_ONLY:      return "TRIGGER_ONLY";
+   }
+   return "?";
+}
+
+//+------------------------------------------------------------------+
+//| v1.10 display-only HUD — the at-a-glance line the old V75 chart  |
+//| had. Shows mode, session, virtual equity, the §13 gate clock     |
+//| (30 = the [3b] display target; adjudication reads at n>=60 per   |
+//| protocol §13), and the last engine action. STRICTLY read-only:   |
+//| no trading state is read here that the ledger does not already   |
+//| carry, and NO Comment() may ever run in the strategy tester —    |
+//| parity runs need byte-identical ledgers and untouched charts     |
+//| (source test tests/test_midas_hud.py pins that law).             |
+//+------------------------------------------------------------------+
+void HudUpdate()
+{
+   if(MQLInfoInteger(MQL_TESTER)) return;   // parity: draw nothing in the tester
+   string pos = g_pp_open ? (g_pp_dir > 0 ? "LONG" : "SHORT")
+              : (g_lv_posid != 0 ? (g_lv_dir > 0 ? "LONG(live)" : "SHORT(live)") : "flat");
+   Comment(StringFormat(
+      "MIDASTOUCH %s | mode=%d %s | session %02d-%02d UTC\n"
+      "vEq: $%.2f (start $%.2f) | pos: %s\n"
+      "trades: %d/30 (gate reads at n=60) | wins %d | cumR %+.2f\n"
+      "last: %s",
+      APP_VERSION, (int)InpMode, ModeName((int)InpMode),
+      InpSessionStartHour, InpSessionEndHour,
+      PaperEquity(), g_paper_start, pos,
+      g_trades, g_wins, g_cum_r, g_last_action));
+}
 
 string PaperFile()
 {
@@ -467,22 +526,46 @@ int OnInit()
       g_win_t1 = (datetime)InpWindowEnd;
    }
 
+   // v1.16 (V2 register R6, fail-closed preconditions — the build-time
+   // decision the register queued): the news-filter input names protection
+   // that does not exist, and MIDASTOUCH is gold-only by charter. Both are
+   // INIT_FAILED preconditions BEFORE the banner prints (a refused attach
+   // must not announce itself as a healthy start), instead of honest labels
+   // on absent protection / an out-of-charter symbol. The tester harness
+   // and every preset pass InpUseNewsFilter=false on a gold symbol, so
+   // behavior on every certified path is unchanged.
+   if(InpUseNewsFilter)
+   {
+      Print(VersionTag() + "INIT FAILED: InpUseNewsFilter=true names a calendar "
+            "engine that does not exist (V2 register R6). No news protection "
+            "can be provided; refusing to run under a false label.");
+      return INIT_FAILED;
+   }
    string symU = _Symbol;
    StringToUpper(symU);
    bool is_gold = (StringFind(symU, "XAU") >= 0 || StringFind(symU, "GOLD") >= 0);
-   PrintFormat(VersionTag() + "MIDASTOUCH started | mode=%d | symbol=%s (%s) | "
+   if(!is_gold)
+   {
+      Print(VersionTag() + "INIT FAILED: chart symbol is not a gold symbol — "
+            "MIDASTOUCH is gold-only by charter (V2 register R6).");
+      return INIT_FAILED;
+   }
+   PrintFormat(VersionTag() + "MIDASTOUCH started | mode=%d | symbol=%s (GOLD-OK) | "
                "macro=H4+H1 EMA%d | trigger=M15 BB(%d,%.1f)/RSI(%d) | SL=%.1fxATR(H1) TP=%.1fR "
                "timeout=%dmin | session=%02d-%02d UTC | spreadcap=%.1f%%stop | risk=%.2f%% | "
-               "execution=%s | exec-model=%s | NEWS-FILTER=%s (calendar pending)",
-               (int)InpMode, _Symbol, is_gold ? "GOLD-OK" : "NOT-GOLD WARN",
+               "execution=%s | exec-model=%s | NEWS-FILTER=%s",
+               (int)InpMode, _Symbol,
                InpMacroEmaPeriod, InpBBPeriod, InpBBDev, InpRSIPeriod,
                InpSlAtrMult, InpTpMult, InpTimeoutMinutes,
                InpSessionStartHour, InpSessionEndHour, InpSpreadCapPctStop,
                InpRiskPercent,               InpLiveExecution ? "LIVE" : "PAPER",
                InpBarModel ? "BAR" : "PERTICK",
                InpUseNewsFilter ? "ON" : "OFF");
-   if(!is_gold)
-      Print(VersionTag() + "WARNING: chart symbol is not a gold symbol — MIDASTOUCH is gold-only by charter");
+   PrintFormat(VersionTag() + "CLOCK: server=%s | GMT=%s | offset=%+d h %02d min — session gates classify BAR EPOCHS (parity); "
+               "live-path wall-clock gates use TimeGMT; VERIFY this offset before the live gate (health guide §4)",
+               TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES),
+               TimeToString(TimeGMT(), TIME_DATE|TIME_MINUTES),
+               OffsetHours(), OffsetRemMin());
 
    // ledger era stamp (idempotent provenance, mirrors the house contract).
    // v1.09: the era_name field is now an HONEST model note — BAR parity
@@ -491,6 +574,12 @@ int OnInit()
    // paper ledger (InpBarModel=false) keeps "pertick-fills" exactly as the
    // era.py accounting expects; tester ledgers are throwaway.
    string era_note = InpBarModel ? "bar-model-parity" : "pertick-fills";
+   // v1.13 (V2 register R10, never-abort class): the telemetry build cites the
+   // register in its ERA note so midas_verdict can classify this version
+   // change without aborting the window. BAR tester ledgers are throwaway and
+   // keep the exact parity-era note byte-for-byte.
+   if(!InpBarModel)
+      era_note += "+telemetry-only-per-V2-register";
    PaperLog(StringFormat("ERA,%s,%I64d,%s", APP_VERSION, (long)TimeCurrent(), era_note));
    RestoreOrVerifyLedger();
    if(!MQLInfoInteger(MQL_TESTER))
@@ -499,6 +588,7 @@ int OnInit()
    PrintFloorTable();
    DumpH1Debug();                      // v1.02: tester-vs-CSV series comparison
    LiveRecoverState();                 // v1.08: adopt real positions after restart (live only)
+   HudUpdate();                        // v1.10: HUD up from the first second (live only)
    return INIT_SUCCEEDED;
 }
 
@@ -522,6 +612,7 @@ void OnTimer()
    if(MQLInfoInteger(MQL_TESTER))
       return;                                          // parity runs: byte-identical ledgers
    PaperLog(StringFormat("EQ,%.2f", PaperEquity()));
+   HudUpdate();                                        // v1.10: HUD refresh on the heartbeat clock
 }
 
 //+------------------------------------------------------------------+
@@ -583,6 +674,380 @@ void OnTick()
    }
    if(!g_pp_open) TrackFreshM15Bar();
    if(g_pp_open)  PaperCheckHardExits();
+   HudUpdate();                        // v1.10: display-only refresh (paper path)
+}
+
+//+------------------------------------------------------------------+
+//| v1.04 BAR parity engine — the python pass, bar by bar.           |
+//| Fires on the FIRST tick of each new M15 bar T (the only tick     |
+//| where iTime(0)==T and the forming bar's Open is its true Open).  |
+//| python pass order, verbatim:                                     |
+//|   1. fill pending at THIS bar's open (valid only on sig_ct),     |
+//|   2. manage the open position over THIS complete bar,            |
+//|   3. signal on THIS bar's close (i.e. on the NEXT bar's first    |
+//|      tick — the moment this bar is complete and index 1).        |
+//+------------------------------------------------------------------+
+void OnBarReplay()
+{
+   datetime cur = iTime(_Symbol, PERIOD_M15, 0);
+   if(cur == 0) return;
+   if(cur <= g_last_seen) return;      // mid-bar / duplicate ticks
+   g_last_seen = cur;
+   ReplayThrough(cur);
+}
+
+// python iterates EVERY M15 bar of the recorded series in order, regardless
+// of ticks. The EA observes time only through OnTick, so it catches up over
+// every unprocessed completed bar on each arrival — this is what makes the
+// engine tick-model independent (bars with zero real ticks were silently
+// skipped before: measured 12,568 evals vs ~12,823 window bars, 2026-09-17).
+// Membership: SpreadAt(t) > 0 == the bar exists in the recorded CSV (the
+// shared spread series covers exactly the CSV bars) — tester-fabricated or
+// session-hole bars are skipped, exactly the bars python's loop never sees.
+#define X900  900                     // M15 bar length in seconds
+
+void ReplayThrough(datetime cur)
+{
+   while(g_last_processed + X900 <= cur - X900)
+   {
+      datetime t = g_last_processed + X900;
+      g_last_processed = t;            // advance unconditionally
+      if(SpreadAt(t) <= 0) continue;   // bar absent from the recorded series
+      bool may_signal = BarFillAndManage(t);
+      if(!may_signal) continue;
+      double o, h, l, c;
+      if(GetBar(t, o, h, l, c))
+         BarEvaluateSignal(t, o, h, l, c);
+   }
+}
+
+// v1.11: resolve g_lv_posid/ticket from the position currently selected by
+// SelectOurPosition(). Requires a position already selected (PositionSelect
+// context). Safe no-op when nothing is selected.
+void ResolveLiveIds()
+{
+   g_lv_ticket = (ulong)PositionGetInteger(POSITION_TICKET);
+   ulong pid   = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+   g_lv_posid  = (pid > 0) ? pid : g_lv_ticket;   // netting fallback
+}
+
+// v1.11: resolve the ENTRY deal from open history for a selected position:
+// the first IN deal (its price is the broker's volume-weighted entry price;
+// recorded for provenance and future slippage telemetry).
+void ResolveEntryDeal()
+{
+   g_lv_deal = 0;
+   if(g_lv_posid == 0) return;
+   if(!HistorySelectByPosition(g_lv_posid)) return;
+   int n = HistoryDealsTotal();
+   for(int i = 0; i < n; i++)
+   {
+      ulong d = HistoryDealGetTicket(i);
+      if(d > 0 && HistoryDealGetInteger(d, DEAL_ENTRY) == DEAL_ENTRY_IN)
+      {
+         g_lv_deal = d;
+         break;
+     }
+   }
+}
+
+// v1.11: THE ONLY way live code touches a position. Selects the position
+// owned by THIS EA on THIS symbol — verified against symbol AND magic —
+// and resolves g_lv_posid/ticket as a side effect. Never trust "the
+// position on XAUUSD is mine": another manual or EA position on the same
+// symbol must be untouchable. Returns false when we are flat (or when a
+// foreign position exists and ours does not).
+bool SelectOurPosition()
+{
+   // v1.11.1: when we already hold IDs, RE-VERIFY that exact position —
+   // keeps the per-tick external-close check O(1) and guarantees the
+   // selected context is still the position we are about to act on.
+   if(g_lv_posid != 0)
+   {
+      if(!PositionSelectByTicket(g_lv_ticket) ||
+         (ulong)PositionGetInteger(POSITION_IDENTIFIER) != g_lv_posid ||
+         PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         (long)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         return false;                              // gone or mutated: caller reconciles
+      return true;
+   }
+   // adoption scan: first symbol+magic match wins (one-position-at-a-time
+   // by charter; multiple owned positions are outside the strategy).
+   int total = PositionsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong tk = PositionGetTicket(i);
+      if(tk == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+      ResolveLiveIds();
+      return true;
+   }
+   return false;
+}
+
+// OnDeinit tail flush: bars after the last tick (the tester ends mid-window
+// in clock terms) are complete by deinit — python still iterates them (a
+// position MUST manage to its close; a final in-window signal must stash).
+void ReplayTailFlush()
+{
+   if(g_last_seen == 0) return;
+   ReplayThrough(g_last_seen + X900);  // include the last seen bar itself
+}
+
+// python steps 1+2 in one call: fill pending (if sig_ct == t), then manage
+// the open position across the COMPLETE bar [t, t+900). Returns whether
+// python's loop would run signal detection on this bar: python `continue`s
+// to the next bar whenever a position existed at bar start OR was filled on
+// it — signals are evaluated ONLY from flat, no-fill bars (skipping this
+// gate was the trade-#1 divergence: the EA stashed pendings python never
+// did, decorrelating the whole sequence after a late position close).
+bool BarFillAndManage(datetime t)
+{
+   double o, h, l, c;
+   if(!GetBar(t, o, h, l, c)) return false;
+
+   bool was_open = g_pp_open;          // state at bar start (python's `if pos`)
+   bool filled  = false;
+
+   // --- step 1: fill pending at this bar's open --------------------------
+   if(g_pending_valid && !g_pp_open && t == g_pending_sigct)
+   {
+      int    side    = (g_pending_dir > 0) ? 1 : -1;
+      double sp_open = SpreadAt(t);
+      if(sp_open <= 0)
+      {
+         PrintFormat(VersionTag() + "BAR fill skipped: no recorded spread for %I64d", (long)t);
+         g_pending_valid = false;
+      }
+      else
+      {
+         double fill = o + side * sp_open / 2;
+         double stop_d = g_pending_stop;
+         double dpu = DollarPerUnit();
+         if(dpu <= 0) { Print(VersionTag() + "BAR fill skipped: bad symbol spec"); g_pending_valid = false; return false; }
+         double risk_d = PaperEquity() * InpRiskPercent / 100.0;
+         double lots = risk_d / (stop_d * dpu);
+         if(lots < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN))
+         {
+            // v1.14 amendment 6 (register R5): floor-to-min-lot can exceed
+            // the configured risk — veto, never silently oversize. Mirrors
+            // python minlot_risk_exceeds_cap (InpMaxRiskPct = the cap).
+            if(stop_d * dpu * SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN)
+               > PaperEquity() * InpMaxRiskPct / 100.0)
+            {
+               PaperLog(StringFormat("SKIP,%I64d,RISK-CAP,%s", (long)t, InpArmTag));
+               Print(VersionTag() + "PAPER SKIP RISK-CAP: min-lot risk exceeds "
+                     "InpMaxRiskPct — trade vetoed (amendment 6)");
+               g_pending_valid = false;
+               return false;
+            }
+            lots = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+         }
+         double eff_risk = stop_d * dpu * lots;
+         g_pp_dpu = dpu;
+         g_pp_open = true; g_pp_dir = g_pending_dir; g_pp_entry = fill;
+         g_pp_sl = fill - side * stop_d;
+         g_pp_tp = fill + side * stop_d * InpTpMult;
+         g_pp_orig_risk = stop_d; g_pp_eff_risk = eff_risk;
+         g_pp_vol = lots; g_pp_entry_time = t; g_pp_ticket = (ulong)t;
+         g_pp_expiration = t + (datetime)(InpTimeoutMinutes * 60);
+         g_pp_open_sp = sp_open;            // python pos["sp"]
+         g_pending_valid = false;
+         filled = true;
+         PaperLog(StringFormat("OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s,%.5f,%.5f",
+                  (long)t, g_pp_ticket, g_pp_dir, fill, g_pp_sl, g_pp_tp,
+                  lots, eff_risk, stop_d, InpTimeoutMinutes * 60, InpArmTag,
+                  stop_d / InpSlAtrMult, sp_open));   // v1.13 R10: atr_at_entry,spread_at_open (end-of-row append)
+      }
+   }
+
+   // --- step 2: manage across this complete bar --------------------------
+   if(g_pp_open)
+      BarManage(t, o, h, l, c);
+
+   return !was_open && !filled;        // python's signal-detection domain
+}
+
+// python _manage over one complete bar: SL-first, exit at level, half-spread
+// charged on the exit, timeout at bar close after >= 720 minutes held.
+void BarManage(datetime t, double o, double h, double l, double c)
+{
+   if(g_pp_dpu <= 0) return;               // impossible after a real fill; fail-safe
+   int    side   = (g_pp_dir > 0) ? 1 : -1;
+   double stop_d = g_pp_orig_risk;
+   double sp     = SpreadAt(t);
+   if(sp <= 0) sp = SPREAD_FLOOR;          // python: max(spread, SPREAD_FLOOR)
+
+   // excursions (python computes them too; parity verdict uses R)
+   double fav = (side > 0) ? (h - g_pp_entry) / stop_d : (g_pp_entry - l) / stop_d;
+   double adv = (side > 0) ? (g_pp_entry - l) / stop_d : (h - g_pp_entry) / stop_d;
+
+   double exit_px = 0.0;
+   string reason = "";
+   if(side > 0)
+   {
+      if(l <= g_pp_sl)      { exit_px = g_pp_sl; reason = "SL"; }
+      else if(h >= g_pp_tp) { exit_px = g_pp_tp; reason = "TP"; }
+   }
+   else
+   {
+      if(h >= g_pp_sl)      { exit_px = g_pp_sl; reason = "SL"; }
+      else if(l <= g_pp_tp) { exit_px = g_pp_tp; reason = "TP"; }
+   }
+   long bars_held = (long)(t + 900 - (long)g_pp_entry_time);
+   if(exit_px == 0 && bars_held >= (long)InpTimeoutMinutes * 60)
+   {
+      exit_px = c - side * sp / 2;
+      reason = "TIMEOUT";
+   }
+   if(exit_px == 0) return;                // position survives into the next bar
+
+   if(reason != "TIMEOUT")
+      exit_px = exit_px - side * sp / 2;   // exit half-spread on top (python exact)
+   double move = (exit_px - g_pp_entry) * side;
+   double pnl  = move * g_pp_dpu * g_pp_vol;
+   double r    = (g_pp_orig_risk > 0) ? pnl / g_pp_eff_risk : 0;
+   g_paper_eq += pnl;
+   g_cum_r += r; g_trades++; if(pnl > 0) g_wins++;
+   PaperLog(StringFormat("CLOSE,%I64d,%I64u,%s,%.5f,%.3f,%.2f,%.2f,%.5f,%.5f",
+            (long)(t + 900), g_pp_ticket, reason, exit_px, r, pnl, g_paper_eq,
+            sp, 0.0));                       // v1.13 R10: spread_at_close,slippage(=0 model exit)
+   PaperLog(StringFormat("EQ,%.2f", g_paper_eq));
+   PrintTradeR(r);
+   g_last_action = StringFormat("CLOSE %s R=%+.2f vEq=$%.2f (%s)",   // v1.10 HUD
+                  reason, r, g_paper_eq, TimeToString(t + 900, TIME_DATE|TIME_MINUTES));
+   g_pp_open = false;
+   g_pp_close_ct = t + 900;
+}
+
+// python step 3: signal on the bar that just CLOSED (sig = its open time).
+// Mirrors run_mode's tail exactly: indicator lookups at the closed bar,
+// mode transform, session gate, ATR/stop, pending stash (valid ONLY on the
+// immediate next bar).
+//+------------------------------------------------------------------+
+//| v1.12 TIME ENGINE — one authoritative UTC clock for wall-clock   |
+//| decisions. The review's P0 #2: TimeCurrent() is broker SERVER    |
+//| time, so every wall-clock gate silently moved with the broker's  |
+//| timezone (and its DST). The program needs TWO clocks, used       |
+//| deliberately and never mixed:                                    |
+//|                                                                  |
+//|   • BAR/label frame — signal-bar EPOCHS (iTime values). The BAR  |
+//|     session gate (BarEvaluateSignal) and the PERTICK gate        |
+//|     (TrackFreshM15Bar) classify on those epochs because the      |
+//|     python engine does (Amendment 2 certified; swapping THEM     |
+//|     would BREAK bit-level parity — do not "fix" them).           |
+//|   • REAL UTC — TimeGMT(), broker-independent, for ALL human-
+//|     intent hour/day gates: session window, Friday cutoff and
+//|     force-flat, daily-breaker day key, live timeout — via the
+//|     single authoritative TimeUTCNow() helper. v1.12 confined
+//|     these to the breaker/flat/timeout; v1.15 corrected the
+//|     frame-law PROVENANCE finding: iTime bar epochs are broker-
+//|     SERVER time (the label frame of the broker feed), not UTC,
+//|     so classifying them through UTC structurization silently
+//|     shifted the 06–20 window with the broker's timezone. The
+//|     engine of record is re-pinned on the same finding
+//|     (midas_sweep epoch classification = server frame); one
+//|     commit, both engines. |
+//|                                                                  |
+//| The staleness guard intentionally STAYS on TimeCurrent(): it     |
+//| measures gaps in the SERVER tick stream, which IS the frame it   |
+//| must measure. Ledger row stamps stay TimeCurrent() as frame-     |
+//| consistent provenance. MidasOffsetProbe.mq5 verifies the broker  |
+//| offset at the live gate (see MIDASTOUCH_HEALTH_GUIDE.md §3).     |
+//+------------------------------------------------------------------+
+datetime TimeUTCNow()
+{
+   return TimeGMT();                      // broker-independent; no offset inputs to get wrong
+}
+
+int OffsetMinutes()                      // broker-vs-UTC offset (minutes; may exceed ±60 on odd servers)
+{
+   return (int)((TimeCurrent() - TimeGMT()) / 60);
+}
+
+int OffsetHours() { return OffsetMinutes() / 60; }
+int OffsetRemMin() { int m = OffsetMinutes() % 60; return (m < 0) ? -m : m; }
+
+void BarEvaluateSignal(datetime sig, double so, double sh, double sl_, double sc)
+{
+   // python: k1 = LAST H1 bar with close-time <= sig_ct (= sig+900) — which
+   // is exactly the bar BEFORE the H1 bar covering sig_ct (the covering bar's
+   // close is always > sig_ct, the previous one's is <=). iBarShift with
+   // exact=false returns the covering bar's shift, so k1 = that + 1. This
+   // identity holds across session holes too (shift order = time order).
+   // Zero-trades bug found live 2026-09-17: an exact-match probe + bogus
+   // negative-shift formula returned k1 = -1 on every bar, killing all
+   // signals at the k1 < 21 guard.
+   int k1c = iBarShift(_Symbol, PERIOD_H1, sig + 900, false);
+   int k4c = iBarShift(_Symbol, PERIOD_H4, sig + 900, false);
+   if(k1c < 0 || k4c < 0) return;
+   int k1 = k1c + 1;
+   int k4 = k4c + 1;
+   // python's `k1 < 21 or k4 < 21 or i < 21` are history-depth warm-up
+   // guards on ARRAY INDICES (trivially true after 2024-04); the shift-
+   // semantics equivalent is available-bar-count. Transplanting the index
+   // comparison here killed every evaluation (k1 is always ~1 in shifts).
+   if(Bars(_Symbol, PERIOD_H1) < 21 || Bars(_Symbol, PERIOD_H4) < 21
+      || Bars(_Symbol, PERIOD_M15) < 21) return;
+   // python: window membership (`ct > t0 and b.time <= t1`) gates SIGNAL
+   // detection. v1.09: enforced HERE, EA-side — sig+900 is the signal bar's
+   // close time (ct), so the bar qualifies iff t0 < ct <= t1. Position
+   // management (BarFillAndManage) stays ungated: python keeps managing an
+   // open trade past t1 until it closes. Tester dates and preloaded history
+   // can no longer leak out-of-window signals (found live 2026-09-17).
+   if(g_win_t0 > 0 && !(sig + 900 > g_win_t0 && sig + 900 <= g_win_t1)) return;
+   double e1[], e4[], c1[], c4[];
+   int rc1 = CopyBuffer(g_h1_ema, 0, k1, 1, e1);
+   int rc2 = CopyBuffer(g_h4_ema, 0, k4, 1, e4);
+   int rc3 = CopyClose(_Symbol, PERIOD_H1, k1, 1, c1);
+   int rc4 = CopyClose(_Symbol, PERIOD_H4, k4, 1, c4);
+   if(rc1 != 1 || rc2 != 1 || rc3 != 1 || rc4 != 1) return;
+   bool h1_up = c1[0] > e1[0], h4_up = c4[0] > e4[0];
+   int mac = (h1_up && h4_up) ? 1 : ((!h1_up && !h4_up) ? -1 : 0);
+
+   // ATR at the closed H1 bar (python h1_atr[k1-1] = SMA-TR over the 14
+   // H1 bars ending at that bar)
+   double atr;
+   bool rca = AtrAtShift(k1, atr);
+   if(!rca) return;
+   double stop_d = InpSlAtrMult * atr;
+   if(stop_d <= 0) return;
+
+   // trigger on the closed M15 bar (BB touch-back or RSI 70/30)
+   double up[], lo[], rsi[];
+   int rb1 = CopyBuffer(g_m15_bb, 1, 1, 1, up);
+   int rb2 = CopyBuffer(g_m15_bb, 2, 1, 1, lo);
+   double c0[], c1m[];
+   int rc5 = CopyClose(_Symbol, PERIOD_M15, 1, 2, c1m);   // [0]=older [1]=sig close
+   int rc6 = CopyClose(_Symbol, PERIOD_M15, 2, 1, c0);    // previous bar close
+   if(rb1 != 1 || rb2 != 1 || rc5 != 2 || rc6 != 1) return;
+   int trigger = 0;
+   if(c0[0] > up[0] && c1m[1] < up[0]) trigger = 1;
+   else if(c0[0] < lo[0] && c1m[1] > lo[0]) trigger = -1;
+   else if(CopyBuffer(g_m15_rsi, 0, 1, 1, rsi) == 1)
+   {
+      if(rsi[0] >= InpRSIUpper) trigger = -1;
+      else if(rsi[0] <= InpRSILower) trigger = 1;
+   }
+
+   int direction = 0;
+   if(!ModeDecide(trigger, mac, direction) || direction == 0) return;
+
+   // session gate on the signal bar's open hour — BAR EPOCH = SERVER frame
+   // (v1.15: iTime values are broker-server; the python engine of record
+   // classifies the same broker-feed epochs — provenance finding, amendment 6)
+   MqlDateTime dt;
+   TimeToStruct(sig, dt);
+   if(dt.hour < InpSessionStartHour || dt.hour >= InpSessionEndHour) return;
+   if(dt.day_of_week == 5 && dt.hour >= InpFridayCutoffHour) return;
+
+   g_pending_valid  = true;
+   g_pending_sigct  = sig + 900;
+   g_pending_dir    = direction;
+   g_pending_stop   = stop_d;
+   g_pending_hour   = dt.hour;
+   g_pending_mac    = mac;
 }
 
 //+------------------------------------------------------------------+
@@ -858,6 +1323,7 @@ void TrackFreshM15Bar()
    {
       g_last_m15_seen = TimeCurrent();
       Print(VersionTag() + "STALE feed — bar skipped, no evaluation");
+      g_last_action = "STALE feed - bar skipped";   // v1.10 HUD
       return;
    }
    g_last_m15_seen = TimeCurrent();
@@ -868,19 +1334,28 @@ void TrackFreshM15Bar()
    int trigger = TriggerOnClosedBar();
    int direction = 0;
    if(!ModeDecide(trigger, mac, direction) || direction == 0) return;
+   g_last_action = StringFormat("SIGNAL %s evaluated",   // v1.10 HUD (PERTICK path only)
+                  direction > 0 ? "BUY" : "SELL");
 
-   // session gates on the SIGNAL BAR's open hour (research classification)
+   // session gates on the SIGNAL BAR's open hour — BAR EPOCH = SERVER frame
+   // (v1.15: iTime values are broker-server; matches the python engine of
+   // record's classification of the same broker-feed epochs)
    MqlDateTime dt;
    TimeToStruct(sig_open_time, dt);
    if(dt.hour < InpSessionStartHour || dt.hour >= InpSessionEndHour) return;
-   // Friday cutoff
+
+   // Friday cutoff
    if(dt.day_of_week == 5 && dt.hour >= InpFridayCutoffHour) return;
 
    double atr = AtrNow();
    if(atr <= 0) return;
    double stop = InpSlAtrMult * atr;
    if(stop <= 0) return;
-   if(!SpreadCapOK(stop)) return;      // v1.08: shared veto (paper mirror and live path)
+   if(!SpreadCapOK(stop))              // v1.08: shared veto (paper mirror and live path)
+   {
+      g_last_action = "signal vetoed: spread cap";   // v1.10 HUD
+      return;
+   }
 
    if(LiveSignalArmed())               // v1.08: real-order dispatch of the SAME signal
    {
@@ -912,7 +1387,20 @@ bool OpenPaperPosition(int direction, double stop_d, int hour, int mac)
    double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double vstep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    bool floored = false;
-   if(lots < vmin) { lots = vmin; floored = true; }
+   if(lots < vmin)
+   {
+      // v1.14 amendment 6 (register R5): min-lot risk veto — same predicate
+      // as the BAR path and python's minlot_risk_exceeds_cap. Basis is the
+      // PAPER book (PaperEquity), matching the sizing basis above.
+      if(stop_d * dpu * vmin > PaperEquity() * InpMaxRiskPct / 100.0)
+      {
+         Print(VersionTag() + "PAPER VETO RISK-CAP: min-lot risk exceeds "
+               "InpMaxRiskPct — trade vetoed (amendment 6)");
+         g_last_action = "signal vetoed: min-lot risk cap";   // v1.10 HUD
+         return false;
+      }
+      lots = vmin; floored = true;
+   }
    if(vstep > 0) lots = MathFloor(lots / vstep) * vstep;
    if(lots < vmin) { lots = vmin; floored = true; }
    double eff_risk = stop_d * dpu * lots;
@@ -927,13 +1415,17 @@ bool OpenPaperPosition(int direction, double stop_d, int hour, int mac)
                direction > 0 ? "BUY" : "SELL", lots, fill, sl, tp, eff_risk,
                eff_risk / MathMax(PaperEquity(), 0.01) * 100.0,
                floored ? " | FLOORED-TO-MIN-LOT" : "");
+   g_last_action = StringFormat("OPEN %s %.2f lots @%.5f (%s)",   // v1.10 HUD
+                  direction > 0 ? "BUY" : "SELL", lots, fill,
+                  TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
    // v1.02 parity instrumentation: the exact ATR + H1 bar stamp behind the stop
    datetime h1_stamp = iTime(_Symbol, PERIOD_H1, 1);
    double atr_used = AtrNow();
-   PaperLog(StringFormat("OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s%s",
+   PaperLog(StringFormat("OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s%s,%.5f,%.5f",
             (long)TimeCurrent(), ticket, direction, fill, sl, tp, lots, eff_risk,
             g_pp_orig_risk, InpTimeoutMinutes * 60, InpArmTag,
-            floored ? "_FLOORED" : ""));
+            floored ? "_FLOORED" : "",
+            atr_used, sprd));   // v1.13 R10: atr_at_entry,spread_at_open (end-of-row append)
    PaperLog(StringFormat("PARITY,atr=%.5f,h1=%I64d,stop=%.5f",
             atr_used, (long)h1_stamp, g_pp_orig_risk));
    if(!g_debug_done) { DumpH1Debug(); g_debug_done = true; }
@@ -980,11 +1472,14 @@ void PaperClose(string reason, double exit_price)
    exit = exit - side * sprd / 2;           // parity: half-spread exit
    double r = g_pp_orig_risk > 0 ? ((g_pp_dir > 0) ? (exit - g_pp_entry) : (g_pp_entry - exit)) / g_pp_orig_risk : 0;
    double pnl = g_pp_eff_risk * r;
-   PaperLog(StringFormat("CLOSE,%I64d,%I64u,%s,%.5f,%.3f,%.2f,%.2f",
-            (long)TimeCurrent(), g_pp_ticket, reason, exit, r, pnl, PaperEquity() + pnl));
+   PaperLog(StringFormat("CLOSE,%I64d,%I64u,%s,%.5f,%.3f,%.2f,%.2f,%.5f,%.5f",
+            (long)TimeCurrent(), g_pp_ticket, reason, exit, r, pnl, PaperEquity() + pnl,
+            sprd, 0.0));                     // v1.13 R10: spread_at_close,slippage(=0 model exit)
    g_paper_eq += pnl;
    g_cum_r += r; g_trades++; if(pnl > 0) g_wins++;
    PrintTradeR(r);
+   g_last_action = StringFormat("CLOSE %s R=%+.2f vEq=$%.2f (%s)",   // v1.10 HUD
+               reason, r, PaperEquity(), TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
    PrintFormat(VersionTag() + "CLOSE %s ticket=%I64u pnl=%+.2f R=%+.3f equity=$%.2f trades=%d",
                reason, g_pp_ticket, pnl, r, PaperEquity(), g_trades);
    PaperLog(StringFormat("EQ,%.2f", PaperEquity()));
@@ -1015,7 +1510,7 @@ bool DailyBreakerTripped()
 {
    if(InpDailyLossCapPct <= 0) return false;
    MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
+   TimeToStruct(TimeUTCNow(), dt);            // v1.15: TRUE UTC day key (the breaker is an operator guarantee)
    int day = dt.year * 10000 + dt.mon * 100 + dt.day;
    if(day != g_brk_day)                       // new UTC day: re-arm
    {
@@ -1051,9 +1546,9 @@ bool StopsLevelOK(double stop_d)
 // the research engine never priced (playbook policy: flat before the close).
 void LiveFridayFlatCheck()
 {
-   if(InpFridayFlatHour <= 0 || g_lv_ticket == 0) return;
+   if(InpFridayFlatHour <= 0 || g_lv_posid == 0) return;
    MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
+   TimeToStruct(TimeUTCNow(), dt);            // v1.15: TRUE UTC weekend guard
    if(dt.day_of_week == 5 && dt.hour >= InpFridayFlatHour)
    {
       Print(VersionTag() + "FRIDAY FLAT: closing before weekend (gap guard)");
@@ -1073,7 +1568,20 @@ bool LiveSendOrder(int direction, double stop_d, int hour, int mac)
    double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double vstep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    bool floored = false;
-   if(lots < vmin) { lots = vmin; floored = true; }
+   if(lots < vmin)
+   {
+      // v1.14 amendment 6 (register R5): live basis is ACCOUNT EQUITY — the
+      // same quantity the sizing above used. Never place a min-lot order
+      // that risks more than InpMaxRiskPct of the account.
+      if(stop_d * dpu * vmin > equity * InpMaxRiskPct / 100.0)
+      {
+         Print(VersionTag() + "LIVE VETO RISK-CAP: min-lot risk exceeds "
+               "InpMaxRiskPct of account equity — order refused (amendment 6)");
+         g_last_action = "live veto: min-lot risk cap";   // v1.10 HUD
+         return false;
+      }
+      lots = vmin; floored = true;
+   }
    if(vstep > 0) lots = MathFloor(lots / vstep) * vstep;
    if(lots < vmin) { lots = vmin; floored = true; }
 
@@ -1096,22 +1604,36 @@ bool LiveSendOrder(int direction, double stop_d, int hour, int mac)
       uint rc = g_trade.ResultRetcode();
       if(ok && (rc == TRADE_RETCODE_DONE || rc == TRADE_RETCODE_PLACED || rc == TRADE_RETCODE_DONE_PARTIAL))
       {
-         g_lv_ticket    = (g_trade.ResultDeal() > 0) ? g_trade.ResultDeal() : g_trade.ResultOrder();
+         // v1.11: three DISTINCT ID spaces, kept separately. The POSITION
+         // IDENTIFIER is the only reconciliation key; order/deal tickets
+         // are provenance. ResultDeal()/ResultOrder() may be 0 depending
+         // on execution mode — adopt by symbol+magic when absent, exactly
+         // like post-restart recovery.
+         g_lv_order     = g_trade.ResultOrder();
+         g_lv_deal      = g_trade.ResultDeal();
          g_lv_dir       = direction;
          g_lv_entry     = g_trade.ResultPrice();
          g_lv_sl        = sl;
          g_lv_tp        = tp;
          g_lv_stop      = stop_d;
          g_lv_vol       = lots;
-         g_lv_open_time = TimeCurrent();
-         g_lv_expiration= TimeCurrent() + (datetime)(InpTimeoutMinutes * 60);
+         g_lv_open_time = TimeUTCNow();                    // v1.15: real-UTC clock for the live position
+         g_lv_expiration= g_lv_open_time + (datetime)(InpTimeoutMinutes * 60);
+         if(!SelectOurPosition())
+            Print(VersionTag() + "WARNING: fill acknowledged but owned position not yet selectable — IDs will reconcile on the next tick");
+         else
+            ResolveEntryDeal();
          PrintFormat(VersionTag() + "LIVE FILL %s vol=%.2f @%.5f SL=%.5f TP=%.5f risk=$%.2f%s retcode=%u attempt=%d",
                      direction > 0 ? "BUY" : "SELL", lots, g_lv_entry, sl, tp,
                      stop_d * dpu * lots, floored ? " | FLOORED-TO-MIN-LOT" : "", rc, attempt);
-         PaperLog(StringFormat("LOPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s%s",
-                  (long)TimeCurrent(), g_lv_ticket, direction, g_lv_entry, sl, tp,
+         PrintFormat(VersionTag() + "LIVE IDs: pos=%I64u order=%I64u deal=%I64u (netting: pos==order; hedging: pos_id is authoritative)",
+                     g_lv_posid, g_lv_order, g_lv_deal);
+         PaperLog(StringFormat("LOPEN,%I64d,%I64u,%I64u,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s%s",
+                  (long)TimeCurrent(), g_lv_posid, g_lv_order, g_lv_deal, direction, g_lv_entry, sl, tp,
                   lots, stop_d * dpu * lots, stop_d, InpTimeoutMinutes * 60, InpArmTag,
                   floored ? "_FLOORED" : ""));
+         g_last_action = StringFormat("LIVE OPEN %s %.2f @%.5f",   // v1.10 HUD
+                        direction > 0 ? "BUY" : "SELL", lots, g_lv_entry);
          return true;
       }
       PrintFormat(VersionTag() + "ORDER REJECT attempt %d/%d retcode=%u (%s)",
@@ -1124,17 +1646,23 @@ bool LiveSendOrder(int direction, double stop_d, int hour, int mac)
 
 void LiveClosePosition(string reason)
 {
-   if(g_lv_ticket == 0) return;
+   if(g_lv_posid == 0) return;
+   if(!SelectOurPosition())            // v1.11: close OUR position by ticket, verified magic+symbol
+   {
+      Print(VersionTag() + "CLOSE ABORT: owned position no longer selectable (external close already reconciles via LiveCheckExits)");
+      return;
+   }
    for(int attempt = 1; attempt <= MathMax(1, InpOrderRetries); attempt++)
    {
-      if(g_trade.PositionClose(_Symbol))
+      if(g_trade.PositionClose(g_lv_ticket))
       {
          double exit = g_trade.ResultPrice();
          double side = (g_lv_dir > 0) ? 1.0 : -1.0;
          double r = (g_lv_stop > 0) ? ((exit - g_lv_entry) * side) / g_lv_stop : 0;
          PrintFormat(VersionTag() + "LIVE CLOSE %s exit=%.5f R=%+.3f", reason, exit, r);
-         PaperLog(StringFormat("LCLOSE,%I64d,%I64u,%s,%.5f,%.3f", (long)TimeCurrent(), g_lv_ticket, reason, exit, r));
-         g_lv_ticket = 0;
+         PaperLog(StringFormat("LCLOSE,%I64d,%I64u,%s,%.5f,%.3f", (long)TimeCurrent(), g_lv_posid, reason, exit, r));
+         g_last_action = StringFormat("LIVE CLOSE %s R=%+.2f", reason, r);   // v1.10 HUD
+         g_lv_posid = 0; g_lv_ticket = 0; g_lv_order = 0; g_lv_deal = 0;
          return;
       }
       PrintFormat(VersionTag() + "CLOSE REJECT attempt %d retcode=%u (%s)", attempt, g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription());
@@ -1148,9 +1676,9 @@ void LiveClosePosition(string reason)
 void LiveRecoverState()
 {
    if(!InpLiveExecution || InpBarModel) return;
-   if(!PositionSelect(_Symbol)) { g_lv_ticket = 0; return; }
+   if(!SelectOurPosition()) { g_lv_posid = 0; g_lv_ticket = 0; g_lv_order = 0; g_lv_deal = 0; return; }
+   ResolveEntryDeal();                 // v1.11: entry-deal provenance from history
    long ptype = PositionGetInteger(POSITION_TYPE);
-   g_lv_ticket    = (ulong)PositionGetInteger(POSITION_TICKET);
    g_lv_dir       = (ptype == POSITION_TYPE_BUY) ? 1 : -1;
    g_lv_entry     = PositionGetDouble(POSITION_PRICE_OPEN);
    g_lv_sl        = PositionGetDouble(POSITION_SL);
@@ -1164,27 +1692,28 @@ void LiveRecoverState()
 
 void LiveCheckExits()
 {
-   if(g_lv_ticket == 0) return;
-   if(!PositionSelect(_Symbol))                        // closed externally (server SL/TP or manual)
+   if(g_lv_posid == 0) return;
+   if(!SelectOurPosition())                        // closed externally (server SL/TP or manual)
    {
       double exit = (g_lv_sl > 0 && g_lv_tp > 0) ? g_lv_tp : 0;  // unknowable which; R uses last known ref
-      HistorySelectByPosition(g_lv_ticket);
+      HistorySelectByPosition(g_lv_posid);         // v1.11: reconcile by POSITION IDENTIFIER
       exit = 0;
       for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
       {
          ulong d = HistoryDealGetTicket(i);
-         if((ulong)HistoryDealGetInteger(d, DEAL_POSITION_ID) == g_lv_ticket &&
+         if(d > 0 && (ulong)HistoryDealGetInteger(d, DEAL_POSITION_ID) == g_lv_posid &&
             HistoryDealGetInteger(d, DEAL_ENTRY) == DEAL_ENTRY_OUT)
          { exit = HistoryDealGetDouble(d, DEAL_PRICE); break; }
       }
       double side = (g_lv_dir > 0) ? 1.0 : -1.0;
       double r = (exit > 0 && g_lv_stop > 0) ? ((exit - g_lv_entry) * side) / g_lv_stop : 0;
       PrintFormat(VersionTag() + "LIVE EXTERNAL CLOSE exit=%.5f R=%+.3f", exit, r);
-      PaperLog(StringFormat("LCLOSE,%I64d,%I64u,EXTERNAL,%.5f,%.3f", (long)TimeCurrent(), g_lv_ticket, exit, r));
-      g_lv_ticket = 0;
+      PaperLog(StringFormat("LCLOSE,%I64d,%I64u,EXTERNAL,%.5f,%.3f", (long)TimeCurrent(), g_lv_posid, exit, r));
+      g_last_action = StringFormat("LIVE EXTERNAL CLOSE @%.5f", exit);   // v1.10 HUD
+      g_lv_posid = 0; g_lv_ticket = 0; g_lv_order = 0; g_lv_deal = 0;
       return;
    }
-   if(TimeCurrent() >= g_lv_expiration)                // research timeout, mirrored
+   if(TimeUTCNow() >= g_lv_expiration)                     // v1.15: real-UTC timeout (opened on the same clock)
    {
       LiveClosePosition("TIMEOUT");
       return;
@@ -1197,7 +1726,7 @@ void LiveCheckExits()
 void LiveOnTick()
 {
    LiveCheckExits();
-   if(g_lv_ticket != 0 || DailyBreakerTripped()) return;
+   if(g_lv_posid != 0 || DailyBreakerTripped()) return;
    TrackFreshM15Bar();
 }
 

@@ -58,6 +58,13 @@ ERA_EPOCH = 1789494700
 _ENGINE_RULES = {
     "mitemshubai": ("boundary", ERA_PRE, ERA_POST),
     "v75macroengine": ("always", None, ERA_POST),
+    # MIDASTOUCH (gold) filled per tick from its first build (v1.04 engine of
+    # record, PERTICK contract, parity-certified on real ticks), so every era
+    # of every MIDASTOUCH ledger is post-classification — same shape as the
+    # V75MacroEngine rule. Its ERA stamps carry the EA VERSION (MIDAS1.10),
+    # not a fill-regime boundary: statistics consumers (midas_verdict) read
+    # the version for §13 structural aborts, never as an era divider.
+    "midastouchai": ("always", None, ERA_POST),
 }
 
 

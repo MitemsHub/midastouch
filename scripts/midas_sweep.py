@@ -34,6 +34,18 @@ TICK_VALUE_PER_LOT = 100.0        # $ per 1.0 price unit per 1.0 lot (100 oz)
 MIN_LOT = 0.01
 START_EQUITY = 5000.0
 RISK_FRACTION = 0.01
+# Amendment 6 (2026-09-17, register R5): a min-lot floor that would push the
+# real risk past this fraction of the sizing basis VETOES the trade in BOTH
+# engines (python here; EA InpMaxRiskPct — same formula against each engine's
+# own contract value and basis). 15% is the MEASURED choice, frozen on safety
+# grounds with the decision table in protocol amendment 6: the certified WF
+# corpus floors 42/151 fills at up to 5.5% of the book, so any cap below ~6%
+# re-writes certified behavior (1.5% would veto 15+ fills, 2% ten), and on
+# the $50 §13 arms (micro contract, ~$4.55 day-one min-lot risk) anything
+# below ~10% starves the forward windows entirely. 15% vetoes ZERO certified
+# fills, passes day-one arm risk with margin, and still blocks the pathology
+# the review demanded: a small book eating a runaway stop.
+MAX_RISK_FRACTION = 0.15
 SPREAD_FLOOR = 0.10               # dollars, when the bar records 0
 SL_ATR_MULT = 2.0
 TP_MULT = 2.0
@@ -179,6 +191,15 @@ class RunResult:
     def __init__(self):
         self.trades: list[dict] = []
         self.final_equity = START_EQUITY
+        self.vetoed = 0
+
+
+def minlot_risk_exceeds_cap(stop_d: float, basis: float) -> bool:
+    """Amendment 6 veto predicate: would the MIN-LOT trade risk more than
+    MAX_RISK_FRACTION of the sizing basis? Pure; the EA mirrors this exact
+    formula (InpMaxRiskPct) at its three sizing sites. "Exceeds" is strict:
+    exactly-at-cap fills."""
+    return stop_d * TICK_VALUE_PER_LOT * MIN_LOT > basis * MAX_RISK_FRACTION
 
 
 def run_mode(mode: str, t0: int, t1: int, data: dict,
@@ -216,6 +237,15 @@ def run_mode(mode: str, t0: int, t1: int, data: dict,
             risk_frac_dollars = equity * RISK_FRACTION
             lots = risk_frac_dollars / (stop_d * TICK_VALUE_PER_LOT)
             if lots < MIN_LOT:
+                if minlot_risk_exceeds_cap(stop_d, equity):
+                    # Amendment 6: the floored trade would exceed the risk
+                    # cap — veto. No position is constructed; the vetoed bar
+                    # runs no signal detection (mirrors the EA BAR caller's
+                    # `if(!may_signal) continue`; pending is dead, same-bar
+                    # re-entry is impossible by construction).
+                    res.vetoed += 1
+                    pending = None
+                    continue
                 lots, floored = MIN_LOT, floored + 1
             risk_d = stop_d * TICK_VALUE_PER_LOT * lots
             pos = {"side": side, "entry": fill,

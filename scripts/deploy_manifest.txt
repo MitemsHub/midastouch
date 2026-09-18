@@ -1,0 +1,73 @@
+# deploy_manifest.txt — the deploy gate for sync-mt5.ps1
+#
+# sync-mt5.ps1 refuses (fail-closed) to copy/compile any EA whose current
+# worktree source does not match the pin recorded here. This exists because on
+# 2026-09-13 a routine sync deployed an uncommitted, non-functional WIP engine
+# (MitemshubAI v27.00) over the certified paper arms and froze both arms for
+# ~2 days while it emitted nothing but its init line. Repo-as-source-of-truth
+# stays true: this file is part of the repo, reviewed in diffs, and any new
+# pin requires a deliberate manifest edit — never an accident of the worktree.
+#
+# Format:  <relative path from repo root>|<version tag>|<sha256 of source>
+# Lines starting with # are comments. Blank lines ignored.
+# Path is matched case-insensitively (repo is checked out on Windows).
+#
+# -AllowWip is NOT a bare override: a mismatching source deploys only after it
+# has passed the telemetry-liveness check (scripts/check_wip_liveness.py).
+# Stage it on a NON-ARM terminal (49E0), compile in place, wait one bar
+# interval, then:  python scripts/check_wip_liveness.py --collect --src <src>
+# The sync verifies that evidence against the exact bytes before bypassing.
+#
+# How to update a pin (deliberate, per-EA):
+#   1. Validate the new build (compile 0/0, tester regression, or live banner
+#      per the operating discipline).
+#   2. sha256sum <file> and edit the line below.
+#   3. Note the validation in the changelog entry that ships the new build.
+
+# --- V75MacroEngine: v2.22 (ledger-schema fix: OPEN rows now the arms' exact
+#     12-field schema with real SL/TP - v2.21 wrote 13 fields with zeroed
+#     geometry, caught by the tester-mode ledger validation on 2026-09-15;
+#     compile 0 errors on all three terminals, tester-mode CLOSE-row drill
+#     artifacts/v75_macro_engine_tester/armc_paper_ledger_20260915.json;
+#     banner identity macro added in the same pin - v2.22's OnInit still
+#     printed "v2.21", fixed before any restart-dependent validation).
+# (v2.23 -> v2.24, 2026-09-15: LEDGER ERA TAG — an idempotent ERA provenance
+#  row in the paper ledger (version, frozen boundary epoch, era name) so every
+#  future statistic separates pre-v26.38 bar-open-fill trades from per-tick-
+#  fill trades; scripts/era.py is the single reader. Compile 0/0 on 49E0.)
+V75MacroEngine.mq5|2.24|91e78c871ed8e3fd852b75c121fe5e3faa0a5df00d94e1c607d6c85f71881ba6
+# (v2.22 -> v2.23, 2026-09-15: verified-append writers — a ledger/telemetry row
+#  only counts when written AND flushed, one retry, WLOST journal quarantine on
+#  double failure. Same class-fix as the arms' v26.36. Validation: compile 0
+#  errors x5 trees + the armc tester drill rerun on the new build.)
+
+# --- MitemshubAI: v26.36 — v26.35 (the certified build that produced the
+#     paper arms' 13/7 trades, commit eb0905b at HEAD) + verified-append
+#     writers only: a ledger/telemetry row only counts when written AND
+#     flushed, one retry with backoff, WLOST journal quarantine on double
+#     failure (morning_status surfaces the tag). No strategy/config change.
+# --- v26.37 (2026-09-15): ACCOUNT GUARD fleet-sum fix — in paper mode the
+#     real-positions loop always summed $0.00; FleetOpenRisk now mirrors the
+#     instance's own virtual position (original stop, calibrated tick value),
+#     so the guard's operands are truthful and the funnel diff cannot mistake
+#     a risk-cap veto for an account-guard veto. Live path byte-identical
+#     (PaperActive() false). Deliberate re-pin after 0-error compile; the
+#     drill's account-guard count (1x, $0-basis class) is closed by this.
+# --- v26.38 (2026-09-15): PAPER FILL-MODEL PARITY — hard SL/TP in paper mode
+#     now fills per TICK at the resting level (the no-slippage mirror of the
+#     broker-side resting orders the live engine sends with the entry order),
+#     closing the machinery defect the fill-cost stress protocol priced at
+#     -8.3R/window (bar-open TP cadence: 18 rides-back + 7 intrabar-TP-
+#     seen-as-SL on the certified window). Management exits (PLOCK/ECUT/TIME,
+#     BE, trail) remain bar-granular BY DESIGN — they are decisions, not
+#     resting orders — which restores exact agreement with the TJ2 baropen
+#     baseline that adjudicated MATCHED (+0.022R, CI covers 0, reason-
+#     agreement 0.846). Strategy/config untouched; entry path untouched.
+#     Validation: compile 0 errors/0 warnings on 49E0 staging tree.
+# --- v26.39 (2026-09-15): LEDGER ERA TAG — PaperInit stamps an idempotent
+#     ERA provenance row (version, frozen boundary 1789494700, era name) into
+#     the paper ledger before any early return; readers keep the first stamp
+#     and classify rows above it by the frozen boundary epoch. Strategy and
+#     fill model unchanged from v26.38. Validation: compile 0 errors/0
+#     warnings on 49E0 staging tree.
+mql5/MITEMSHUB_AI/MitemshubAI.mq5|26.40|6459f3ad8370c182c8837597eae5a554c3e2d720c0cbbdbbbbdf53227a7bb7f5

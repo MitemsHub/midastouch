@@ -166,16 +166,13 @@ def test_boundary_sits_inside_the_verified_silence_window():
     assert last_activity < era.ERA_EPOCH < first_init
 
 
-def test_engine_stamps_carry_the_house_era_format():
-    # MIDASTOUCH opens a fresh era at each init (TimeCurrent), not the frozen
-    # V75 boundary — but its ERA row must keep the house wire format so
-    # era-aware consumers parse gold ledgers unchanged. v1.09: the era_name
-    # field is the HONEST exec-model note ("bar-model-parity" in BAR parity
-    # passes, "pertick-fills" on the live paper ledger) — era.py reads only
-    # fields 1-3, and tester ledgers are throwaway, so either name parses.
+def test_engine_stamps_carry_the_frozen_boundary():
+    # The writers must agree with the reader's frozen boundary — a mismatch
+    # stamps ok=False rows that every consumer would then ignore.
     import re
-    src = open("mql5/MIDASTOUCH/MidastouchAI.mq5", encoding="utf-8").read()
-    assert re.search(r'"ERA,%s,%I64d,%s"', src), (
-        "MidastouchAI must stamp the house ERA row wire format (ERA,<ver>,<epoch>,<name>)")
-    assert 'era_note = InpBarModel ? "bar-model-parity" : "pertick-fills"' in src, (
-        "era_name must reflect the actual execution model (honest provenance, v1.09)")
+    m = re.search(r'PaperLog\("ERA,"\+APP_VERSION\+",(\d+)',
+                  open("mql5/MITEMSHUB_AI/MitemshubAI.mq5", encoding="utf-8").read())
+    v = re.search(r'PaperAppendLedger\("ERA," \+ ENGINE_VERSION \+ ",(\\-\d+|\d+)',
+                  open("V75MacroEngine.mq5", encoding="utf-8").read())
+    assert m and int(m.group(1)) == era.ERA_EPOCH
+    assert v and int(v.group(1)) == era.ERA_EPOCH

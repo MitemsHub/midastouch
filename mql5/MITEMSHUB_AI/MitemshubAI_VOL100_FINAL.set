@@ -1,0 +1,88 @@
+; MITEMSHUB AI v23.0 — Volatility 100 FINAL profile (VALIDATED)
+; Regenerated 2026-08-27 with ALL v23 intelligence & safety upgrades.
+;
+; R_100 validated band geometry:
+;   z=2.0, stop=0.10x sigma_h, target=0.80x sigma_h
+;   trailing ON (0.7R dist), breakeven ON at 1R
+;
+; TINY-ACCOUNT MODE: min lot forces ~25% effective risk/trade on $30.
+; Fund to $250+ or drop symbol; see PRODUCTION_CONFIGS.md.
+;
+; KEY v23 FIXES:
+;   1. MaxConsecLoss 3 (was 4 — tighter circuit breaker)
+;   2. MaxHoldBars 20 (was 14 — give winners room)
+;   3. MaxDailyLossPct 5% (was 30% — much tighter)
+;   4. TrailDistR 0.7 (was 0.9 — lock profit sooner)
+;   5. Graduated exit, profit lock, session filter, volume scaling ON
+;
+; Magic 7788100 — fleet exposure guard compliant.
+InpUsePullback=false
+InpUseBreakout=false
+InpUseMomentum=false
+InpUseMeanRevert=false
+InpUseBandFade=false
+InpMinScore=3
+InpRequire2Strats=false
+InpMomentumStandalone=false
+InpEmaFast=20
+InpEmaMid=50
+InpEmaSlow=100
+InpMinEmaSep=0.20
+InpAtrPeriod=14
+InpAtrLookback=200
+InpAtrLowPct=10.0
+InpAtrHighPct=92.0
+InpPullbackMin=0.30
+InpPullbackMax=2.2
+InpBreakoutBuffer=0.10
+InpBreakoutBars=12
+InpMomBodyMin=0.45
+InpRsiOversold=32.0
+InpRsiOverbought=68.0
+InpBandZEntry=2.0
+InpBandVolExtRatio=1.25
+InpBandSigmaEmaLen=30
+InpBandStopSigmaMult=0.10
+InpBandTargetSigmaMult=0.80
+InpBandHoldSec=3600
+InpBandMinRR=2.5
+InpBandMaxStopPct=0.015
+InpRiskPerTrade=0.005
+InpMaxEffectiveRiskPct=30.0
+InpTpMult=2.0
+InpMaxHoldBars=20
+InpMaxDailyLossPct=0.05
+InpMaxConsecLoss=3
+InpCoolDownBars=3
+InpUseTrailing=true
+InpTrailStartR=1.0
+InpTrailDistR=0.7
+InpUseBreakeven=true
+InpBeTriggerR=1.0
+InpEntryTFOverride=M15
+InpRegimeTFOverride=H1
+InpMagic=7788100
+InpMaxSlippagePts=40
+InpWarmupBars=150
+InpDrawDashboard=true
+InpDrawSignals=true
+InpLiveExecution=false
+InpMaxTradesPerDay=9999
+; Account-wide exposure guard
+InpMaxTotalRiskPct=15.0
+InpFleetMagicsCSV=7788010,7788025,7788050,7788075,7788100
+; v23 Intelligence & Safety
+InpSessionStartHour=0
+InpSessionEndHour=23
+InpSameSymbolMaxPos=1
+InpGraduatedExit=true
+InpEarlyCutBars=6
+InpEarlyCutMaxR=-0.4
+InpExtendWinMult=1.5
+InpScaleAfterLoss=true
+InpScaleFactor=0.75
+InpMinVolScale=0.30
+InpProfitLockR=0.5
+
+; v26.17: burst-fade leg stays OFF until replay-validated on recorded Vol ticks
+InpVolBurstFade=false

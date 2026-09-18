@@ -75,13 +75,99 @@ $0.17 worst at rollover), news policy, weekend-gap policy.
   gold-charter check, ledger age/integrity, live position, R progress); all 16 existing
   morning-status tests pass. Scheduled tasks remain disabled — status is run manually.
 
+## Addendum 2026-09-17 — drift found and restored (append-only)
+
+The morning check found the arm drifted from its pins: the 09:57 attach ran
+**mode=2 (REVERSE_TRIGGER), session 12-16 UTC** — an unregistered variant
+never entered in this document or the protocol. Root cause: the day's
+parity iteration (v1.04→v1.09) used the live chart as its test bench, so
+each recompile re-initialized the arm with whatever inputs the last tester
+experiment carried; the interrupted session left it there. No trades fell
+in the drift window (0 fills since attach, ledger flat), so the ledger's
+integrity is unaffected — but the running engine was not the registered one.
+
+- **Restored 10:56 UTC** via the certified chain: `mql5/MIDASTOUCH/
+  MidastouchAI_M1_gold.set` rewritten as the complete 30-key pinned config
+  (mode=0 ORIGINAL, session 06-20, $50 virtual, PERTICK, InpLiveExecution=
+  false hard), spliced with `scripts/set_chart_preset.py` (backup
+  `chart01.chr.bak_20260917_105642`), terminal restarted.
+- **Boot banner 10:57:15 verified against the pins**: mode=0, session=06-20
+  UTC, execution=PAPER, exec-model=PERTICK, floor table stop=58.71
+  risk@minlot=$5.87, ledger flat. Morning status [3b] green.
+- Repo/terminal source synced: the deployed v1.09 source now lives in the
+  repo (`mql5/MIDASTOUCH/MidastouchAI.mq5`) — the repo had been stale at
+  v1.03 while the terminal carried the parity work.
+- **Standing rule (existing non-negotiable, restated):** parity passes run
+  in the STRATEGY TESTER only; the live chart's inputs change exclusively
+  through this preset file + `set_chart_preset.py` + a banner verification.
+  Chart edits during parity sessions are drift by construction.
+- Ledger hygiene: the ledger's many short-interval ERA/EQ rows are re-init
+  provenance from that day's churn (heartbeat + deinit EQ touches), not
+  trading history; zero OPEN/CLOSE rows exist and equity never moved from
+  $50.00. Left as written — they are an honest record, and the arm has not
+  traded yet.
+
+## Addendum 2026-09-17 (2) — watchdog registered as standing infrastructure
+
+`scripts/midas_watchdog.py` (+ `start_midas_watchdog.bat`) is now registered
+in the protocol as permanent infrastructure (§12), same class as morning
+status. Summary of what it is and what was observed:
+
+- **Two legs.** Liveness: the ledger mtime is the heartbeat; >35 min (+10
+  grace) triggers a flat-check-gated, PID-exact terminal restart; escalate
+  after 3 unrecovered restups; weekend no-restart policy. Config drift: the
+  journal's latest boot banner is compared against the repo preset pins;
+  any mismatch is remediated by restart **with pins re-spliced before
+  relaunch**; `execution=LIVE` is drift by definition; a broken pins file is
+  observe-only.
+- **Shaken down live on real failures.** Within an hour of shipping it
+  caught the second drift incident of the day (the 11:11:45 code-defaults
+  reattach: mode=1, $1000 virtual basis) and ran the full loop on camera:
+  drift detected → terminal stopped → pins re-spliced (backup kept) →
+  relaunched → pinned banner 11:42:52 → next poll `RECOVERED`, counter
+  reset. Tests: 21 offline cases, including two bugs the tests caught
+  during development (rowless ledger passing the flat gate; a fail-open
+  error path).
+- **Pause discipline (protocol §12, operative).** Any parity/tester session
+  or deliberate terminal stop first runs `python scripts/midas_watchdog.py
+  --pause` and after it `--resume`; while paused the watchdog observes only.
+  The certified parity harness (`scripts/midas_parity.py`) sets and lifts
+  the marker itself, and only ever lifts a marker it set. Pausing does NOT
+  sanction hand edits on the live chart — the certified chain (preset →
+  splice tool → banner check) remains the only input path.
+- **Operator contract:** the user launches the .bat from their session
+  (agent-spawned processes are reaped); 10-minute loop; log
+  `artifacts/midas_watchdog.log`; state `artifacts/midas_watchdog_state.json`.
+  Same day, the parity harness was rebuilt (v2, keyed) and **build parity
+  was certified** — see protocol §11 and
+  `artifacts/midas_parity_result_20260917_1258.json`.
+
+## Addendum 2026-09-17 (3) — [3b] preset-identity check (silent-preset-loss guard)
+
+morning status [3b] now verifies the chart's EA inputs **byte-exact**
+against the repo preset (`mql5/MIDASTOUCH/MidastouchAI_M1_gold.set`, all
+30 keys). Any missing/extra input, any value difference — even pure
+reformatting (2.0 vs 2.00), because the certified chain always produces
+byte-identical text — or a conflicting duplicate row prints as
+`preset DRIFT` and marks the arm unhealthy; an unreadable repo preset
+reports UNVERIFIABLE, never a silent skip (a lost pins file is itself the
+failure class this guard exists to catch). The watchdog's banner leg stays
+the auto-remediation layer (4 pins); [3b] is the independent full-inputs
+observation layer. Pinned by `tests/test_morning_status_preset.py` (11
+cases, fixtures self-maintained against the real .set).
+
 ## What runs right now
 
-- One terminal (49E0) with the single gold chart; EA paper-only.
-- No scheduled tasks, no python monitors, no indices EAs anywhere.
-- Next session: (a) verify first gold fills land on the ledger; (b) continue parity
-  root-cause (remaining drift); (c) `python scripts/morning_status.py` each morning —
-  section [3b] is the gold arm's health line.
+- One terminal (49E0) with the single gold chart; EA paper-only (v1.09).
+- Paper-arm watchdog: `start_midas_watchdog.bat` (user-launched, 10-min
+  loop) guarding liveness + config drift; pause before parity sessions per
+  protocol §12. No other scheduled tasks, no indices EAs anywhere.
+- Next session: (a) verify first gold fills land on the ledger; (b)
+  `python scripts/morning_status.py` each morning — section [3b] is the
+  gold arm's health line; (c) adjudication is pre-registered — protocol
+  §13 (Amendment 4) froze the VALIDATED / CONTINUE / REJECTED rulebook
+  2026-09-17 with zero fills on the ledger; first monthly reading
+  2026-10-01.
 
 ## Artifacts index
 
@@ -93,6 +179,7 @@ $0.17 worst at rollover), news policy, weekend-gap policy.
 | Playbook | `docs/MIDASTOUCH_GOLD_PLAYBOOK.md` |
 | Protocol (frozen gates + amendments) | `docs/MIDASTOUCH_PROTOCOL.md` |
 | Sweep engine + verdict | `scripts/midas_sweep.py`, `artifacts/midas_sweep_20260916.json` |
-| EA v1.03 + preset | `mql5/MIDASTOUCH/MidastouchAI.mq5`, `MidastouchAI_M1_gold.set` |
-| Parity driver | `scripts/midas_parity.py` |
+| EA v1.09 + preset | `mql5/MIDASTOUCH/MidastouchAI.mq5`, `MidastouchAI_M1_gold.set` |
+| Parity driver v2 (keyed) + certificate | `scripts/midas_parity.py`, `artifacts/midas_parity_result_20260917_1258.json` |
+| Paper-arm watchdog | `scripts/midas_watchdog.py`, `start_midas_watchdog.bat` → `artifacts/midas_watchdog.log`, `artifacts/midas_watchdog_state.json` |
 | Morning status [3b] | `scripts/morning_status.py` |

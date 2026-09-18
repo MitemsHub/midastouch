@@ -144,7 +144,16 @@ def inventory_arms(data_folder: str | None) -> list[dict]:
             txt = open(chr_f, encoding="utf-16", errors="replace").read()
         except OSError:
             continue
-        if "Volatility 75" not in txt:
+        # §14 portfolio: V75 arms AND MidastouchAI gold arms share this
+        # inventory — every paper book on the terminal must gate a stop.
+        if "Volatility 75" in txt:
+            ea_prefix, sym = "MitemshubAI", "Volatility_75_Index"
+        elif "MidastouchAI" in txt:
+            gm = re.search(r"^symbol=(\S+)", txt, re.M)
+            if not gm:
+                continue
+            ea_prefix, sym = "MIDASTOUCH", gm.group(1)
+        else:
             continue
         m = re.search(r"^InpMagic(?:Number)?=(\d{7})\s*$", txt, re.M)
         if not m:
@@ -152,10 +161,9 @@ def inventory_arms(data_folder: str | None) -> list[dict]:
         magic = m.group(1)
         tm = re.search(r"^InpArmTag=(\S+)\s*$", txt, re.M)
         tag = tm.group(1) if tm else None
-        sym = "Volatility_75_Index"
         suffix = f"_{tag}" if tag else ""
         ledger = os.path.join(data_folder, "MQL5", "Files",
-                              f"MitemshubAI_paper_{sym}{suffix}.csv")
+                              f"{ea_prefix}_paper_{sym}{suffix}.csv")
         arms.append({"magic": magic,
                      "name": KNOWN_MAGICS.get(magic, f"unknown_{magic}"),
                      "tag": tag, "chart": os.path.basename(chr_f),
@@ -174,7 +182,7 @@ def ledger_flatness(path: str) -> dict:
     """
     res: dict = {"flat": False, "open_positions": [], "problems": [],
                  "rows": 0, "era_stamps": 0, "closed": 0}
-    open_rows: dict[str, str] = {}
+    open_rows: dict[str, tuple[str, int]] = {}
     try:
         with open(path) as f:
             for ln, line in enumerate(f, 1):
@@ -189,6 +197,16 @@ def ledger_flatness(path: str) -> dict:
                     res["closed"] += 1
                 elif parts[0] == "ERA":
                     res["era_stamps"] += 1
+                elif parts[0] == "LOPEN" and len(parts) >= 14:
+                    # 2026-09-18: LIVE-grammar awareness — a dangling LOPEN is
+                    # a REAL-MONEY position (14 fields per the EA v1.16
+                    # writer; keyed on [2] = posid). The parity session must
+                    # never stop the terminal over an open live trade.
+                    open_rows[parts[2]] = (parts[1], ln)
+                elif parts[0] == "LCLOSE" and len(parts) >= 6:
+                    # LCLOSE pairs the LOPEN (posid at [2]) and carries R, not $.
+                    open_rows.pop(parts[2], None)
+                    res["closed"] += 1
     except FileNotFoundError:
         res["problems"].append("ledger missing (arm never initialized?)")
         return res
@@ -206,7 +224,7 @@ def ledger_flatness(path: str) -> dict:
     # never treat an unverifiable book as flat.
     if res["rows"] == 0 or (not res["closed"] and not res["era_stamps"]
                             and not res["open_positions"]):
-        res["problems"].append("no recognizable ledger rows (ERA/OPEN/CLOSE)")
+        res["problems"].append("no recognizable ledger rows (ERA/OPEN/CLOSE/LOPEN/LCLOSE)")
         res["flat"] = False
         return res
     res["flat"] = not res["open_positions"]

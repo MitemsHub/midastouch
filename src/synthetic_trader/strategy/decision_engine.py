@@ -1,0 +1,1769 @@
+from __future__ import annotations
+
+import json
+import logging
+import math
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from statistics import mean
+from typing import Any
+
+from synthetic_trader.config import SymbolProfile, TraderConfig
+from synthetic_trader.domain import Candle, Direction, Regime, TradeSignal
+from synthetic_trader.features.assembler import build_snapshot
+from synthetic_trader.features.indicators import clamp, safe_div
+from synthetic_trader.features.market_structure import structural_direction
+from synthetic_trader.models.online import OnlineLogisticModel
+from synthetic_trader.strategy.band_geometry import BandGeometryConfig, BandLevels, band_levels
+from synthetic_trader.strategy.confirmation_builder import confirm_setup
+from synthetic_trader.strategy.intraday_execution_builder import build_intraday_execution
+from synthetic_trader.strategy.swing_execution_builder import build_swing_execution
+from synthetic_trader.strategy.setup_builder import classify_setup
+from synthetic_trader.strategy.top_down_bias import infer_top_down_bias
+from synthetic_trader.strategy.regime_models import regime_model
+import time as _time
+
+# Sniper-only mode: VolatilityHarvester removed.
+# The engine focuses exclusively on structural analysis for swing trades.
+from synthetic_trader.models.regime_detector import RegimeShiftDetector, MarketState
+
+
+@dataclass(frozen=True)
+class DecisionReport:
+    signal: TradeSignal | None
+    reasons: tuple[str, ...]
+
+
+def _replay_band_strategy(
+    *,
+    symbol: str,
+    execution_candles: list[Candle],
+    bar_sec: int,
+    hold_horizon_sec: int,
+) -> tuple[object | None, TradeSignal | None]:
+    """Replay the verified vol-band strategy over the execution candles.
+
+    The band geometry IS the backtested strategy (EGARCH forecast + ADWIN
+    drift gate + extended-vol z_entry fade, with zero-drawdown stop/target
+    from the calibrated band) — replaying it here with the exact same
+    machinery guarantees the live call can never diverge from what the
+    corpus measured.  Returns ``(strategy, last_emitted_signal)``: the
+    strategy instance retains its final internal state (the calibrated
+    forecast sigma ``_prev_sigma`` and its EMA), so callers can derive band
+    levels even when no fade setup fired on the current candle.  Returns
+    ``(None, None)`` when there isn't enough candle history.
+    """
+    if not execution_candles or len(execution_candles) < 60:
+        return None, None
+    from synthetic_trader.backtest.vol_band import VolBandConfig, VolBandStrategy
+    from synthetic_trader.models.garch_calibration import load_calibrated_garch_state
+    from synthetic_trader.research.band_revalidate import load_live_band_overrides
+
+    # Overlay the weekly re-validation artifact (fresh promoted geometry)
+    # on the compiled defaults; stale/absent artifacts fall back to the
+    # tuned §38 defaults untouched.
+    band_kwargs: dict = {
+        "max_hold_sec": hold_horizon_sec,
+        "breakeven_trail_frac": 0.3,
+    }
+    overrides, _artifact = load_live_band_overrides(symbol)
+    band_kwargs.update(overrides)
+
+    strategy = VolBandStrategy(
+        symbol,
+        bar_sec,
+        config=VolBandConfig(**band_kwargs),
+        garch_state=load_calibrated_garch_state(symbol),
+    )
+    last: TradeSignal | None = None
+    for candle in execution_candles:
+        emitted = strategy.on_candle(candle)
+        if emitted is not None:
+            last = emitted
+    return strategy, last
+
+
+def _structure_band_levels(
+    *,
+    strategy: Any,
+    execution_candles: list[Candle],
+    bar_sec: int,
+    hold_horizon_sec: int,
+    direction: Direction,
+) -> BandLevels | None:
+    """Zero-drawdown band levels for a structural (quiet-trend) thesis call.
+
+    Uses the replayed strategy's final calibrated forecast sigma to place
+    stop/target via the shared :func:`band_levels` — the exact geometry the
+    vol-spike fade uses.  Returns ``None`` when the sigma is missing or
+    degenerate, or the geometry fails the RR / stop-cap guards.
+    """
+    prev_sigma = getattr(strategy, "_prev_sigma", None)
+    if prev_sigma is None or prev_sigma <= 1e-12:
+        return None
+    cfg = strategy.config
+    entry = execution_candles[-1].close
+    # Use the strategy's effective hold (the re-validation artifact can
+    # promote a different max_hold_sec than the profile default) so the
+    # fallback levels match the fade's geometry exactly.
+    hold = int(getattr(cfg, "max_hold_sec", 0) or hold_horizon_sec)
+    return band_levels(
+        entry=entry,
+        direction="buy" if direction is Direction.LONG else "sell",
+        sigma_per_bar=prev_sigma,
+        bar_sec=bar_sec,
+        hold_horizon_sec=hold,
+        config=BandGeometryConfig(
+            stop_sigma_mult=cfg.stop_sigma_mult,
+            target_sigma_mult=cfg.target_sigma_mult,
+            min_target_rr=cfg.min_target_rr,
+            max_stop_pct=cfg.max_stop_pct,
+            hold_horizon_sec=hold,
+        ),
+    )
+
+
+MAX_CALIBRATION_SAMPLES = 500
+
+# ── Auto-raise min_confidence constants ──────────────────────
+# When calibration_samples > 30, the system has enough data to
+# evaluate its own prediction quality.  As the Brier score improves
+# (lower = better), the confidence bar for signal generation is
+# automatically raised so only higher-quality setups pass.
+#
+# BRIER_FLOOR (0.25) = coin-flip quality → no raise, use base threshold
+# BRIER_CEIL (0.10) = excellent quality → raise to max threshold
+# MIN_RAISE_SAMPLES = 30 → need at least this many predictions before
+#   the auto-raise kicks in (below this, use the static base threshold)
+#
+# The raise is linear interpolation between floor and ceil:
+#   progress = (BRIER_FLOOR - brier) / (BRIER_FLOOR - BRIER_CEIL)
+#   auto_min = base + progress * (MAX_RAISED - base)
+BRIER_FLOOR = 0.25
+BRIER_CEIL = 0.10
+MIN_RAISE_SAMPLES = 30
+BASE_MIN_CONFIDENCE = 0.48
+MAX_RAISED_CONFIDENCE = 0.55
+# Drift-aware confidence bump: right after the model detects a regime
+# shift (ADWIN), its probabilities are less trustworthy until it
+# re-learns the new regime.  The penalty decays over N model updates.
+DRIFT_MAX_PENALTY = 0.02
+DRIFT_PENALTY_DECAY_STEPS = 500
+
+
+@dataclass
+class CalibrationState:
+    predictions: list[float] = field(default_factory=list)
+    outcomes: list[int] = field(default_factory=list)
+    _fitted_ir: Any = field(default=None, repr=False)
+    _fitted_platt: Any = field(default=None, repr=False)
+    _fitted_ir_version: int = field(default=0, repr=False)
+    _fitted_platt_version: int = field(default=0, repr=False)
+
+    def add(self, prediction: float, outcome: int) -> None:
+        self.predictions.append(prediction)
+        self.outcomes.append(outcome)
+        self._prune()
+        # Invalidate cached models when new training data arrives.
+        self._fitted_ir = None
+        self._fitted_platt = None
+
+    def _prune(self) -> None:
+        """Trim oldest entries to keep buffer within MAX_CALIBRATION_SAMPLES."""
+        if len(self.predictions) > MAX_CALIBRATION_SAMPLES:
+            excess = len(self.predictions) - MAX_CALIBRATION_SAMPLES
+            self.predictions = self.predictions[excess:]
+        # Always re-sync outcomes to match predictions length (defensive invariant).
+        self.outcomes = self.outcomes[-len(self.predictions):] if self.predictions else []
+
+    def _ensure_ir(self) -> Any:
+        """Fit and cache the IsotonicRegression model if needed."""
+        if self._fitted_ir_version == len(self.predictions):
+            return self._fitted_ir  # cached (model or cached failure)
+        try:
+            import numpy as np
+            from sklearn.isotonic import IsotonicRegression
+            ir = IsotonicRegression(out_of_bounds="clip")
+            ir.fit(np.array(self.predictions), np.array(self.outcomes))
+            self._fitted_ir = ir
+            self._fitted_ir_version = len(self.predictions)
+            return ir
+        except Exception:
+            # Cache the failure so we don't retry on every call.
+            self._fitted_ir = None
+            self._fitted_ir_version = len(self.predictions)
+            return None
+
+    def _ensure_platt(self) -> Any:
+        """Fit and cache the Platt-scaling LogisticRegression model if needed."""
+        if self._fitted_platt_version == len(self.predictions):
+            return self._fitted_platt  # cached (model or cached failure)
+        try:
+            import numpy as np
+            from sklearn.linear_model import LogisticRegression
+            X = np.array(self.predictions).reshape(-1, 1)
+            y = np.array(self.outcomes)
+            lr = LogisticRegression(solver="lbfgs")
+            lr.fit(X, y)
+            self._fitted_platt = lr
+            self._fitted_platt_version = len(self.predictions)
+            return lr
+        except Exception:
+            # Cache the failure so we don't retry on every call.
+            self._fitted_platt = None
+            self._fitted_platt_version = len(self.predictions)
+            return None
+
+    def calibrate(self, prediction: float) -> float:
+        if len(self.predictions) < 30:
+            return prediction
+        ir = self._ensure_ir()
+        if ir is None:
+            return prediction
+        try:
+            return float(ir.predict([prediction])[0])
+        except Exception:
+            return prediction
+
+    def platt_calibrate(self, prediction: float) -> float:
+        if len(self.predictions) < 30:
+            return prediction
+        lr = self._ensure_platt()
+        if lr is None:
+            return prediction
+        try:
+            return float(lr.predict_proba([[prediction]])[0, 1])
+        except Exception:
+            return prediction
+
+    def brier_score(self) -> float | None:
+        """Compute Brier score on the calibration buffer.
+
+        Brier score measures the accuracy of probabilistic predictions:
+          Brier = (1/N) * sum((predicted - actual)^2)
+
+        Lower is better: 0.0 = perfect, 0.25 = coin-flip, 1.0 = worst.
+
+        Returns None if fewer than 10 samples (too few for meaningful score).
+        """
+        n = len(self.predictions)
+        if n < 10:
+            return None
+        return sum(
+            (p - o) ** 2 for p, o in zip(self.predictions, self.outcomes)
+        ) / n
+
+    def directional_accuracy(self) -> float | None:
+        """Compute directional accuracy (hit rate) on the calibration buffer.
+
+        Measures how often the model's directional prediction matches the
+        actual outcome: prediction >= 0.5 when outcome=1, or < 0.5 when
+        outcome=0.
+
+        Returns accuracy as a float 0.0–1.0, or None if < 10 samples.
+        """
+        n = len(self.predictions)
+        if n < 10:
+            return None
+        correct = sum(
+            1
+            for p, o in zip(self.predictions, self.outcomes)
+            if (p >= 0.5 and o == 1) or (p < 0.5 and o == 0)
+        )
+        return correct / n
+
+
+class DecisionEngine:
+    def __init__(
+        self,
+        config: TraderConfig,
+        model: OnlineLogisticModel | None = None,
+    ) -> None:
+        self.config = config
+        self.model = model or OnlineLogisticModel(config.model)
+        self.calibration = CalibrationState()
+        self.regime_detector = RegimeShiftDetector()
+        # Sniper-only mode: VolatilityHarvester removed.
+        # The engine focuses exclusively on structural analysis for
+        # 4-6 hour swing trades.
+        self._trading_mode = "intraday"
+        self._call_lifecycle: dict[str, str] = {}
+        self._save_count: int = 0
+
+    def evaluate(
+        self,
+        symbol: str,
+        candles: list[Candle],
+        higher_timeframe_candles: list[Candle] | None = None,
+        role_candles: dict[str, list[Candle]] | None = None,
+        trading_mode: str = "sniper",
+    ) -> DecisionReport:
+        # Sniper-only mode: always use sniper presets
+        self._trading_mode = trading_mode
+
+        profile = self._profile(symbol)
+        execution_candles = role_candles.get("execution", candles) if role_candles else candles
+        setup_candles = role_candles.get("setup", candles) if role_candles else candles
+        confirmation_candles = (
+            role_candles.get("confirmation", setup_candles)
+            if role_candles
+            else candles
+        )
+        bias_candles = (
+            role_candles.get("bias", higher_timeframe_candles or setup_candles)
+            if role_candles
+            else (higher_timeframe_candles or candles)
+        )
+
+        if len(execution_candles) < profile.min_history_candles:
+            return DecisionReport(
+                None,
+                (f"need {profile.min_history_candles} candles, have {len(execution_candles)}",),
+            )
+
+        snapshot = build_snapshot(
+            symbol=symbol,
+            timeframe_sec=profile.execution_timeframe_sec if role_candles else profile.default_timeframe_sec,
+            candles=execution_candles,
+            higher_timeframe_candles=confirmation_candles if role_candles else higher_timeframe_candles,
+            extra_timeframes={
+                "bias": bias_candles,
+                "setup": setup_candles,
+                "confirmation": confirmation_candles,
+            } if role_candles else None,
+        )
+        features = dict(snapshot.features)
+        model_long_probability = self.model.predict_proba(features)
+        calibrated_prob = self.calibration.calibrate(model_long_probability)
+
+        # ── Regime shift detection (HMM + CUSUM) ──────────────────────
+        # Feed the latest log-return into the regime detector.  If it
+        # detects an anomaly (CUSUM shift, HMM regime change, or variance
+        # spike) the position_scale will be reduced to protect capital.
+        log_return = features.get("log_return", 0.0)
+        hmm_state, position_scale, regime_alerts = self.regime_detector.update(log_return)
+        if position_scale < 1.0:
+            logging.info(
+                "[%s] regime shift detected: state=%s position_scale=%.2f alerts=%d",
+                symbol, hmm_state.name, position_scale, len(regime_alerts),
+            )
+        features["regime_position_scale"] = position_scale
+        features["regime_hmm_state"] = float(hmm_state.value)
+        for alert in regime_alerts:
+            features[f"regime_alert_{alert.alert_type}"] = 1.0
+
+        # ── Regime-specific probabilistic model (direction-agnostic) ──
+        regime_out = regime_model(features, snapshot.regime, Direction.FLAT)
+        features.update(regime_out.to_features())
+
+        # ── Sniper entry gate (live emission) ────────────────────────────
+        # Only emit sniper signals inside the profile's UTC hour window with a
+        # non-extreme entry-candle vol-z.  Measured end-to-end on the R_75
+        # corpus (2026-08-11): UTC 12-24h & |range_z_50| < 1.0 lifts the leg
+        # from ~0 to +0.09..0.14R net@0.05 with a 3x drawdown cut.  Placed
+        # AFTER the stateful monitors (regime/calibration/GARCH stay fed on
+        # every bar — the session detector must not freeze for 12h) and
+        # BEFORE scoring/emission, so out-of-window bars stand aside without
+        # wasting model work.  Only entry-time information is used
+        # (snapshot.epoch + snapshot features): no lookahead.
+        if trading_mode == "sniper" and profile.entry_gate_enabled:
+            hour_utc = time.gmtime(snapshot.epoch).tm_hour
+            if not (profile.entry_gate_hour_utc_start <= hour_utc < profile.entry_gate_hour_utc_end):
+                return DecisionReport(
+                    None,
+                    (
+                        "entry gate: UTC hour "
+                        f"{hour_utc} outside [{profile.entry_gate_hour_utc_start}, "
+                        f"{profile.entry_gate_hour_utc_end}) window",
+                    ),
+                )
+            entry_range_z = abs(features.get("range_z_50", 0.0))
+            if entry_range_z >= profile.entry_gate_max_range_z:
+                return DecisionReport(
+                    None,
+                    (
+                        "entry gate: |range_z_50| "
+                        f"{entry_range_z:.2f} >= {profile.entry_gate_max_range_z} "
+                        "(extreme entry-candle vol)",
+                    ),
+                )
+
+        long_score = self._score_direction(Direction.LONG, snapshot.regime, features, calibrated_prob)
+        short_score = self._score_direction(Direction.SHORT, snapshot.regime, features, calibrated_prob)
+        bias = infer_top_down_bias(
+            symbol=symbol,
+            bias_candles=bias_candles,
+            setup_candles=setup_candles,
+            confirmation_candles=confirmation_candles,
+            execution_candles=execution_candles,
+        )
+        setup = classify_setup(
+            bias=bias,
+            setup_candles=setup_candles,
+        )
+        confirmation = confirm_setup(
+            setup=setup,
+            confirmation_candles=confirmation_candles[-30:],
+        )
+        direction = Direction.LONG if setup.trade_direction == "buy" else Direction.SHORT
+        confidence = long_score if direction is Direction.LONG else short_score
+        if setup.state != "none" and confirmation.state in {"confirmed", "actionable"}:
+            confidence = max(confidence, profile.confirmed_setup_confidence_floor)
+        # ── Dynamic min_confidence: auto-raise as model learns ─────
+        # When calibration_samples > 30, the system has enough data to
+        # evaluate its own prediction quality.  As Brier score improves
+        # (lower = better), the confidence bar is automatically raised
+        # so only higher-quality setups pass the gate.
+        #
+        # The profile.confidence_relaxation still applies — some symbols
+        # legitimately need lower thresholds (e.g. volatile indices).
+        dynamic_min = self._dynamic_min_confidence()
+        min_confidence = max(
+            0.0,
+            dynamic_min - profile.confidence_relaxation,
+        )
+
+        # --- NEVER return None when data exists. ---
+        # The engine should always produce a signal with its actual confidence.
+        # Four signal states: strong_buy, weak_buy, wait, strong_sell, weak_sell
+        signal_strength = self._classify_signal_strength(
+            confidence=confidence,
+            min_confidence=min_confidence,
+            has_formal_setup=(
+                setup.state != "none"
+                and confirmation.state in {"confirmed", "actionable"}
+            ),
+            direction=direction,
+        )
+        is_weak = signal_strength in ("weak_buy", "weak_sell", "wait")
+        rationale_weak: tuple[str, ...] = ()
+        if is_weak and signal_strength != "wait":
+            rationale_weak = (
+                f"weak signal ({signal_strength}) — confidence {confidence:.3f}",
+                f"model long probability {model_long_probability:.3f}",
+                f"calibrated probability {calibrated_prob:.3f}",
+            )
+        elif signal_strength == "wait":
+            rationale_weak = (
+                f"wait — confidence {confidence:.3f} below minimum {min_confidence:.3f}",
+                f"model long probability {model_long_probability:.3f}",
+                f"calibrated probability {calibrated_prob:.3f}",
+            )
+
+        rationale: tuple[str, ...] = (
+            bias.reason,
+            setup.reason,
+            confirmation.reason,
+        )
+
+        # ── Formal setup check ──────────────────────────────────────
+        # Sniper-only mode: volatility harvesting path removed.
+        # The engine focuses exclusively on structural analysis for
+        # 4-6 hour swing trades.
+        has_formal_setup = (
+            setup.state != "none"
+            and confirmation.state in {"confirmed", "actionable"}
+        )
+
+        # ── Session filter gate ────────────────────────────────────
+        # Block signal generation during low-volatility hours.
+        # The generator's server load balancing creates exploitable
+        # time-of-day effects — certain hours consistently produce
+        # more volatile moves with better risk/reward.
+        #
+        # STRONG SIGNAL OVERRIDE: When confidence >= 0.75 AND a formal
+        # setup is confirmed, bypass the session filter.  High-confidence
+        # setups with confirmed structure are rare and shouldn't be
+        # filtered out by low-volatility windows — the signal quality
+        # already accounts for regime, structure, and momentum.
+        #
+        # NOTE: The assembler already computes session_quality and
+        # session_vol_rank in the feature snapshot.  We use those
+        # features directly instead of maintaining a separate filter
+        # instance, avoiding state duplication and inconsistency.
+        # ── Sniper-only mode: session filter DISABLED ────────────
+        # The session filter blocked signals during "low-volatility hours"
+        # which confused the sniper mode — a 4-6 hour swing trade doesn't
+        # care about intraday session timing.  Removed entirely so the
+        # engine focuses on structural quality instead of time-of-day.
+        session_quality = features.get("session_quality", 0.5)
+        session_vol_rank = features.get("session_vol_rank", 0.5)
+        session_is_peak = features.get("session_is_peak", 0.0) == 1.0
+        session_observations = features.get("session_total_observations", 0.0)
+        warmup = self.config.risk.session_filter_warmup
+
+        # ── Mean-reversion scalp path for range regimes ──────────────
+        # When the market is range-bound (Hurst < 0.4) and the regime model
+        # produces a directional probability above threshold, generate a
+        # scalp trade with tighter stops/targets instead of refusing.
+        hurst = features.get("hurst_exponent", 0.5)
+        current_regime = snapshot.regime
+        is_range_scalp = (
+            current_regime in (Regime.RANGE, Regime.COMPRESSION)
+            and hurst < 0.4
+            and features.get("regime_confidence", 0.0) > 0.15
+        )
+        if is_range_scalp and confidence >= min_confidence:
+            regime_bull = features.get("regime_bull_prob", 0.5)
+            regime_bear = features.get("regime_bear_prob", 0.5)
+            scalp_direction_prob = max(regime_bull, regime_bear)
+            scalp_direction = Direction.LONG if regime_bull > regime_bear else Direction.SHORT
+            # Require at least 60% directional probability for scalp
+            if scalp_direction_prob >= 0.60:
+                atr_14 = features.get("atr_14", 1.0)
+                entry = features.get("close", execution_candles[-1].close)
+                # Tight scalp: stop = 1x ATR, target = 1.5x ATR (1.5R)
+                scalp_stop_distance = min(atr_14, entry * profile.max_stop_distance_pct)
+                if scalp_direction is Direction.LONG:
+                    scalp_stop = entry - scalp_stop_distance
+                    scalp_target = entry + scalp_stop_distance * 1.5
+                else:
+                    scalp_stop = entry + scalp_stop_distance
+                    scalp_target = entry - scalp_stop_distance * 1.5
+                scalp_rationale = (
+                    f"range scalp: Hurst={hurst:.2f} regime_bull={regime_bull:.2f} regime_bear={regime_bear:.2f}",
+                    f"mean-reversion scalp in {current_regime.value} regime",
+                ) + tuple(regime_out.reasoning[:3])
+                signal = TradeSignal(
+                    symbol=symbol,
+                    direction=scalp_direction,
+                    confidence=confidence,
+                    min_confidence=min_confidence,
+                    entry=entry,
+                    stop_loss=scalp_stop,
+                    take_profit=scalp_target,
+                    horizon_sec=profile.execution_timeframe_sec * 2,
+                    snapshot=snapshot,
+                    rationale=scalp_rationale,
+                    model_version=self.model.version,
+                    execution_stop=scalp_stop,
+                    thesis_invalidation=None,
+                    primary_target=scalp_target,
+                    extended_target=scalp_target,
+                    hold_horizon_minutes=30,
+                    execution_trigger_type="mean_reversion_scalp",
+                    signal_strength=signal_strength,
+                    position_scale=position_scale,
+                )
+                return DecisionReport(signal, scalp_rationale)
+
+        # Allow signals when confidence is sufficiently high even if the formal
+        # setup/confirmation gates are not fully met.  The confidence score
+        # already incorporates model probability, structure, regime, momentum,
+        # and confluence — it is a better综合 (holistic) measure than the
+        # binary setup/confirmation states alone.
+        #
+        # Gate: require BOTH setup state AND confirmation to be valid,
+        # OR confidence above an elevated threshold (0.52) which means
+        # at least 5 of the 8 scoring components agree on direction.
+        # NOTE: has_formal_setup was already computed above for session filter override.
+        has_strong_confidence = confidence >= 0.52
+        if not has_formal_setup and not has_strong_confidence and not is_weak:
+            # Mark as weak instead of blocking — always produce a signal.
+            # Recompute signal_strength with has_formal_setup=False so it matches.
+            is_weak = True
+            signal_strength = self._classify_signal_strength(
+                confidence=confidence,
+                min_confidence=min_confidence,
+                has_formal_setup=False,
+                direction=direction,
+            )
+            rationale_weak = (
+                f"no formal setup and confidence {confidence:.3f} below 0.52",
+            )
+
+        # Merge weak rationale into the main rationale so the user sees why it's weak.
+        if is_weak and rationale_weak:
+            rationale = rationale_weak + rationale
+
+        # Append session quality to rationale so user sees why we traded this hour.
+        # Placed AFTER all early-exit paths (vol harvest, session block, scalp)
+        # so it's never lost for any signal type.
+        if session_observations >= warmup:
+            rationale += (f"session quality {session_quality:.2f} (rank={session_vol_rank:.2f}, peak={session_is_peak})",)
+        else:
+            rationale += (f"session quality {session_quality:.2f} (warming up — {int(session_observations)}/{warmup} observations)",)
+
+        # ── Regime shift warning ──────────────────────────────────
+        if position_scale < 1.0:
+            regime_state = MarketState(int(features.get("regime_hmm_state", 1)))
+            rationale = (
+                f"⚠ regime shift detected — position_scale={position_scale:.0%} (HMM: {regime_state.name})",
+            ) + rationale
+
+        execution_plan = None
+        if role_candles and trading_mode == "sniper":
+            # Band geometry (default): the live call IS the verified vol-band
+            # strategy — the exact EGARCH+ADWIN fade entry with zero-drawdown
+            # band levels — replayed over the execution candles, so live
+            # entry/levels can never diverge from what the backtest measured.
+            if profile.geometry == "band":
+                strategy, band_signal = _replay_band_strategy(
+                    symbol=symbol,
+                    execution_candles=execution_candles,
+                    bar_sec=profile.execution_timeframe_sec,
+                    hold_horizon_sec=profile.band_hold_horizon_sec,
+                )
+                if band_signal is not None:
+                    # The strategy's own hold (re-validation artifact can
+                    # promote a different max_hold_sec than the profile) —
+                    # never show a horizon the levels weren't built for.
+                    fade_hold_sec = int(getattr(band_signal, "horizon_sec", 0) or profile.band_hold_horizon_sec)
+                    hold_minutes = max(1, round(fade_hold_sec / 60))
+                    signal = TradeSignal(
+                        symbol=symbol,
+                        direction=band_signal.direction,
+                        confidence=band_signal.confidence,
+                        min_confidence=min_confidence,
+                        entry=band_signal.entry,
+                        stop_loss=band_signal.stop_loss,
+                        take_profit=band_signal.take_profit,
+                        horizon_sec=fade_hold_sec,
+                        snapshot=snapshot,
+                        rationale=rationale + tuple(band_signal.rationale),
+                        model_version=self.model.version,
+                        execution_stop=band_signal.stop_loss,
+                        thesis_invalidation=band_signal.stop_loss,
+                        primary_target=band_signal.take_profit,
+                        extended_target=band_signal.take_profit,
+                        hold_horizon_minutes=hold_minutes,
+                        execution_trigger_type="band_geometry",
+                        signal_strength=signal_strength,
+                        position_scale=position_scale,
+                    )
+                    return DecisionReport(signal, rationale + tuple(band_signal.rationale))
+
+                # ── Vol-dynamics fallback (quiet trend) ────────────
+                # No vol-spike fade setup on this candle, but the
+                # volatility-dynamics direction (regime + EGARCH + flow
+                # scores, computed above) may still hold conviction.  Emit
+                # it with the same calibrated zero-drawdown band levels
+                # instead of standing aside.  Direction comes ONLY from the
+                # vol-dynamics scores — the pattern/SMC thesis is demoted to
+                # research and never drives a call.  ``band_structure`` is a
+                # NEW trigger type, so Stage-3 starts it at still_learning
+                # (paper-only) until its own scored outcomes prove it.
+                band_dir = (
+                    Direction.LONG if long_score >= short_score else Direction.SHORT
+                )
+                band_conf = long_score if band_dir is Direction.LONG else short_score
+                # ── Higher-timeframe alignment guard ───────────────────
+                # The MTF panel speaks the SMC structure view (research, so it
+                # can legitimately differ from the vol-dynamics call).  When
+                # the vol-dynamics direction fires AGAINST a meaningful 4H
+                # structure bias (|bias| >= 0.3), a near-coin-flip call would
+                # silently contradict the alignment the operator sees on the
+                # dashboard.  Raise the confidence bar (0.52 -> 0.62) so only
+                # genuine vol-dynamics conviction can override structure, and
+                # say so in the rationale.  Aligned or neutral HTF keeps the
+                # normal 0.52 bar.
+                htf_bias = features.get("bias_structure_bias", 0.0) or 0.0
+                counter_htf = (
+                    (band_dir is Direction.LONG and htf_bias <= -0.3)
+                    or (band_dir is Direction.SHORT and htf_bias >= 0.3)
+                )
+                fallback_min_conf = 0.62 if counter_htf else 0.52
+                if band_conf >= fallback_min_conf and strategy is not None:
+                    levels = _structure_band_levels(
+                        strategy=strategy,
+                        execution_candles=execution_candles,
+                        bar_sec=profile.execution_timeframe_sec,
+                        hold_horizon_sec=profile.band_hold_horizon_sec,
+                        direction=band_dir,
+                    )
+                    if levels is None:
+                        # Conviction exists but the geometry is untradeable at
+                        # current volatility (stop would breach the safety
+                        # cap / RR guard).  Say so — never claim there is no
+                        # direction when there is one.
+                        return DecisionReport(
+                            None,
+                            (
+                                f"band: {band_dir.value} vol-dynamics direction holds "
+                                "but no tradeable band geometry at current "
+                                "volatility (stop exceeds the 1.5% safety cap) "
+                                "— standing aside until vol settles",
+                            )
+                            + rationale,
+                        )
+                    if levels is not None:
+                        hold_sec = int(levels.hold_horizon_sec or profile.band_hold_horizon_sec)
+                        hold_minutes = max(1, round(hold_sec / 60))
+                        structure_rationale = (
+                            f"band_structure: no vol-spike fade, but the "
+                            f"{band_dir.value} vol-dynamics direction holds "
+                            f"(regime/EGARCH/flow conf {band_conf:.2f}) — calibrated "
+                            f"band levels: stop {levels.stop_loss:.4g}, target "
+                            f"{levels.take_profit:.4g}, RR {levels.reward_risk:.1f}, "
+                            f"{hold_minutes}m hold"
+                        )
+                        if counter_htf:
+                            structure_rationale += (
+                                f" — fires counter to the "
+                                f"{'bullish' if htf_bias > 0 else 'bearish'} "
+                                f"4H structure bias (alignment bar raised to "
+                                f"{fallback_min_conf:.2f})"
+                            )
+                        signal = TradeSignal(
+                            symbol=symbol,
+                            direction=band_dir,
+                            confidence=band_conf,
+                            min_confidence=min_confidence,
+                            entry=execution_candles[-1].close,
+                            stop_loss=levels.stop_loss,
+                            take_profit=levels.take_profit,
+                            horizon_sec=hold_sec,
+                            snapshot=snapshot,
+                            rationale=rationale + (structure_rationale,),
+                            model_version=self.model.version,
+                            execution_stop=levels.stop_loss,
+                            thesis_invalidation=levels.stop_loss,
+                            primary_target=levels.take_profit,
+                            extended_target=levels.take_profit,
+                            hold_horizon_minutes=hold_minutes,
+                            execution_trigger_type="band_structure",
+                            signal_strength=signal_strength,
+                            position_scale=position_scale,
+                        )
+                        return DecisionReport(signal, rationale + (structure_rationale,))
+
+                if counter_htf:
+                    # Direction exists but is counter to the 4H structure at
+                    # only moderate confidence — held back with the honest
+                    # reason instead of a bare "no direction".
+                    return DecisionReport(
+                        None,
+                        (
+                            f"band: {band_dir.value} vol-dynamics direction is "
+                            f"counter to the {'bullish' if htf_bias > 0 else 'bearish'} "
+                            f"4H structure bias and confidence {band_conf:.2f} is below "
+                            f"the raised {fallback_min_conf:.2f} bar — standing aside",
+                        )
+                        + rationale,
+                    )
+
+                return DecisionReport(
+                    None,
+                    (
+                        "band: no extended-vol fade setup and no vol-dynamics "
+                        "conviction (conf below 0.52) — standing aside until "
+                        "the volatility dynamics produce a clear direction",
+                    )
+                    + rationale,
+                )
+
+            swing_signal = build_swing_execution(
+                symbol=symbol,
+                direction=setup.trade_direction,
+                setup_candles=setup_candles,
+                confirmation_candles=confirmation_candles,
+                bias_candles=bias_candles,
+                max_stop_distance_pct=profile.max_stop_distance_pct,
+            )
+            if swing_signal is not None:
+                # Legacy "sniper" geometry: SMC swing levels (research only —
+                # its 3-3.5R targets were provably unreachable on the 9.5-day
+                # corpus).
+                signal = TradeSignal(
+                    symbol=symbol,
+                    direction=direction,
+                    confidence=confidence,
+                    min_confidence=min_confidence,
+                    entry=swing_signal.entry,
+                    stop_loss=swing_signal.stop_loss,
+                    take_profit=swing_signal.take_profit,
+                    horizon_sec=swing_signal.hold_hours * 3600,
+                    snapshot=snapshot,
+                    rationale=rationale,
+                    model_version=self.model.version,
+                    execution_stop=swing_signal.stop_loss,
+                    thesis_invalidation=swing_signal.invalidation,
+                    primary_target=swing_signal.take_profit,
+                    extended_target=swing_signal.take_profit,
+                    hold_horizon_minutes=swing_signal.hold_hours * 60,
+                    execution_trigger_type="liquidity_sweep_reversal" if swing_signal.setup_type == "liquidity_sweep_reversal" else "structure_continuation",
+                    signal_strength=signal_strength,
+                    position_scale=position_scale,
+                )
+                return DecisionReport(signal, rationale)
+        elif role_candles:
+            default_thesis_invalidation = (
+                execution_candles[-1].low if direction is Direction.LONG else execution_candles[-1].high
+            )
+            execution_plan = build_intraday_execution(
+                symbol=symbol,
+                direction=setup.trade_direction,
+                execution_candles=execution_candles,
+                thesis_invalidation=(
+                    bias.invalidation_price
+                    if bias.invalidation_price is not None
+                    else default_thesis_invalidation
+                ),
+                config=self.config,
+                htf_candles=bias_candles,
+            )
+        if execution_plan is None:
+            snapshot_features = dict(snapshot.features) if snapshot else {}
+            atr_14 = snapshot_features.get("atr_14", 0.0)
+            entry = snapshot_features.get("close", execution_candles[-1].close) if snapshot_features else execution_candles[-1].close
+
+            # Sanity cap: stop distance can never exceed 5% of entry price.
+            # This prevents insane ATR values (e.g. 360 on a 258-priced instrument)
+            # from producing impossible TP levels like 1,336.
+            max_stop = entry * profile.max_stop_distance_pct
+
+            if direction is Direction.LONG:
+                stop_distance = max(atr_14 * 1.5, entry * 0.002) if atr_14 > 0 else max(entry - execution_candles[-1].low, profile.pip_size * 2)
+                raw_stop_distance = stop_distance
+                stop_distance = min(stop_distance, max_stop)
+                stop_loss = entry - stop_distance
+                take_profit = entry + stop_distance * profile.take_profit_rr
+            else:
+                stop_distance = max(atr_14 * 1.5, entry * 0.002) if atr_14 > 0 else max(execution_candles[-1].high - entry, profile.pip_size * 2)
+                raw_stop_distance = stop_distance
+                stop_distance = min(stop_distance, max_stop)
+                stop_loss = entry + stop_distance
+                take_profit = entry - stop_distance * profile.take_profit_rr
+
+            # Diagnostic: log stop distance cap status for live tuning.
+            cap_triggered = raw_stop_distance > max_stop
+            stop_pct = (abs(entry - stop_loss) / entry * 100) if entry else 0
+            logging.info(
+                "[%s] fallback stop_cap=%s raw=%.4f capped=%.4f stop_pct=%.2f%% max_pct=%.2f%% entry=%.4f",
+                symbol, "TRIGGERED" if cap_triggered else "ok",
+                raw_stop_distance, stop_distance, stop_pct,
+                profile.max_stop_distance_pct * 100, entry,
+            )
+
+            signal = TradeSignal(
+                symbol=symbol,
+                direction=direction,
+                confidence=confidence,
+                min_confidence=min_confidence,
+                entry=entry,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                horizon_sec=profile.execution_timeframe_sec * profile.hold_bars_setup,
+                snapshot=snapshot,
+                rationale=rationale,
+                model_version=self.model.version,
+                execution_stop=stop_loss,
+                thesis_invalidation=bias.invalidation_price,
+                primary_target=take_profit,
+                extended_target=take_profit,
+                hold_horizon_minutes=profile.intraday_hold_horizon_minutes,
+                signal_strength=signal_strength,
+                position_scale=position_scale,
+            )
+            return DecisionReport(signal, rationale)
+
+        signal = TradeSignal(
+            symbol=symbol,
+            direction=direction,
+            confidence=confidence,
+            min_confidence=min_confidence,
+            entry=execution_plan.entry,
+            stop_loss=execution_plan.execution_stop,
+            take_profit=execution_plan.primary_target,
+            horizon_sec=execution_plan.hold_horizon_minutes * 60,
+            snapshot=snapshot,
+            rationale=rationale,
+            model_version=self.model.version,
+            execution_stop=execution_plan.execution_stop,
+            thesis_invalidation=execution_plan.thesis_invalidation,
+            primary_target=execution_plan.primary_target,
+            extended_target=execution_plan.extended_target,
+            hold_horizon_minutes=execution_plan.hold_horizon_minutes,
+            execution_trigger_type=execution_plan.trigger_type,
+            signal_strength=signal_strength,
+            position_scale=position_scale,
+        )
+        return DecisionReport(signal, rationale)
+
+    def _dynamic_min_confidence(self) -> float:
+        """Return the dynamic min_confidence threshold, raised when the model learns.
+
+        When calibration_samples <= MIN_RAISE_SAMPLES, returns the base
+        threshold (0.48).  Once we have enough calibration data, the
+        threshold is linearly interpolated between BASE_MIN_CONFIDENCE
+        and MAX_RAISED_CONFIDENCE based on Brier score quality:
+
+          - Brier >= 0.25 (coin-flip) → no raise, use base
+          - Brier <= 0.10 (excellent)  → full raise to max
+          - Brier in between → proportional raise
+
+        This ensures that as the model's probability estimates become
+        more accurate, only higher-confidence setups pass the gate,
+        naturally tightening signal quality without manual tuning.
+        """
+        n = len(self.calibration.predictions)
+        if n < MIN_RAISE_SAMPLES:
+            return BASE_MIN_CONFIDENCE
+
+        brier = self.calibration.brier_score()
+        if brier is None:
+            return BASE_MIN_CONFIDENCE
+
+        # Clamp brier to [BRIER_CEIL, BRIER_FLOOR] for interpolation
+        brier_clamped = max(BRIER_CEIL, min(BRIER_FLOOR, brier))
+
+        # Linear interpolation: progress 0.0 (poor) → 1.0 (excellent)
+        progress = (BRIER_FLOOR - brier_clamped) / (BRIER_FLOOR - BRIER_CEIL)
+        dynamic_min = BASE_MIN_CONFIDENCE + progress * (MAX_RAISED_CONFIDENCE - BASE_MIN_CONFIDENCE)
+
+        # Drift penalty: after a regime shift, require slightly higher
+        # confidence until the model re-adapts to the new distribution.
+        dynamic_min += self._drift_confidence_penalty()
+        return clamp(dynamic_min, BASE_MIN_CONFIDENCE, MAX_RAISED_CONFIDENCE + DRIFT_MAX_PENALTY)
+
+    def _drift_confidence_penalty(self) -> float:
+        """Confidence bump while the model is recovering from a regime shift.
+
+        Uses the online model's ADWIN drift detector: the penalty is
+        largest immediately after a detected drift and decays linearly
+        to zero over ``DRIFT_PENALTY_DECAY_STEPS`` model updates.
+        """
+        model = self.model
+        if model is None:
+            return 0.0
+        drift_detector = getattr(model, "drift_detector", None)
+        if getattr(model, "drift_resets", 0) <= 0 or drift_detector is None:
+            return 0.0
+        last_drift = drift_detector.last_drift_step
+        if last_drift is None:
+            return 0.0
+        steps_since = drift_detector.steps_since_last_drift(model.updates)
+        if steps_since >= DRIFT_PENALTY_DECAY_STEPS:
+            return 0.0
+        decay = 1.0 - steps_since / DRIFT_PENALTY_DECAY_STEPS
+        return float(DRIFT_MAX_PENALTY * decay)
+
+    def _classify_signal_strength(
+        self,
+        *,
+        confidence: float,
+        min_confidence: float,
+        has_formal_setup: bool,
+        direction: Direction,
+    ) -> str:
+        """Classify the signal into one of four states based on confidence.
+
+        Thresholds:
+        - STRONG: confidence >= 0.65 AND formal setup confirmed
+        - WEAK: confidence >= min_confidence (but below strong)
+        - WAIT: confidence < min_confidence
+
+        Returns one of: "strong_buy", "weak_buy", "wait", "weak_sell", "strong_sell"
+        """
+        # When a formal setup is confirmed, use a lower threshold (0.52)
+        # for strong classification.  The setup itself provides structural
+        # validation — we don't need the model to also have high confidence.
+        # Without a formal setup, require the higher 0.65 threshold.
+        STRONG_WITH_SETUP = 0.52
+        STRONG_WITHOUT_SETUP = 0.65
+        dir_suffix = "buy" if direction is Direction.LONG else "sell"
+
+        threshold = STRONG_WITH_SETUP if has_formal_setup else STRONG_WITHOUT_SETUP
+        if confidence >= threshold and has_formal_setup:
+            return f"strong_{dir_suffix}"
+        elif confidence >= min_confidence:
+            return f"weak_{dir_suffix}"
+        else:
+            return "wait"
+
+    def _profile(self, symbol: str) -> SymbolProfile:
+        try:
+            return self.config.symbols[symbol]
+        except KeyError as exc:
+            raise ValueError(f"unsupported symbol {symbol!r}") from exc
+
+    def _score_direction(
+        self,
+        direction: Direction,
+        regime: Regime,
+        features: dict[str, float],
+        model_long_probability: float,
+    ) -> float:
+        """Score direction using 15 components with institutional SMC.
+
+        Weight distribution:
+        - Statistical (0.58): regime, tick_flow, volatility, GARCH, garch_mr
+        - Institutional SMC (0.21): FVG, order blocks, BOS, CHoCH
+        - Pattern (0.13): structure, displacement, momentum, confluence
+        - Model (0.08): online logistic prediction
+        """
+        model_component = model_long_probability if direction is Direction.LONG else 1.0 - model_long_probability
+        structure_component = self._structure_component(direction, features)
+        regime_component = self._regime_component(direction, regime, features)
+        mean_reversion_component = self._mean_reversion_component(direction, regime, features)
+        displacement_component = self._displacement_component(direction, features)
+        momentum_component = self._momentum_component(direction, features)
+        volatility_component = self._volatility_component(direction, features)
+        confluence_component = self._confluence_component(direction, features)
+        tick_flow_component = self._tick_flow_component(direction, features)
+        garch_component = self._garch_component(direction, features)
+        garch_mr_component = self._garch_mr_component(direction, features)
+        smc_fvg_component = self._smc_fvg_component(direction, features)
+        smc_ob_component = self._smc_ob_component(direction, features)
+        smc_bos_component = self._smc_bos_component(direction, features)
+        smc_choch_component = self._smc_choch_component(direction, features)
+
+        # ── Vol-dynamics-only weights (pattern/SMC demoted to research) ──
+        # Synthetic indices are CSPRNG-generated processes: the generator has
+        # no memory of candles, so pattern/SMC "structure" (FVG, order
+        # blocks, BOS/CHoCH, liquidity sweeps, multi-TF confluence) is noise
+        # — the old weights still gave it 0.34 of the score and let a
+        # "confirmed setup" emit calls on nothing but noise.  The call path
+        # now scores ONLY the volatility-dynamics primitives that are real on
+        # these markets: regime clustering, EGARCH forecast, mean reversion,
+        # tick microstructure, and the (deliberately small) online model.
+        # The pattern/SMC components are still computed (research visibility)
+        # but carry zero weight in the live direction/confidence decision.
+        weights = {
+            "model": 0.12,          # online logistic — kept small (learns from noise)
+            "regime": 0.30,         # regime clustering IS the exploitable property
+            "mean_reversion": 0.08, # vol mean-reversion after spikes
+            "volatility": 0.14,     # volatility clustering
+            "tick_flow": 0.16,      # microstructure flow
+            "garch": 0.14,          # EGARCH(1,1) variance forecast
+            "garch_mr": 0.06,       # GARCH mean-reversion signal
+        }
+        # Total = 1.00 — all volatility-dynamics + small model.
+
+        confidence = (
+            weights["model"] * model_component
+            + weights["regime"] * regime_component
+            + weights["mean_reversion"] * mean_reversion_component
+            + weights["volatility"] * volatility_component
+            + weights["tick_flow"] * tick_flow_component
+            + weights["garch"] * garch_component
+            + weights["garch_mr"] * garch_mr_component
+        )
+        return clamp(confidence, 0.0, 1.0)
+
+    def _structure_component(self, direction: Direction, features: dict[str, float]) -> float:
+        structural = structural_direction(features)
+        if structural is direction:
+            base = 0.85
+        elif structural is Direction.FLAT:
+            bias = features.get("structure_bias", 0.0)
+            if direction is Direction.LONG:
+                base = 0.50 + clamp(bias, -1.0, 1.0) * 0.25
+            else:
+                base = 0.50 - clamp(bias, -1.0, 1.0) * 0.25
+        else:
+            base = 0.20
+
+        internal_bos = features.get("internal_bos_up", 0.0) if direction is Direction.LONG else features.get("internal_bos_down", 0.0)
+        fvg_active = features.get("fvg_bullish_active", 0.0) if direction is Direction.LONG else features.get("fvg_bearish_active", 0.0)
+        sweep = features.get("liquidity_sweep_down", 0.0) if direction is Direction.LONG else features.get("liquidity_sweep_up", 0.0)
+
+        boost = internal_bos * 0.15 + fvg_active * 0.10 + sweep * 0.15
+        return clamp(base + boost, 0.0, 1.0)
+
+    def _regime_component(self, direction: Direction, regime: Regime, features: dict[str, float]) -> float:
+        """Regime component using probabilistic regime model output.
+
+        When regime_bull_prob/regime_bear_prob are available from the
+        regime-specific models, use them directly.  Otherwise fall back
+        to the legacy heuristic scoring.
+        """
+        hurst = features.get("hurst_exponent", 0.5)
+        entropy = features.get("entropy", 0.5)
+        vol_cluster = features.get("volatility_clustering", 1.0)
+
+        # Use probabilistic regime model output when available.
+        regime_bull = features.get("regime_bull_prob")
+        regime_bear = features.get("regime_bear_prob")
+        if regime_bull is not None and regime_bear is not None:
+            if direction is Direction.LONG:
+                base = regime_bull
+            else:
+                base = regime_bear
+            # Boost with Hurst persistence when available
+            if hurst > 0.6:
+                base = clamp(base + (hurst - 0.5) * 0.1, 0.0, 1.0)
+            elif hurst < 0.3:
+                base = clamp(base - (0.5 - hurst) * 0.1, 0.0, 1.0)
+            return clamp(base, 0.0, 1.0)
+
+        # Legacy heuristic fallback
+        if regime is Regime.TREND_UP:
+            base = 0.85 if direction is Direction.LONG else 0.20
+            if hurst > 0.6:
+                base += 0.05 if direction is Direction.LONG else -0.05
+        elif regime is Regime.TREND_DOWN:
+            base = 0.85 if direction is Direction.SHORT else 0.20
+            if hurst > 0.6:
+                base += 0.05 if direction is Direction.SHORT else -0.05
+        elif regime is Regime.VOLATILE:
+            displacement = features.get("displacement_atr", 0.0)
+            aligned = (
+                (direction is Direction.LONG and features.get("body", 0.0) > 0)
+                or (direction is Direction.SHORT and features.get("body", 0.0) < 0)
+            )
+            base = 0.65 if aligned and displacement > 1.0 else 0.35
+            if vol_cluster > 2.0:
+                base -= 0.10
+        elif regime is Regime.COMPRESSION:
+            base = 0.45
+        elif regime is Regime.RANGE:
+            base = 0.55
+            if entropy > 0.7:
+                base -= 0.05
+            # Missed-trade learning boost: when the engine frequently misses
+            # opportunities in range markets, increase the base score so it
+            # becomes more willing to take range trades.
+            range_miss_boost = features.get("range_miss_boost", 0.0)
+            if range_miss_boost > 0:
+                base = clamp(base + range_miss_boost, 0.0, 1.0)
+        else:
+            base = 0.50
+        return clamp(base, 0.0, 1.0)
+
+    def _mean_reversion_component(self, direction: Direction, regime: Regime, features: dict[str, float]) -> float:
+        position = features.get("position_in_20_range", 0.5)
+        rsi_value = features.get("rsi_14", 50.0)
+        dc_pos = features.get("dc_position", 0.5)
+        kc_pos = features.get("kc_position", 0.5)
+
+        if regime not in (Regime.RANGE, Regime.COMPRESSION):
+            return 0.50
+
+        if direction is Direction.LONG:
+            range_score = (1.0 - position) * 0.5
+            rsi_score = safe_div(55.0 - rsi_value, 55.0) * 0.3
+            dc_score = (1.0 - dc_pos) * 0.1
+            kc_score = (1.0 - kc_pos) * 0.1
+        else:
+            range_score = position * 0.5
+            rsi_score = safe_div(rsi_value - 45.0, 55.0) * 0.3
+            dc_score = dc_pos * 0.1
+            kc_score = kc_pos * 0.1
+
+        return clamp(range_score + rsi_score + dc_score + kc_score, 0.0, 1.0)
+
+    def _displacement_component(self, direction: Direction, features: dict[str, float]) -> float:
+        displacement = clamp(features.get("displacement_atr", 0.0) / 2.5, 0.0, 1.0)
+        body = features.get("body", 0.0)
+        if direction is Direction.LONG and body > 0:
+            return displacement
+        if direction is Direction.SHORT and body < 0:
+            return displacement
+        return 0.30
+
+    def _momentum_component(self, direction: Direction, features: dict[str, float]) -> float:
+        slope = features.get("slope_20_atr", 0.0)
+        ema_spread = features.get("ema_9_21_spread_atr", 0.0)
+        last_return = features.get("last_return", 0.0)
+
+        if direction is Direction.LONG:
+            score = clamp(slope * 0.5 + ema_spread * 0.3 + max(last_return, 0.0) * 10.0, 0.0, 1.0)
+        else:
+            score = clamp(-slope * 0.5 - ema_spread * 0.3 + min(last_return, 0.0) * -10.0, 0.0, 1.0)
+        return score
+
+    def _volatility_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """Volatility component — enhanced with GARCH forecast context.
+
+        On synthetic indices, volatility clustering is the ONE exploitable
+        property.  When the GARCH model forecasts high upcoming volatility,
+        we should be cautious about direction (vol expansion = uncertainty).
+        When it forecasts low vol (compression), a breakout is imminent.
+        """
+        atr_ratio = features.get("atr_ratio", 1.0)
+        atr_z = features.get("atr_z_20", 0.0)
+        garch_vol_ratio = features.get("garch_vol_ratio", 1.0)
+        garch_z = features.get("garch_z_score", 0.0)
+
+        # Base ATR-based score
+        if atr_z > 2.0:
+            base = 0.30  # extreme vol = uncertain
+        elif atr_ratio > 1.5:
+            base = 0.40
+        elif atr_ratio < 0.7:
+            base = 0.60  # compression = opportunity
+        else:
+            base = 0.55
+
+        # GARCH adjustment: when forecast vol is high relative to long-run,
+        # reduce conviction (vol expansion = unpredictable)
+        if garch_vol_ratio > 1.5:
+            base = clamp(base - 0.10, 0.20, 0.80)
+        elif garch_vol_ratio < 0.7:
+            base = clamp(base + 0.05, 0.20, 0.80)  # compression = good
+
+        # Extreme z-score: generator will mean-revert volatility
+        if abs(garch_z) > 2.5:
+            base = clamp(base + 0.05, 0.20, 0.80)  # extreme = reversion coming
+
+        return base
+
+    def _confluence_component(self, direction: Direction, features: dict[str, float]) -> float:
+        htf_bias_up = features.get("bias_structure_bias", 0.0)
+        htf_bias_down = -features.get("bias_structure_bias", 0.0)
+        setup_bias = features.get("setup_structure_bias", 0.0)
+        conf_bias = features.get("confirmation_structure_bias", 0.0)
+
+        if direction is Direction.LONG:
+            alignment = sum(1 for v in [htf_bias_up, setup_bias, conf_bias] if v > 0)
+        else:
+            alignment = sum(1 for v in [htf_bias_down, -setup_bias, -conf_bias] if v > 0)
+
+        return alignment / 3.0
+
+    def _tick_flow_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """Score based on tick-level micro-structure features.
+
+        Uses velocity, acceleration, exhaustion, impulse/retrace ratio,
+        streak bias, spread analysis, direction streaks, and volume surge
+        detection to estimate short-term directional pressure.
+
+        The spread, direction, and volume features were added to capture
+        microstructure dynamics that price-only analysis misses.
+        """
+        velocity = features.get("tick_velocity", 0.0)
+        acceleration = features.get("tick_acceleration", 0.0)
+        exhaustion = features.get("tick_exhaustion", 0.0)
+        impulse_ratio = features.get("tick_impulse_retrace_ratio", 1.0)
+        streak_bias = features.get("tick_streak_bias", 0.0)
+        up_ratio = features.get("tick_up_ratio", 0.5)
+        total_ticks = features.get("tick_total", 0.0)
+
+        # Need at least 10 ticks for meaningful flow analysis
+        if total_ticks < 10:
+            return 0.50
+
+        # Velocity contribution (signed, normalized by ATR)
+        atr = features.get("atr_14", 1.0)
+        velocity_score = clamp(velocity / max(atr, 1e-10) * 2.0, -0.25, 0.25)
+
+        # Acceleration = velocity change direction
+        accel_score = clamp(acceleration / max(atr, 1e-10) * 3.0, -0.15, 0.15)
+
+        # Impulse/retrace ratio: >1 = trending, <1 = ranging
+        impulse_score = clamp((impulse_ratio - 1.0) * 0.15, -0.15, 0.15)
+
+        # Streak bias: positive = up streak, negative = down streak
+        streak_score = clamp(streak_bias * 0.15, -0.15, 0.15)
+
+        # Up/down ratio deviation from 0.5
+        ratio_score = clamp((up_ratio - 0.5) * 0.2, -0.10, 0.10)
+
+        # Exhaustion penalty: high exhaustion = reduce conviction
+        exhaustion_penalty = exhaustion * 0.10
+
+        # ── Spread features: wide spread = uncertainty = reduce conviction ──
+        spread_z = features.get("tick_spread_z_score", 0.0)
+        spread_penalty = clamp(spread_z * 0.05, -0.05, 0.05) if spread_z > 1.5 else 0.0
+
+        # ── Direction streak: strong directional streaks amplify conviction ──
+        dir_streak_bias = features.get("tick_dir_streak_bias", 0.0)
+        dir_switch_rate = features.get("tick_dir_switch_rate", 0.0)
+        dir_streak_score = clamp(dir_streak_bias * 0.12, -0.12, 0.12)
+        # High switch rate = choppy market = reduce conviction
+        chop_penalty = clamp((dir_switch_rate - 0.5) * 0.08, 0.0, 0.08)
+
+        # ── Volume surge: high volume confirms directional move ──
+        vol_surge = features.get("tick_vol_surge_ratio", 0.0)
+        vol_boost = 0.0
+        if vol_surge > 0.1 and velocity != 0:
+            # Volume surge + directional velocity = strong confirmation
+            aligned = (velocity > 0) == (direction is Direction.LONG)
+            vol_boost = clamp(vol_surge * 0.08 * (1.0 if aligned else -1.0), -0.08, 0.08)
+
+        # ── Tick frequency: high activity often precedes volatility ──
+        activity_regime = features.get("tick_activity_regime", 0.5)
+        freq_z = features.get("tick_freq_z_score", 0.0)
+        # Unusually high frequency + directional velocity = strong signal
+        freq_boost = 0.0
+        if abs(freq_z) > 1.5 and velocity != 0:
+            freq_direction = 1.0 if (velocity > 0) == (direction is Direction.LONG) else -1.0
+            freq_boost = clamp(freq_z * 0.04 * freq_direction, -0.06, 0.06)
+        # Very low frequency = quiet market, reduce conviction slightly
+        quiet_penalty = 0.0
+        if activity_regime < 0.2:
+            quiet_penalty = (0.2 - activity_regime) * 0.08
+
+        raw = (
+            0.50
+            + velocity_score
+            + accel_score
+            + impulse_score
+            + streak_score
+            + ratio_score
+            - exhaustion_penalty
+            - spread_penalty
+            + dir_streak_score
+            - chop_penalty
+            + vol_boost
+            + freq_boost
+            - quiet_penalty
+        )
+
+        return clamp(raw, 0.0, 1.0)
+
+    def _garch_mr_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """GARCH mean-reversion component.
+
+        When the EGARCH model detects an extreme z-score (large price move
+        relative to forecast vol), it signals that the generator's variance
+        scheduling will pull vol back.  This component scores the direction
+        that aligns with this mean-reversion expectation.
+
+        On synthetic indices, extreme moves ARE followed by reversion because
+        the generator's GARCH-like variance scheduling is the one exploitable
+        property.
+        """
+        garch_z = features.get("garch_z_score", 0.0)
+        garch_mr_signal = features.get("garch_mean_revert_signal", 0.0)
+        garch_sigma = features.get("garch_sigma", 0.0)
+
+        if garch_sigma <= 0 or garch_mr_signal <= 0:
+            return 0.50  # neutral — no mean-reversion signal
+
+        abs_z = abs(garch_z)
+
+        if abs_z < 1.5:
+            return 0.50  # not extreme enough for reversion
+
+        # Score based on whether direction aligns with mean-reversion
+        # Mean-reversion says: after a big UP move (z>0), expect DOWN
+        #                     after a big DOWN move (z<0), expect UP
+        if direction is Direction.LONG and garch_z < -1.5:
+            # Aligned: big down move + long = reversion play
+            base = 0.50 + garch_mr_signal * 0.30  # up to 0.80
+            # Extra boost for very extreme z-scores
+            if abs_z > 3.0:
+                base = clamp(base + 0.05, 0.50, 0.85)
+            return base
+        elif direction is Direction.SHORT and garch_z > 1.5:
+            # Aligned: big up move + short = reversion play
+            base = 0.50 + garch_mr_signal * 0.30
+            if abs_z > 3.0:
+                base = clamp(base + 0.05, 0.50, 0.85)
+            return base
+        else:
+            # Opposed: direction doesn't align with reversion
+            # Penalize slightly — this is a trend-continuation bet during extreme vol
+            return clamp(0.50 - garch_mr_signal * 0.10, 0.35, 0.50)
+
+    def _garch_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """GARCH variance forecast component — the NEW statistical component.
+
+        This component uses the EGARCH(1,1) one-step-ahead variance forecast
+        to score directional confidence.  On synthetic indices, the generator's
+        variance scheduling IS predictable — high vol clusters, low vol clusters.
+
+        The component scores:
+        1. Vol regime alignment (high vol = trade with caution, low vol = prepare)
+        2. Mean-reversion signal (when GARCH detects extreme vol, bet on reversion)
+        3. Persistence (high persistence = regime will last, low = rapid change)
+        """
+        garch_sigma = features.get("garch_sigma", 0.0)
+        garch_persistence = features.get("garch_persistence", 0.9)
+        garch_vol_regime = features.get("garch_vol_regime", 1.0)
+        garch_z = features.get("garch_z_score", 0.0)
+        atr_14 = features.get("atr_14", 1.0)
+
+        if garch_sigma <= 0 or atr_14 <= 0:
+            return 0.50  # neutral during warmup
+
+        # Base score: volatility regime
+        if garch_vol_regime == 0.0:  # low vol
+            base = 0.55  # slightly bullish — compression often precedes expansion
+        elif garch_vol_regime == 2.0:  # high vol
+            base = 0.35  # cautious — extreme vol = unpredictable direction
+        else:  # normal
+            base = 0.50
+
+        # Persistence adjustment: high persistence = current vol regime will last
+        if garch_persistence > 0.95:
+            if garch_vol_regime == 0.0:
+                base = clamp(base + 0.03, 0.30, 0.80)  # low vol persists = calm trading
+            elif garch_vol_regime == 2.0:
+                base = clamp(base - 0.03, 0.30, 0.80)  # high vol persists = stay cautious
+
+        # Z-score extremity: very large |z| means the generator's variance
+        # scheduling will pull vol back — slight boost for any direction
+        # (the actual directional mean-reversion is in _garch_mr_component)
+        abs_z = abs(garch_z)
+        if abs_z > 3.0:
+            base = clamp(base + 0.03, 0.30, 0.80)
+
+        return base
+
+    # ── SMC (Smart Money Concepts) components ──────────────────
+    # Institutional-grade structural features from the smartmoneyconcepts
+    # library.  These score FVGs, Order Blocks, BOS, and CHoCH patterns.
+
+    def _smc_fvg_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """Fair Value Gap component.
+
+        Bullish FVGs indicate institutional buying pressure — price left
+        an imbalance that tends to be filled, creating a support zone.
+        Bearish FVGs indicate selling pressure.
+
+        The component scores whether an active FVG aligns with the
+        proposed trade direction.
+        """
+        bullish_fvg = features.get("smc_bullish_fvg", 0.0)
+        bearish_fvg = features.get("smc_bearish_fvg", 0.0)
+        fvg_count = features.get("smc_fvg_count", 0.0)
+
+        # No FVGs detected → neutral
+        if fvg_count == 0:
+            return 0.50
+
+        # Direction alignment: FVG present + direction matches = strong signal
+        if direction is Direction.LONG and bullish_fvg > 0:
+            base = 0.70
+            # Multiple bullish FVGs = stronger signal
+            if fvg_count >= 3:
+                base = 0.80
+            return base
+        elif direction is Direction.SHORT and bearish_fvg > 0:
+            base = 0.70
+            if fvg_count >= 3:
+                base = 0.80
+            return base
+        # Opposing FVGs: penalize slightly
+        elif direction is Direction.LONG and bearish_fvg > 0:
+            return 0.35
+        elif direction is Direction.SHORT and bullish_fvg > 0:
+            return 0.35
+
+        return 0.50
+
+    def _smc_ob_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """Order Block component.
+
+        Order Blocks represent institutional supply/demand zones — the last
+        opposing candle before an impulsive move.  Bullish OBs are demand
+        zones (support), bearish OBs are supply zones (resistance).
+
+        The component scores whether an active Order Block aligns with
+        the proposed trade direction and its strength.
+        """
+        ob_bullish = features.get("smc_ob_bullish", 0.0)
+        ob_bearish = features.get("smc_ob_bearish", 0.0)
+        ob_strength = features.get("smc_ob_strength", 0.0)
+        ob_count = features.get("smc_order_block_count", 0.0)
+
+        if ob_count == 0:
+            return 0.50
+
+        # Direction alignment: OB present + direction matches = strong signal
+        if direction is Direction.LONG and ob_bullish > 0:
+            # Strength modulates: strong OBs are more reliable
+            base = 0.60 + ob_strength * 0.20  # 0.60 to 0.80
+            return base
+        elif direction is Direction.SHORT and ob_bearish > 0:
+            base = 0.60 + ob_strength * 0.20
+            return base
+        # Opposing OBs: the zone acts as resistance/support against us
+        elif direction is Direction.LONG and ob_bearish > 0:
+            return 0.35
+        elif direction is Direction.SHORT and ob_bullish > 0:
+            return 0.35
+
+        return 0.50
+
+    def _smc_bos_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """Break of Structure component.
+
+        BOS confirms trend continuation — when price breaks a swing high
+        (bullish BOS) or swing low (bearish BOS), it signals the trend
+        is intact and likely to continue.
+
+        This is a strong directional confirmation signal in ICT/SMC.
+        """
+        smc_bos = features.get("smc_bos", 0.0)
+
+        # No BOS detected → neutral
+        if smc_bos == 0.0:
+            return 0.50
+
+        # BOS aligned with direction: strong continuation signal
+        if direction is Direction.LONG and smc_bos > 0:
+            return 0.80  # bullish BOS = strong long confirmation
+        elif direction is Direction.SHORT and smc_bos < 0:
+            return 0.80  # bearish BOS = strong short confirmation
+        # BOS opposed to direction: strong counter-signal
+        elif direction is Direction.LONG and smc_bos < 0:
+            return 0.25  # bearish BOS = strong evidence against long
+        elif direction is Direction.SHORT and smc_bos > 0:
+            return 0.25  # bullish BOS = strong evidence against short
+
+        return 0.50
+
+    def _smc_choch_component(self, direction: Direction, features: dict[str, float]) -> float:
+        """Change of Character component.
+
+        CHoCH signals a potential trend reversal — when price breaks structure
+        in the opposite direction of the prevailing trend.  It's the first
+        sign that institutional order flow is shifting.
+
+        CHoCH is scored as a reversal confirmation: if we're going long
+        and a bullish CHoCH appears, it confirms the reversal from bearish
+        to bullish.
+        """
+        smc_choch = features.get("smc_choch", 0.0)
+
+        # No CHoCH detected → neutral
+        if smc_choch == 0.0:
+            return 0.50
+
+        # CHoCH aligned with direction: reversal confirmation
+        if direction is Direction.LONG and smc_choch > 0:
+            return 0.75  # bullish CHoCH = reversal into bullish
+        elif direction is Direction.SHORT and smc_choch < 0:
+            return 0.75  # bearish CHoCH = reversal into bearish
+        # CHoCH opposed: the reversal is against us
+        elif direction is Direction.LONG and smc_choch < 0:
+            return 0.30
+        elif direction is Direction.SHORT and smc_choch > 0:
+            return 0.30
+
+        return 0.50
+
+    def _rationale(
+        self,
+        direction: Direction,
+        regime: Regime,
+        features: dict[str, float],
+        model_long_probability: float,
+        confidence: float,
+    ) -> tuple[str, ...]:
+        notes = [
+            f"{direction.value} setup in {regime.value} regime",
+            f"confidence={confidence:.3f}",
+            f"model_long_probability={model_long_probability:.3f}",
+            f"structure_bias={features.get('structure_bias', 0.0):.2f}",
+            f"displacement_atr={features.get('displacement_atr', 0.0):.2f}",
+            f"atr_ratio={features.get('atr_ratio', 1.0):.2f}",
+            f"hurst={features.get('hurst_exponent', 0.5):.2f}",
+            f"entropy={features.get('entropy', 0.0):.2f}",
+        ]
+        if features.get("liquidity_sweep_down", 0.0):
+            notes.append("downside sweep reclaimed")
+        if features.get("liquidity_sweep_up", 0.0):
+            notes.append("upside sweep rejected")
+        if features.get("bos_up", 0.0):
+            notes.append("break of structure up")
+        if features.get("bos_down", 0.0):
+            notes.append("break of structure down")
+        if features.get("internal_bos_up", 0.0):
+            notes.append("internal BOS up")
+        if features.get("internal_bos_down", 0.0):
+            notes.append("internal BOS down")
+        if features.get("fvg_bullish_active", 0.0):
+            notes.append("bullish FVG active")
+        if features.get("fvg_bearish_active", 0.0):
+            notes.append("bearish FVG active")
+        if features.get("equal_highs", 0.0):
+            notes.append("equal highs detected")
+        if features.get("equal_lows", 0.0):
+            notes.append("equal lows detected")
+        if features.get("structure_bias", 0.0) > 0.5:
+            notes.append("bullish market structure")
+        elif features.get("structure_bias", 0.0) < -0.5:
+            notes.append("bearish market structure")
+        # SMC institutional patterns
+        if features.get("smc_bullish_fvg", 0.0):
+            notes.append("SMC: bullish FVG active")
+        if features.get("smc_bearish_fvg", 0.0):
+            notes.append("SMC: bearish FVG active")
+        if features.get("smc_ob_bullish", 0.0):
+            notes.append("SMC: bullish order block")
+        if features.get("smc_ob_bearish", 0.0):
+            notes.append("SMC: bearish order block")
+        if features.get("smc_bos", 0.0) > 0:
+            notes.append("SMC: bullish BOS (continuation)")
+        elif features.get("smc_bos", 0.0) < 0:
+            notes.append("SMC: bearish BOS (continuation)")
+        if features.get("smc_choch", 0.0) > 0:
+            notes.append("SMC: bullish CHoCH (reversal)")
+        elif features.get("smc_choch", 0.0) < 0:
+            notes.append("SMC: bearish CHoCH (reversal)")
+        return tuple(notes)
+
+    def update_calibration(self, prediction: float, outcome: int) -> None:
+        self.calibration.add(prediction, outcome)
+
+    # ── Disk persistence ──────────────────────────────────────────
+    # Saves model weights + calibration buffer to JSON so learning
+    # survives Python process restarts.  RegimeShiftDetector and
+    # VolatilityHarvester are intentionally NOT persisted — they are
+    # transient state that rebuilds naturally from live data.
+
+    def save_state(self, path: str | Path) -> None:
+        """Persist model weights, replay buffer, and calibration buffer to disk."""
+        # Compute quality metrics for versioning
+        brier = self.calibration.brier_score()
+        accuracy = self.calibration.directional_accuracy()
+        state = {
+            "model": {
+                "config": asdict(self.model.config),
+                "weights": self.model.weights,
+                "bias": self.model.bias,
+                "updates": self.model.updates,
+                "metadata": self.model.metadata,
+                "replay_buffer": self.model.replay_buffer.to_dict(),
+            },
+            "calibration": {
+                "predictions": self.calibration.predictions,
+                "outcomes": self.calibration.outcomes,
+            },
+            "trading_mode": self._trading_mode,
+            "versioning": {
+                "save_count": getattr(self, "_save_count", 0) + 1,
+                "calibration_samples": len(self.calibration.predictions),
+                "brier_score": brier,
+                "directional_accuracy": accuracy,
+            },
+        }
+        self._save_count = getattr(self, "_save_count", 0) + 1
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write: write to temp then rename to prevent corruption
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp.replace(target)
+
+    def load_state(self, path: str | Path) -> bool:
+        """Load model weights and calibration buffer from disk.
+
+        After loading, validates the model quality by computing Brier score.
+        If the loaded model performs worse than a fresh baseline model
+        (Brier > 0.25 on its own calibration buffer), automatically
+        resets to default weights and clears calibration to prevent
+        a degraded model from being used.
+
+        Returns True if state was loaded and validated successfully,
+        False if the file doesn't exist, is corrupt, or was rolled back.
+        """
+        target = Path(path)
+        if not target.exists():
+            return False
+        try:
+            state = json.loads(target.read_text(encoding="utf-8"))
+            # Restore model
+            m = state["model"]
+            saved_weights = {str(k): float(v) for k, v in m["weights"].items()}
+            saved_bias = float(m["bias"])
+            saved_updates = int(m["updates"])
+            saved_metadata = {str(k): str(v) for k, v in m.get("metadata", {}).items()}
+            self.model.weights = saved_weights
+            self.model.bias = saved_bias
+            self.model.updates = saved_updates
+            self.model.metadata = saved_metadata
+            # Restore replay buffer if persisted
+            buf_payload = m.get("replay_buffer")
+            if buf_payload is not None:
+                from synthetic_trader.models.replay_buffer import ExperienceReplayBuffer
+                self.model.replay_buffer = ExperienceReplayBuffer.from_dict(buf_payload)
+            # Restore calibration
+            cal = state.get("calibration", {})
+            saved_predictions = [float(p) for p in cal.get("predictions", [])]
+            saved_outcomes = [int(o) for o in cal.get("outcomes", [])]
+            self.calibration.predictions = saved_predictions
+            self.calibration.outcomes = saved_outcomes
+            # Prune oversized buffers loaded from disk (pre-v5 state files)
+            self.calibration._prune()
+            # Invalidate cached calibration models so they re-fit
+            self.calibration._fitted_ir = None
+            self.calibration._fitted_platt = None
+            self.calibration._fitted_ir_version = 0
+            self.calibration._fitted_platt_version = 0
+            self._trading_mode = state.get("trading_mode", "intraday")
+
+            # ── Quality validation ──────────────────────────────────
+            # Compute Brier score on the loaded calibration buffer.
+            # If it exceeds the maximum acceptable threshold (0.25 = coin-flip),
+            # the model has degenerated and should be rolled back to fresh weights.
+            MAX_ACCEPTABLE_BRIER = 0.25
+            loaded_versioning = state.get("versioning", {})
+            brier = self.calibration.brier_score()
+            accuracy = self.calibration.directional_accuracy()
+            save_count = loaded_versioning.get("save_count", 0)
+
+            if brier is not None and brier > MAX_ACCEPTABLE_BRIER:
+                # Model has degenerated — reset to fresh weights
+                fresh_model = OnlineLogisticModel(self.config.model)
+                self.model.weights = fresh_model.weights
+                self.model.bias = fresh_model.bias
+                self.model.updates = 0
+                self.model.metadata = {}
+                self.calibration.predictions = []
+                self.calibration.outcomes = []
+                self.calibration._fitted_ir = None
+                self.calibration._fitted_platt = None
+                self.calibration._fitted_ir_version = 0
+                self.calibration._fitted_platt_version = 0
+                self._save_count = 0
+                logging.warning(
+                    "[DecisionEngine] ROLLED BACK model for %s: "
+                    "Brier score %.4f > %.4f threshold (was %d samples, "
+                    "accuracy=%.3f, save #%d)",
+                    path, brier, MAX_ACCEPTABLE_BRIER,
+                    len(saved_predictions), accuracy or 0.0, save_count,
+                )
+                return False
+
+            self._save_count = save_count
+            logging.info(
+                "[DecisionEngine] loaded state: model_updates=%d, "
+                "calibration_samples=%d, brier=%.4f, accuracy=%s, save #%d",
+                saved_updates, len(saved_predictions),
+                brier if brier is not None else -1.0,
+                f"{accuracy:.3f}" if accuracy is not None else "N/A",
+                save_count,
+            )
+            return True
+        except Exception as e:
+            logging.warning("[DecisionEngine] failed to load state from %s: %s", path, e)
+            return False
+
+    def explain_signal(self, signal: TradeSignal) -> dict[str, object]:
+        features = dict(signal.snapshot.features)
+        return {
+            "direction": signal.direction.value,
+            "confidence": signal.confidence,
+            "position_scale": signal.position_scale,
+            "position_sizing": signal.position_sizing,
+            "model_probability": signal.snapshot.features.get("model_long_probability", 0.5),
+            "regime": signal.snapshot.regime.value,
+            "regime_shift": {
+                "hmm_state": MarketState(int(features.get("regime_hmm_state", 1))).name,
+                "position_scale": features.get("regime_position_scale", 1.0),
+                "alerts": [k for k in features if k.startswith("regime_alert_")],
+            },
+            "structure_bias": features.get("structure_bias", 0.0),
+            "key_factors": {
+                "model_component": features.get("model_long_probability", 0.5),
+                "structure_component": features.get("bos_up", 0.0) if signal.direction == Direction.LONG else features.get("bos_down", 0.0),
+                "regime_component": 1.0 if (signal.direction == Direction.LONG and signal.snapshot.regime == Regime.TREND_UP) or (signal.direction == Direction.SHORT and signal.snapshot.regime == Regime.TREND_DOWN) else 0.5,
+                "displacement": features.get("displacement_atr", 0.0),
+                "momentum": features.get("slope_20_atr", 0.0),
+            },
+            "smc_features": {
+                "fvg_bullish": features.get("smc_bullish_fvg", 0.0) > 0,
+                "fvg_bearish": features.get("smc_bearish_fvg", 0.0) > 0,
+                "fvg_count": features.get("smc_fvg_count", 0.0),
+                "ob_bullish": features.get("smc_ob_bullish", 0.0) > 0,
+                "ob_bearish": features.get("smc_ob_bearish", 0.0) > 0,
+                "ob_count": features.get("smc_order_block_count", 0.0),
+                "ob_strength": features.get("smc_ob_strength", 0.0),
+                "bos": features.get("smc_bos", 0.0),
+                "choch": features.get("smc_choch", 0.0),
+            },
+            "rationale": list(signal.rationale),
+            "entry_reason": f"Entry at {signal.entry:.5f} based on {signal.execution_trigger_type or 'pattern'} trigger",
+            "invalidation": f"Thesis invalidated at {signal.thesis_invalidation:.5f}" if signal.thesis_invalidation else "No thesis invalidation level",
+            "targets": {
+                "primary": signal.primary_target,
+                "extended": signal.extended_target,
+            },
+        }
