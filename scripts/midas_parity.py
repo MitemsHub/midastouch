@@ -34,6 +34,7 @@ import csv
 import glob
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -193,19 +194,17 @@ def parse_ledger(path: Path) -> list[dict]:
     return trades
 
 
-def agent_files_dir() -> str | None:
-    r"""The local tester agent's MQL5\Files sandbox. Tester agents live under
-    the SHARED root %APPDATA%\MetaQuotes\Tester\<hash>\Agent-... (the
-    terminal data folder's own Tester dir holds only cache/logs — found
-    live 2026-09-17)."""
-    df = R.data_folder_for_terminal()
-    if not df:
-        return None
-    h = os.path.basename(df.rstrip("\\/"))
-    p = os.path.join(R.TERM_ROOT, "..", "Tester", h,
-                     "Agent-127.0.0.1-3000", "MQL5", "Files")
-    p = os.path.normpath(p)
-    return p if os.path.isdir(p) else None
+def journal_trade_rs(snaps: dict) -> list[float]:
+    """All 'Trade R:' values in the appended journal bytes, in order."""
+    out: list[float] = []
+    for log in T.journal_paths():
+        offset = snaps.get(log, 0)
+        try:
+            blob = log.read_bytes()[offset:].decode("utf-16-le", "ignore")
+        except OSError:
+            continue
+        out += [float(m) for m in TRADE_R_RE.findall(blob)]
+    return out
 
 
 def collect_ea_evidence(snaps: dict) -> tuple[list[dict], str]:
@@ -557,38 +556,6 @@ def main() -> int:
 
 def REPO_MARK_DIR() -> str:
     return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--prepare", action="store_true")
-    ap.add_argument("--run", action="store_true")
-    ap.add_argument("--compare", action="store_true")
-    ap.add_argument("--sim", action="store_true",
-                    help="real-tick tester pass with the LIVE order path enabled (v1.08 simulated-live proof)")
-    ap.add_argument("--mode", default=None,
-                    help="python mode under certification; explicit > staged config > REVERSE_DIRECTION")
-    ap.add_argument("--session", default=None,
-                    help="signal-hour gate START-END UTC; explicit > staged config > 6-20")
-    ap.add_argument("--fingerprint", action="store_true",
-                    help="with --compare: re-run the engine and assert the staged baseline is current")
-    a = ap.parse_args()
-    # config precedence: explicit CLI args > staged config file > defaults
-    load_staged_config()
-    if a.mode is not None or a.session is not None:
-        ses = tuple(int(x) for x in (a.session or f"{SESSION[0]}-{SESSION[1]}").replace(":", "-").split("-"))
-        apply_config(a.mode or MODE, ses)
-    print(f"cert config: mode={MODE} session={SESSION[0]}-{SESSION[1]} tag={TAG}")
-    if a.prepare:
-        return stage_prepare()
-    if a.run:
-        return stage_run()
-    if a.compare:
-        return stage_compare(a.fingerprint)
-    if a.sim:
-        return stage_sim()
-    print(__doc__)
-    return 2
 
 
 if __name__ == "__main__":

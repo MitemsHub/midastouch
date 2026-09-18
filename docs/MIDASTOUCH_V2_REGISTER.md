@@ -1,20 +1,15 @@
 # MIDASTOUCH V2 REGISTER
 
 **REPOSITORY SCOPE PURGE (2026-09-18 ~19:20 UTC — operator directive).**
-Operator instruction: anything in the MIDASTOUCH folder that does not concern
+Operator instruction: anything in the MIDASTOUCH repo that does not concern
 MIDASTOUCH is to be deleted. Executed as a dependency-audited purge of the
-push checkout: 892 foreign paths removed (the MITEMSHUB/V75 EA program, the
-Next.js operator dashboard, the synthetic_trader library and its ~150 test
-files, V75 research scripts, foreign app/infra/test and packaging files).
-The MIDASTOUCH program was preserved in full: the v1.17 EA source, all six
-presets, all midas_* tooling, morning status, the watchdog + logon task,
-the parity/cert chain, the §13 verdict tool, the P5 engine, the certified
-XAUUSD corpus (data/forex/xauusd/), the parity/tester evidence, the
-V75-era evidence documents the MIDASTOUCH record cites, and the 25 gold
-test suites. Deletions are recoverable from git history; nothing outside
-this repository was touched. The foreign conftest fixture (synthetic_trader
-cache clearing) was removed with its owner; the hermetic LV-broker fixture
-stays.
+MIDASTOUCH repository (the GitHub push checkout): 892 foreign paths removed
+(the MITEMSHUB/V75 EA program, the Next.js operator dashboard, the
+synthetic_trader library and its test suite, V75 research scripts, foreign
+app/infra/packaging files). The MIDASTOUCH program is preserved in full:
+EA source, presets, midas_* tooling, watchdog + logon task, certified
+XAUUSD corpus, parity/tester evidence, cited V75-era evidence documents,
+and the 25 gold test suites. Deletions recoverable from git history.
 
 **LV TRIGGER-FREQUENCY AMENDMENT — SUPERSEDED 18:05 UTC by the corrected adjudication below.** The 17:30 pass shipped k=3.0/75-25 on a per-trade-expectancy ranking that (a) contained a decimal error in its frequency line and (b) optimized the wrong metric. Corrected in place the same evening; the 17:30 chart state never traded (zero fills between 17:30 and 17:38) and is preserved in the register history and chart backups (chart05.chr.bak_20260918_173001).
 

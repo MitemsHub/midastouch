@@ -35,7 +35,6 @@ Epochs are SECONDS (TimeCurrent).
 from __future__ import annotations
 
 import argparse
-import contextlib
 import glob
 import json
 import os
@@ -960,6 +959,10 @@ def main() -> None:
 
     print()
     unhealthy = print_midas_section() or unhealthy
+
+    print()
+    print(paint("[4] FLOOR ZONES (min-lot risk vs budget cap, per engine x symbol)", "b"))
+    unhealthy = print_floor_zones(inv, unhealthy)
 
     print()
     print(paint("Gate reminder (pre-registered):", "b"))
