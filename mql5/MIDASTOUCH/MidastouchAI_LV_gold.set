@@ -62,6 +62,10 @@ InpFridayFlatHour=20
 ; consecutive full-loss day (the review's -45% compounding pattern).
 ; Paper arms keep 3.0.
 InpDailyLossCapPct=15.0
+; v1.19 P6 build block: entry TF explicit (M15 = the certified engine;
+; staged M5/TP variants live in MidastouchAI_LV_TP15_M15_gold.set and
+; MidastouchAI_LV_TP15_M5_gold.set, queued behind the 2026-10-01 reading)
+InpEntryTF=15
 InpBarModel=false
 InpSpreadFile=MIDASTOUCH_spread_M15.csv
 InpWindowStart=0

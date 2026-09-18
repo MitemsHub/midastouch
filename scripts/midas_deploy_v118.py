@@ -21,7 +21,9 @@ registered stop→copy→verify→relaunch sequence, gated on the cert chain:
      task) nor Experts/MIDASTOUCH_live (dormant in the VPS era; the LV
      surface on the VPS receives v1.18 with its next re-sync).
   4. VERIFY: after relaunch, each paper ledger must carry a fresh ERA row
-     `MIDAS1.18,...+diag-nofill` (the init stamp) and a heartbeat EQ touch.
+     `MIDAS1.18,...+diag-nofill` or `MIDAS1.19,...+diag-nofill+p6-entrytf`
+     (the init stamp — v1.19's P6 build block joined the never-abort class
+     with the same citation) and a heartbeat EQ touch.
 
 The LV/VPS deployment is recorded as DEFERRED, never attempted from here.
 """
@@ -128,8 +130,11 @@ def deploy_binaries(scratch_ex5: Path, mql5_experts: Path,
 
 
 def verify_arms(files_root: Path, min_epoch: float) -> dict:
-    """Post-relaunch proof: each paper ledger carries an ERA MIDAS1.18 row
-    (with the diag-nofill tag) and an EQ row newer than min_epoch."""
+    """Post-relaunch proof: each paper ledger carries an ERA row from a
+    registered never-abort build (MIDAS1.18 or later v1.19 P6 build block —
+    both cite the register) with the diag-nofill tag, and an EQ row newer
+    than min_epoch."""
+    accepted_era = ("ERA,MIDAS1.18,", "ERA,MIDAS1.19,")
     out = {}
     for tag in PAPER_TAGS:
         p = files_root / f"MIDASTOUCH_paper_XAUUSDmicro_{tag}.csv"
@@ -137,7 +142,7 @@ def verify_arms(files_root: Path, min_epoch: float) -> dict:
             out[tag] = "missing"
             continue
         rows = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        era_ok = any(r.startswith("ERA,MIDAS1.18,") and "diag-nofill" in r
+        era_ok = any(r.startswith(accepted_era) and "diag-nofill" in r
                      for r in rows)
         eq_ok = any(r.startswith("EQ,") for r in reversed(rows)) and \
             p.stat().st_mtime >= min_epoch

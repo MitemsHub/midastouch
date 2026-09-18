@@ -34,7 +34,7 @@
 //| passing forward gate, in its own reviewed build.                 |
 //+------------------------------------------------------------------+
 #property copyright "MIDASTOUCH"
-#property version   "1.18"   // v1.18: NOFILL diagnostics (reason-logged vetoes + daily NOFILL ledger rows) — never-abort class, certified paths unchanged
+#property version   "1.19"   // v1.19: P6 build block — parameterized entry TF (InpEntryTF, default M15 = certified) + TP-preset axis; certified paths byte-identical at defaults
 // Tester agents wipe their Files sandbox at pass start: this property makes
 // the tester copy the recorded-spread series from <data>\MQL5\Files into the
 // agent for every BAR-mode pass (name must be the literal staged file).
@@ -65,6 +65,7 @@ input int                 InpMacroEmaPeriod   = 20;
 input int                 InpBBPeriod         = 20;
 input double              InpBBDev            = 2.0;
 input int                 InpRSIPeriod        = 14;
+input ENUM_TIMEFRAMES     InpEntryTF          = PERIOD_M15; // v1.19 P6: entry timeframe — default M15 = certified behavior; PERIOD_M5 = the P6 winner (register §2b), deploy gated on the 2026-10-01 reading
 input double              InpRSIUpper         = 70.0;
 input double              InpRSILower         = 30.0;
 input int                 InpAtrPeriod        = 14;
@@ -179,7 +180,7 @@ double DollarPerUnit()
    return DollarPerUnitPerLot(dpu) ? dpu : 0.0;
 }
 
-#define APP_VERSION  "MIDAS1.18"   // v1.18: NOFILL diagnostics (reason-logged vetoes) — no certified-path behavior change
+#define APP_VERSION  "MIDAS1.19"   // v1.19: P6 build block (InpEntryTF parameter + TP-preset axis) — defaults byte-identical to v1.18
 #define SPREAD_FLOOR 0.10              // $ — MUST equal midas_sweep.SPREAD_FLOOR
 #define LEDGER_BASE  "MIDASTOUCH_paper"
 
@@ -220,12 +221,12 @@ void HudUpdate()
    string pos = g_pp_open ? (g_pp_dir > 0 ? "LONG" : "SHORT")
               : (g_lv_posid != 0 ? (g_lv_dir > 0 ? "LONG(live)" : "SHORT(live)") : "flat");
    Comment(StringFormat(
-      "MIDASTOUCH %s | mode=%d %s | session %02d-%02d UTC\n"
+      "MIDASTOUCH %s | mode=%d %s | tf=%s | session %02d-%02d UTC\n"
       "vEq: $%.2f (start $%.2f) | pos: %s\n"
       "trades: %d/30 (gate reads at n=60) | wins %d | cumR %+.2f\n"
       "eval: %d no-trade bars | V: mis %d no-trg %d sess %d spr %d\n"
       "last: %s",
-      APP_VERSION, (int)InpMode, ModeName((int)InpMode),
+      APP_VERSION, (int)InpMode, ModeName((int)InpMode), EnumToString(InpEntryTF),
       InpSessionStartHour, InpSessionEndHour,
       PaperEquity(), g_paper_start, pos,
       g_trades, g_wins, g_cum_r,
@@ -314,12 +315,12 @@ double SpreadAt(datetime t)
 // OHLC of the bar with OPEN time t (0.0 on any missing field = absent bar).
 bool GetBar(datetime t, double &o, double &h, double &l, double &c)
 {
-   int k = iBarShift(_Symbol, PERIOD_M15, t, true);
+   int k = iBarShift(_Symbol, InpEntryTF, t, true);
    if(k < 0) return false;
-   o = iOpen(_Symbol, PERIOD_M15, k);
-   h = iHigh(_Symbol, PERIOD_M15, k);
-   l = iLow(_Symbol, PERIOD_M15, k);
-   c = iClose(_Symbol, PERIOD_M15, k);
+   o = iOpen(_Symbol, InpEntryTF, k);
+   h = iHigh(_Symbol, InpEntryTF, k);
+   l = iLow(_Symbol, InpEntryTF, k);
+   c = iClose(_Symbol, InpEntryTF, k);
    return (o > 0 && h > 0 && l > 0 && c > 0);
 }
 
@@ -474,8 +475,8 @@ int TriggerOnClosedBar()
    if(CopyBuffer(g_m15_bb, 1, 1, 1, up) != 1) return 0;   // UPPER_BAND
    if(CopyBuffer(g_m15_bb, 2, 1, 1, lo) != 1) return 0;   // LOWER_BAND
    double c0[], c1[];
-   if(CopyClose(_Symbol, PERIOD_M15, 1, 2, c1) != 2) return 0;  // [0]=older [1]=closed
-   if(CopyClose(_Symbol, PERIOD_M15, 2, 1, c0) != 1) return 0;
+   if(CopyClose(_Symbol, InpEntryTF, 1, 2, c1) != 2) return 0;  // [0]=older [1]=closed
+   if(CopyClose(_Symbol, InpEntryTF, 2, 1, c0) != 1) return 0;
    // BB: previous bar closed OUTSIDE the band, signal bar closed back inside
    if(c0[0] > up[0] && c1[1] < up[0]) return 1;
    if(c0[0] < lo[0] && c1[1] > lo[0]) return -1;
@@ -515,8 +516,17 @@ int OnInit()
    g_h1_ema  = iMA(_Symbol, PERIOD_H1, InpMacroEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
    g_h4_ema  = iMA(_Symbol, PERIOD_H4, InpMacroEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
    g_h1_atr  = iATR(_Symbol, PERIOD_H1, InpAtrPeriod);
-   g_m15_bb  = iBands(_Symbol, PERIOD_M15, InpBBPeriod, 0, InpBBDev, PRICE_CLOSE);
-   g_m15_rsi = iRSI(_Symbol, PERIOD_M15, InpRSIPeriod, PRICE_CLOSE);
+   // v1.19 (register §2b P6 build block): entry-TF handles follow InpEntryTF.
+   // The BAR parity engine below stays hardwired M15 (see the guard) — the
+   // certified corpus and parity harness are M15; M5 exists PERTICK-only.
+   g_m15_bb  = iBands(_Symbol, InpEntryTF, InpBBPeriod, 0, InpBBDev, PRICE_CLOSE);
+   g_m15_rsi = iRSI(_Symbol, InpEntryTF, InpRSIPeriod, PRICE_CLOSE);
+   if(InpBarModel && InpEntryTF != PERIOD_M15)
+   {
+      Print(VersionTag() + "INIT FAILED: BAR parity mode is M15-only (InpEntryTF="
+            + EnumToString(InpEntryTF) + "); M5 runs PERTICK only");
+      return INIT_FAILED;
+   }
    if(g_h1_ema == INVALID_HANDLE || g_h4_ema == INVALID_HANDLE ||
       g_h1_atr == INVALID_HANDLE || g_m15_bb == INVALID_HANDLE ||
       g_m15_rsi == INVALID_HANDLE)
@@ -604,6 +614,11 @@ int OnInit()
    // in midas_verdict's never-abort class (§1 citation walk).
    if(!InpBarModel)
       era_note += "+diag-nofill";
+   // v1.19: the P6 build block parameterizes the entry TF and ships TP-1.5R
+   // presets. Defaults are the certified config, so the transition stays in
+   // midas_verdict's never-abort class via this citation (§1 walk).
+   if(!InpBarModel)
+      era_note += "+p6-entrytf";
    PaperLog(StringFormat("ERA,%s,%I64d,%s", APP_VERSION, (long)TimeCurrent(), era_note));
    RestoreOrVerifyLedger();
    if(!MQLInfoInteger(MQL_TESTER))
@@ -1121,7 +1136,7 @@ void DiagMaybeWrite()
 //+------------------------------------------------------------------+
 void TrackFreshM15Bar()
 {
-   datetime cur = iTime(_Symbol, PERIOD_M15, 0);
+   datetime cur = iTime(_Symbol, InpEntryTF, 0);
    if(cur == 0) return;
    if(g_last_m15 == 0) { g_last_m15 = cur; g_last_m15_seen = TimeCurrent(); return; }
    if(cur == g_last_m15)
@@ -1146,7 +1161,7 @@ void TrackFreshM15Bar()
    g_last_m15_seen = TimeCurrent();
 
    // evaluate the just-closed bar (index 1)
-   datetime sig_open_time = iTime(_Symbol, PERIOD_M15, 1);
+   datetime sig_open_time = iTime(_Symbol, InpEntryTF, 1);
    int mac = MacroState();
    int trigger = TriggerOnClosedBar();
    int direction = 0;

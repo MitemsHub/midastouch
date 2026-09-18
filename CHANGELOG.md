@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-09-18 — P6 build block executed: v1.19 InpEntryTF + staged TP-1.5R presets
+
+- EA v1.19: InpEntryTF input (default M15 = certified; M5 = P6 winner);
+  live/PERTICK path fully TF-parameterized; BAR parity hardwired M15 with
+  fail-closed M5+BAR init guard; HUD shows the TF; ERA note +p6-entrytf.
+- Staged LV presets (DO NOT SPLICE until the 2026-10-01 reading passes):
+  MidastouchAI_LV_TP15_M15_gold.set (interim TP 1.5R) and
+  MidastouchAI_LV_TP15_M5_gold.set (P6 winner: M5 + TP 1.5R, kill rules
+  in-file). Paper presets carry the inert InpEntryTF=15 identity line only.
+- Deployer verify contract extended to admit the v1.19 ERA stamp (the armed
+  chain would otherwise verify-fail when the tree advances).
+- Pins: tests/test_midas_p6_build.py (10), telemetry chain pins updated to
+  the three-tag era, HUD/R6 pins follow the tree; affected suites 106/106.
+
 ## 2026-09-18 — P6 consistent-daily-income study executed (register §2b)
 
 - Pre-registered daily-consistency study (M5/M15 × TP {1,1.5,1.8,2} × k

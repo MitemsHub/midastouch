@@ -559,6 +559,25 @@ extended (`tests/test_midas_telemetry.py`, 17 incl. density-counter placement
 and no-reset monotonicity), consumer-completeness tolerance re-verified, and
 the verdict tool pinned BOTH directions on the real transition (cited
 v1.16→v1.17 mixed-width ledger passes; the same transition UNCITED aborts).
+**P6 build block EXECUTED in-tree (v1.19, 2026-09-18):** the amendment is
+BUILT, COMPILED, and DORMANT — deployed only if the 2026-10-01 reading
+passes. EA v1.19 adds `InpEntryTF` (default PERIOD_M15 = certified
+behavior; PERIOD_M5 = the P6 winner) with the PERTICK/live path fully
+TF-parameterized (handles, trigger, fresh-bar, sig-open, bar reader); the
+BAR parity engine stays hardwired M15 and **M5+BAR fails closed at init**
+(no M5 parity harness exists — TF parity is a separate pre-registration
+if ever needed). Two staged LV presets hold the complete post-amendment
+configurations: `MidastouchAI_LV_TP15_M15_gold.set` (interim: TP 1.5R
+only) and `MidastouchAI_LV_TP15_M5_gold.set` (the P6 winner: M5 + TP
+1.5R), both with explicit DO-NOT-SPLICE headers and the registered kill
+rules in-file. ERA note gains `+p6-entrytf` (§1 never-abort citation
+chain grows: telemetry-only → diag-nofill → p6-entrytf); the armed
+deployer's verify contract was extended to admit the v1.19 stamp so the
+chain cannot verify-fail when the tree advances. Pinned in
+tests/test_midas_p6_build.py (frozen defaults, no stray PERIOD_M15 in
+the live path, verdict both-directions on the real transition, exact
+preset diffs, deployer v1.19 acceptance).
+
 **P6 study EXECUTED (2026-09-18, register row P6):** the pre-registered
 consistent-daily-income study ran on the certified M15 corpora plus a fresh
 50,000-bar broker-fetched M5 corpus; winner M5/k=2.0/TP=1.5R survived the
