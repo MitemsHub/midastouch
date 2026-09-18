@@ -70,6 +70,9 @@ def test_hud_state_is_ledger_backed_only() -> None:
         "ModeName", "PaperEquity",
         # pinned inputs (displayed verbatim)
         "InpMode", "InpSessionStartHour", "InpSessionEndHour",
+        # v1.19 P6 build block: the entry TF is config echo (rides the ERA
+        # note's citation class), displayed via EnumToString
+        "InpEntryTF", "EnumToString",
         # paper state (already in the ledger: EQ/CLOSE/OPEN rows)
         "APP_VERSION", "g_pp_open", "g_pp_dir", "g_paper_start",
         "g_trades", "g_wins", "g_cum_r",

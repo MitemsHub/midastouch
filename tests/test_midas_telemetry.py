@@ -147,7 +147,7 @@ def test_version_bumped_and_property_consistent() -> None:
     define = re.search(r'#define\s+APP_VERSION\s+"MIDAS(\d+)\.(\d+)"', s)
     assert prop and define
     assert prop.groups() == define.groups(), "#property version must equal APP_VERSION"
-    assert prop.group(1) + "." + prop.group(2) == "1.18", "NOFILL diagnostics ride v1.18"
+    assert prop.group(1) + "." + prop.group(2) == "1.19", "P6 build block rides v1.19"
 
 
 # --- the safety net: every python consumer tolerates the appended rows --------
@@ -398,14 +398,17 @@ def test_nofill_rows_are_inert_to_every_consumer(tmp_path):
     assert "session" in agg and agg.get("friday") == 0
 
 
-def test_v118_era_note_carries_both_tags():
-    """The v1.18 ERA note must carry BOTH citations: the §1 telemetry tag
-    (version transition stays never-abort) and the diag-nofill tag (this
-    diagnostics build)."""
+def test_v119_era_note_carries_full_citation_chain():
+    """The v1.19 ERA note must carry the FULL accumulated citation chain:
+    the §1 telemetry tag (never-abort transitions), the diag-nofill tag
+    (v1.18 diagnostics), and the p6-entrytf tag (the P6 build block).
+    Every consumer (midas_verdict, deployer verify) matches these tags as
+    substrings, so the chain grows — it never rewrites."""
     code = strip_comments(src())
     assert 'era_note += "+telemetry-only-per-V2-register";' in code
     assert 'era_note += "+diag-nofill";' in code
-    assert '"MIDAS1.18"' in code, "APP_VERSION bumped"
+    assert 'era_note += "+p6-entrytf";' in code
+    assert '"MIDAS1.19"' in code, "APP_VERSION bumped"
     # the init writer composes the ERA row with the composed note
     assert 'StringFormat("ERA,%s,%I64d,%s"' in code
 
