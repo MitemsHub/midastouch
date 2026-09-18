@@ -95,6 +95,63 @@ a blind spot in the original evidence ring, now closed:
   include `algo_trading: true` from broker evidence. Any [3b] with
   `AutoTrading OFF` or `??` is an actionable alert, not a footnote.
 
+**BUILD v1.18 — external-review adjudication + NOFILL diagnostics
+(2026-09-18 ~19:10 UTC, telemetry-only/never-abort class).** An external
+review of MidastouchAI.mq5 proposed three configuration changes and two code
+patches. Every item was adjudicated against measured evidence, not adopted
+on assertion:
+
+- **REFUSED — "switch live to Mode 7 TRIGGER_ONLY to prove the EA can click
+  the button":** the mode was ALREADY measured in the 2026-09-18 sweep
+  (`artifacts/midas_variant_research_20260918.json`): TRIGGER_ONLY k=2.0
+  fires 28–39×/month but nets 8.0–22.1R at pf 1.10–1.21; the live ORIGINAL
+  k=1.0/75-25 fires ~28×/month for 49.0R at pf 1.31. The "deadbolt" macro
+  filter is where half the money lives. Switching the LIVE arm to a
+  cheaper signal to "prove execution" would also void the live arm's
+  §13 sample. Execution proof belongs to diagnostics, not to the mode.
+- **REFUSED — "raise InpSpreadCapPctStop 1.5→5.0":** the 1.5%-of-stop cap
+  is NOT the blocker: 60-day M1 spread distribution (60,084 bars, measured
+  today) is median $0.15, p95 $0.28, p99 $0.51 vs a $0.38–0.49 cap at
+  typical $25–33 ATR stops — ordinary entries pass; the cap vetoes only
+  the p95+ news tail, which is what it is FOR. The "silently eaten"
+  entries the review predicted would show in R10 telemetry — which does
+  not exist on the running arms yet (they are v1.10 binaries) — and in
+  the NOFILL rows from today. Changing the cap is a pricing change to
+  the live geometry and rides the 2026-10-01 reading like every other.
+- **REFUSED — "hardcode an ATR band (atr<300||atr>2000)":** implemented
+  AS A STUDY instead (`scripts/midas_atr_filter_study.py`,
+  `artifacts/midas_atr_filter_study_20260918.json`) on the certified
+  corpus: every candidate band (50–200, 50–300, 60–250, 40–300,
+  30–inf, 50–inf % of median ATR) DROPS total return (best 49.73R vs
+  48.99R unfiltered is inside noise with n 417→411) or trades fewer R
+  for marginal pf. The review's numbers were also off by ~100× (real
+  ATR percentiles: p03≈$2, p50≈$16.8, p99≈$78). No ATR filter is
+  adopted; the study is the permanent artifact that answers it.
+- **REFUSED AS WRITTEN — the "TrackFreshM15Bar replacement":** it
+  re-introduces the two silent-veto bugs v1.18 fixes, reverts the honest
+  HUD, hardcodes a server/UTC guess, and (fatal) would break BAR parity
+  via unconditional Print lines in the replay path. Not merged.
+- **IMPLEMENTED — reason-logging (review item 1), v1.18:** every veto in
+  the PERTICK signal path now carries its reason: the HUD's `last:` line
+  reads e.g. `VETO MISMATCH(mac=+1,trg=-1)` instead of the 2026-09-17
+  bare "SIGNAL BUY evaluated"; a NOFILL diagnostics row (epoch + 8
+  counters: signal, mismatch, no_trigger, session, friday, spread,
+  riskcap, breaker) is appended to paper-file ledgers once per UTC day.
+  Tester/BAR paths are hard-gated OFF (byte-identical certified ledgers).
+  ERA note gains the `+diag-nofill` tag after the §1 telemetry citation
+  (never-abort preserved both directions; pinned).
+- **IMPLEMENTED — live-order failure telemetry (review item 3):** the
+  live send path's terminal failure now records retcode + description
+  (`g_lv_last_error`) alongside the existing journal print — the same
+  evidence the AutoTrading sentinel class needs.
+- **ALREADY TRUE (review items 2/4) — session UTC and spread veto
+  visibility:** the session gate reads the SERVER-stamped signal-bar
+  epoch by design (v1.15 provenance amendment 6; broker offset verified
+  externally at +0h00 this morning); the spread veto has printed price +
+  cap + stop since v1.08 and its per-entry spread/ATR columns ride R10
+  telemetry when the arms take v1.17+.
+
+
 **AMENDMENT — live-arm daily breaker (2026-09-18, review-frozen, effective
 immediately).** The operator's structural review flagged the one flaw in
 running the paper default on the live arm: **`InpDailyLossCapPct=3.0` lets a

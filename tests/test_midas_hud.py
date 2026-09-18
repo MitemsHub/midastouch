@@ -76,6 +76,10 @@ def test_hud_state_is_ledger_backed_only() -> None:
         # live adoption state (already in the ledger: LOPEN/LCLOSE rows;
         # v1.11 rows carry the position IDENTIFIER as the reconciliation key)
         "g_lv_posid", "g_lv_dir",
+        # v1.18 NOFILL counters (the HUD eval line mirrors exactly the
+        # counters written into the daily NOFILL ledger row)
+        "g_nofill_signal", "g_nofill_mism", "g_nofill_notr",
+        "g_nofill_session", "g_nofill_spread",
         # HUD state itself + the local pos label
         "g_last_action", "pos",
     }

@@ -44,8 +44,14 @@ def build_data() -> dict:
 
 
 def run_config(data: dict, mode: str, bb: list[int], rsi_hi: int, rsi_lo: int,
-               t0: int, t1: int) -> list[dict]:
-    """run_mode with parameterized bb array + RSI bands (identical bookkeeping)."""
+               t0: int, t1: int, atr_lo: float | None = None,
+               atr_hi: float | None = None) -> list[dict]:
+    """run_mode with parameterized bb array + RSI bands (identical bookkeeping).
+
+    atr_lo/atr_hi (optional, research-only): skip signals whose H1 ATR is
+    below/above the bound (absolute price units). None disables the bound —
+    the default keeps the function byte-compatible with the 2026-09-18 sweep.
+    """
     h1, m15, h4 = data["h1"], data["m15"], data["h4"]
     h1_ema, h1_atr, h4_ema = data["h1_ema"], data["h1_atr"], data["h4_ema"]
     m15_rsi = data["m15_rsi"]
@@ -88,6 +94,10 @@ def run_config(data: dict, mode: str, bb: list[int], rsi_hi: int, rsi_lo: int,
             continue
         atr = h1_atr[k1 - 1]
         if atr <= 0:
+            continue
+        if atr_lo is not None and atr < atr_lo:
+            continue
+        if atr_hi is not None and atr > atr_hi:
             continue
         mac = ms.macro_state(h1[k1 - 1]["close"], h1_ema[k1 - 1],
                              h4[k4 - 1]["close"], h4_ema[k4 - 1])

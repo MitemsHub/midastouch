@@ -34,7 +34,7 @@
 //| passing forward gate, in its own reviewed build.                 |
 //+------------------------------------------------------------------+
 #property copyright "MIDASTOUCH"
-#property version   "1.17"   // v1.17: P5 telemetry columns on CLOSE rows (thr, thr_era_id, signal density) — never-abort class, behavior on certified paths unchanged
+#property version   "1.18"   // v1.18: NOFILL diagnostics (reason-logged vetoes + daily NOFILL ledger rows) — never-abort class, certified paths unchanged
 // Tester agents wipe their Files sandbox at pass start: this property makes
 // the tester copy the recorded-spread series from <data>\MQL5\Files into the
 // agent for every BAR-mode pass (name must be the literal staged file).
@@ -117,6 +117,15 @@ double         g_paper_eq = 0.0, g_paper_start = 0.0;
 double         g_cum_r = 0.0;
 int            g_trades = 0, g_wins = 0;
 string         g_last_action = "boot";   // v1.10 HUD: last engine action (display only)
+string         g_lv_last_error = "";     // v1.18: last live-order failure detail (diagnostics)
+// v1.18 NOFILL diagnostics (register review item 1): per-M15-bar veto
+// accounting, so "why didn't it trade" is answered from evidence, not
+// memory. Rows are appended to paper-file ledgers only — the BAR parity
+// replay never writes them, so certified ledgers stay byte-identical.
+int            g_nofill_signal = 0, g_nofill_mism = 0, g_nofill_session = 0,
+               g_nofill_friday = 0, g_nofill_spread = 0, g_nofill_riskcap = 0,
+               g_nofill_brk = 0, g_nofill_notr = 0, g_nofill_wrote = 0;
+datetime       g_diag_day0 = 0;
 
 //--- bar-replay parity state (v1.04, EXEC BAR model)
 long           g_sp_t[];         // spread-file bar open times (strictly ascending)
@@ -170,7 +179,7 @@ double DollarPerUnit()
    return DollarPerUnitPerLot(dpu) ? dpu : 0.0;
 }
 
-#define APP_VERSION  "MIDAS1.17"   // v1.17: P5 telemetry (thr/thr_era_id/density CLOSE appends) — no certified-path behavior change
+#define APP_VERSION  "MIDAS1.18"   // v1.18: NOFILL diagnostics (reason-logged vetoes) — no certified-path behavior change
 #define SPREAD_FLOOR 0.10              // $ — MUST equal midas_sweep.SPREAD_FLOOR
 #define LEDGER_BASE  "MIDASTOUCH_paper"
 
@@ -214,11 +223,14 @@ void HudUpdate()
       "MIDASTOUCH %s | mode=%d %s | session %02d-%02d UTC\n"
       "vEq: $%.2f (start $%.2f) | pos: %s\n"
       "trades: %d/30 (gate reads at n=60) | wins %d | cumR %+.2f\n"
+      "eval: %d no-trade bars | V: mis %d no-trg %d sess %d spr %d\n"
       "last: %s",
       APP_VERSION, (int)InpMode, ModeName((int)InpMode),
       InpSessionStartHour, InpSessionEndHour,
       PaperEquity(), g_paper_start, pos,
-      g_trades, g_wins, g_cum_r, g_last_action));
+      g_trades, g_wins, g_cum_r,
+      g_nofill_signal, g_nofill_mism, g_nofill_notr, g_nofill_session,
+      g_nofill_spread, g_last_action));
 }
 
 string PaperFile()
@@ -586,6 +598,12 @@ int OnInit()
    // keep the exact parity-era note byte-for-byte.
    if(!InpBarModel)
       era_note += "+telemetry-only-per-V2-register";
+   // v1.18: the NOFILL diagnostics ledger is review-item-1 telemetry. NOFILL
+   // rows are appends AFTER trade rows, never alter any CLOSE row, and exist
+   // only in live/paper-file ledgers — this tag keeps the version transition
+   // in midas_verdict's never-abort class (§1 citation walk).
+   if(!InpBarModel)
+      era_note += "+diag-nofill";
    PaperLog(StringFormat("ERA,%s,%I64d,%s", APP_VERSION, (long)TimeCurrent(), era_note));
    RestoreOrVerifyLedger();
    if(!MQLInfoInteger(MQL_TESTER))
@@ -618,6 +636,7 @@ void OnTimer()
    if(MQLInfoInteger(MQL_TESTER))
       return;                                          // parity runs: byte-identical ledgers
    PaperLog(StringFormat("EQ,%.2f", PaperEquity()));
+   DiagMaybeWrite();                    // v1.18: NOFILL diagnostics flush on the heartbeat
    HudUpdate();                                        // v1.10: HUD refresh on the heartbeat clock
 }
 
@@ -1058,6 +1077,40 @@ void BarEvaluateSignal(datetime sig, double so, double sh, double sl_, double sc
 }
 
 //+------------------------------------------------------------------+
+//| v1.18 NOFILL diagnostics (register review item 1, never-abort):  |
+//| veto accounting so the operator's question "why didn't it trade" |
+//| is answered from a ledger, not memory. Paper ledgers only — the  |
+//| BAR parity replay never reaches these paths, so certified        |
+//| ledgers stay byte-identical. Reason grammar is pinned by tests.  |
+//+------------------------------------------------------------------+
+void DiagCountReset()
+{
+   g_nofill_signal = 0; g_nofill_mism = 0; g_nofill_session = 0;
+   g_nofill_friday = 0; g_nofill_spread = 0; g_nofill_riskcap = 0;
+   g_nofill_brk = 0; g_nofill_notr = 0; g_nofill_wrote = 0;
+}
+string TextVeto(int trigger, int mac)
+{
+   if(trigger == 0 && mac == 0)  return "NO-SIGNAL(0,0)";
+   if(trigger == 0)              return StringFormat("NO-TRIGGER(mac=%+d)", mac);
+   if(mac == 0)                  return StringFormat("MACRO-DIVERGENCE(trg=%+d)", trigger);
+   return StringFormat("MISMATCH(mac=%+d,trg=%+d)", mac, trigger);
+}
+void DiagMaybeWrite()
+{
+   if(MQLInfoInteger(MQL_TESTER)) return;                 // parity ledgers byte-clean
+   if(InpBarModel) return;
+   if(g_nofill_signal == 0) return;                       // nothing to account
+   if(g_diag_day0 == 0) g_diag_day0 = TimeUTCNow();
+   if(TimeUTCNow() - g_diag_day0 < 86400) return;         // once per UTC day
+   PaperLog(StringFormat("NOFILL,%I64d,%d,%d,%d,%d,%d,%d,%d,%d",
+            (long)TimeUTCNow(), g_nofill_signal, g_nofill_mism,
+            g_nofill_session, g_nofill_friday, g_nofill_spread,
+            g_nofill_riskcap, g_nofill_brk, g_nofill_notr));
+   g_nofill_wrote++;
+   DiagCountReset();
+}
+//+------------------------------------------------------------------+
 //| New-M15-bar pump — research-parity execution:                    |
 //| When a new M15 bar opens at T, the bar at index 1 has just       |
 //| CLOSED (at T). Evaluate its signal NOW and fill immediately at   |
@@ -1078,6 +1131,7 @@ void TrackFreshM15Bar()
    }
    // a new M15 bar just opened at `cur`; index 1 closed at `cur`
    g_last_m15 = cur;
+   DiagMaybeWrite();                    // v1.18: daily NOFILL roll at the first new bar
 
    // staleness guard: if the feed went quiet and just woke up, skip this
    // bar (its "first tick" is not the open; parity and honesty both demand
@@ -1096,7 +1150,14 @@ void TrackFreshM15Bar()
    int mac = MacroState();
    int trigger = TriggerOnClosedBar();
    int direction = 0;
-   if(!ModeDecide(trigger, mac, direction) || direction == 0) return;
+   if(!ModeDecide(trigger, mac, direction) || direction == 0)
+   {
+      g_nofill_signal++;                                // v1.18: mode evaluated, no trade
+      if(trigger == 0) g_nofill_notr++;                 //   no trigger fired at all
+      else             g_nofill_mism++;                 //   trigger fired but mode refused
+      g_last_action = StringFormat("VETO %s", TextVeto(trigger, mac));   // v1.18: honest HUD
+      return;
+   }
    g_last_action = StringFormat("SIGNAL %s evaluated",   // v1.10 HUD (PERTICK path only)
                   direction > 0 ? "BUY" : "SELL");
 
@@ -1105,10 +1166,12 @@ void TrackFreshM15Bar()
    // record's classification of the same broker-feed epochs)
    MqlDateTime dt;
    TimeToStruct(sig_open_time, dt);
-   if(dt.hour < InpSessionStartHour || dt.hour >= InpSessionEndHour) return;
+   if(dt.hour < InpSessionStartHour || dt.hour >= InpSessionEndHour)
+   { g_nofill_session++; DiagMaybeWrite(); return; }  // v1.18 diagnostics
 
    // Friday cutoff
-   if(dt.day_of_week == 5 && dt.hour >= InpFridayCutoffHour) return;
+   if(dt.day_of_week == 5 && dt.hour >= InpFridayCutoffHour)
+   { g_nofill_friday++; DiagMaybeWrite(); return; }   // v1.18 diagnostics
    g_p5_signals++;                     // v1.17 P5 telemetry: condition-true, in-session (census semantics)
 
    double atr = AtrNow();
@@ -1117,6 +1180,7 @@ void TrackFreshM15Bar()
    if(stop <= 0) return;
    if(!SpreadCapOK(stop))              // v1.08: shared veto (paper mirror and live path)
    {
+      g_nofill_spread++; DiagMaybeWrite();               // v1.18 diagnostics
       g_last_action = "signal vetoed: spread cap";   // v1.10 HUD
       return;
    }
@@ -1160,6 +1224,7 @@ bool OpenPaperPosition(int direction, double stop_d, int hour, int mac)
       {
          Print(VersionTag() + "PAPER VETO RISK-CAP: min-lot risk exceeds "
                "InpMaxRiskPct — trade vetoed (amendment 6)");
+         g_nofill_riskcap++; DiagMaybeWrite();              // v1.18 diagnostics
          g_last_action = "signal vetoed: min-lot risk cap";   // v1.10 HUD
          return false;
       }
@@ -1341,6 +1406,7 @@ bool LiveSendOrder(int direction, double stop_d, int hour, int mac)
       {
          Print(VersionTag() + "LIVE VETO RISK-CAP: min-lot risk exceeds "
                "InpMaxRiskPct of account equity — order refused (amendment 6)");
+         g_nofill_riskcap++; DiagMaybeWrite();              // v1.18 diagnostics
          g_last_action = "live veto: min-lot risk cap";   // v1.10 HUD
          return false;
       }
@@ -1405,6 +1471,8 @@ bool LiveSendOrder(int direction, double stop_d, int hour, int mac)
       Sleep(300);
    }
    Print(VersionTag() + "ORDER FAILED after retries — standing down this signal");
+   g_lv_last_error = StringFormat("send rc=%u %s", g_trade.ResultRetcode(),
+                                  g_trade.ResultRetcodeDescription());   // v1.18 diagnostics
    return false;
 }
 
@@ -1490,7 +1558,8 @@ void LiveCheckExits()
 void LiveOnTick()
 {
    LiveCheckExits();
-   if(g_lv_posid != 0 || DailyBreakerTripped()) return;
+   if(g_lv_posid != 0) return;
+   if(DailyBreakerTripped()) { g_nofill_brk++; DiagMaybeWrite(); return; }   // v1.18 diagnostics
    TrackFreshM15Bar();
 }
 
