@@ -1,4 +1,8 @@
-"""Offline tests for the V2 register R10 telemetry ledger columns (v1.13).
+"""Offline tests for the V2 register telemetry ledger columns.
+
+R10 (v1.13): atr/spread/slippage appends. P5 (v1.17): thr, thr_era_id and
+signal-density appends on CLOSE rows — the adaptive variant's telemetry-first
+build, registered before any adaptive gate may exist.
 
 The never-abort class law: telemetry columns ride ONLY as end-of-row
 appends on the paper rows of record, and every python consumer of the
@@ -67,16 +71,59 @@ def test_paper_open_prefix_frozen_with_two_appends() -> None:
 
 def test_paper_close_prefix_frozen_with_two_appends() -> None:
     # 8 frozen fields, then the v1.13 appends: spread-at-close, slippage
+    # v1.17: the R10 positional pin consciously moved — both CLOSE writers
+    # now carry the P5 tail (thr,thr_era_id,density) after the R10 pair;
+    # pinned by test_paper_close_p5_tail below.
     assert _callsites(
-        "CLOSE,%I64d,%I64u,%s,%.5f,%.3f,%.2f,%.2f,%.5f,%.5f"
-    ) == 2, "both paper CLOSE writers (BAR + PERTICK) carry the appends"
+        "CLOSE,%I64d,%I64u,%s,%.5f,%.3f,%.2f,%.2f,%.5f,%.5f,%.2f,%I64d,%I64d"
+    ) == 2, "both paper CLOSE writers (BAR + PERTICK) carry R10 + P5 appends"
+
+
+def test_paper_close_p5_tail_shape() -> None:
+    """P5 appends: thr (BB k-multiple, %.2f), thr_era_id (%I64d, static 0
+    until the adaptive engine exists), density (%I64d running in-session
+    condition-true count). Register row P5, telemetry-first, never-abort."""
+    code = strip_comments(src())
+    assert code.count(
+        '"CLOSE,%I64d,%I64u,%s,%.5f,%.3f,%.2f,%.2f,%.5f,%.5f,%.2f,%I64d,%I64d"') == 2
+    # the density counter feeds both writers
+    b = strip_comments(src())
+    assert b.count("g_p5_signals") >= 4  # decl + 2 counters + 2 format args
+
+
+def test_p5_density_counter_is_after_session_gates() -> None:
+    """Census semantics: count in-session condition-true bars — the counter
+    must sit after the session (and Friday) gates at BOTH ModeDecide sites,
+    never before them."""
+    b = strip_comments(src())
+    for fn in ("BarEvaluateSignal", "TrackFreshM15Bar"):
+        body_txt = body(fn)
+        gate_idx = body_txt.find("InpSessionStartHour")
+        friday_idx = body_txt.find("InpFridayCutoffHour")
+        inc_idx = body_txt.find("g_p5_signals++")
+        assert gate_idx != -1 and friday_idx != -1, f"{fn}: gates present"
+        assert inc_idx != -1, f"{fn}: density counter present"
+        assert inc_idx > gate_idx and (friday_idx == -1 or inc_idx > friday_idx), \
+            f"{fn}: counter must be AFTER the session/Friday gates"
+
+
+def test_p5_counter_is_monotone_no_reset_path() -> None:
+    """The counter only ever increments in the source — no reset exists
+    (interval density is differenced by consumers). The single declaration
+    initializer (`long g_p5_signals = 0;`) is pinned as the ONLY assignment.
+    """
+    code = strip_comments(src())
+    assert "g_p5_signals++" in code
+    assigns = re.findall(r"g_p5_signals\s*=\s*[^=][^;]*", code)
+    assert assigns == ["g_p5_signals = 0"], \
+        f"only the declaration initializer may assign; found {assigns}"
 
 
 def test_appends_are_at_end_of_row_only() -> None:
     code = strip_comments(src())
     # every telemetry-bearing format ends in the append specifiers
     assert '"OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s,%.5f,%.5f"' in code
-    assert '"CLOSE,%I64d,%I64u,%s,%.5f,%.3f,%.2f,%.2f,%.5f,%.5f"' in code
+    assert '"CLOSE,%I64d,%I64u,%s,%.5f,%.3f,%.2f,%.2f,%.5f,%.5f,%.2f,%I64d,%I64d"' in code
     # and no inserted-in-the-middle variant exists (telemetry specifiers only
     # ever appear at the tail of a format string)
     for m in re.finditer(r'"(OPEN|CLOSE)[^"]*"', code):
@@ -100,7 +147,7 @@ def test_version_bumped_and_property_consistent() -> None:
     define = re.search(r'#define\s+APP_VERSION\s+"MIDAS(\d+)\.(\d+)"', s)
     assert prop and define
     assert prop.groups() == define.groups(), "#property version must equal APP_VERSION"
-    assert define.group(2) == "16", "current tree build is MIDAS1.16 (R6 fail-closed preconditions)"
+    assert prop.group(1) + "." + prop.group(2) == "1.17", "P5 telemetry rides v1.17"
 
 
 # --- the safety net: every python consumer tolerates the appended rows --------
@@ -119,7 +166,8 @@ def _appended_open(tag: str) -> str:
 
 def _appended_close() -> str:
     # 8 frozen fields + v1.13 appends (spread_at_close, slippage)
-    return "CLOSE,1789660800,1789657200,SL,4320.00000,-0.750,-3.41,46.59,0.50,0.00"
+    #             + v1.17 P5 appends (thr, thr_era_id, density)
+    return "CLOSE,1789660800,1789657200,SL,4320.00000,-0.750,-3.41,46.59,0.50,0.00,2.00,0,0"
 
 
 def test_midas_verdict_tolerates_appends(tmp_path):
@@ -134,6 +182,40 @@ def test_midas_verdict_tolerates_appends(tmp_path):
     assert abs(s["total_r"] - 52.0) < 1e-6, "r stays parts[5], veq stays parts[7]"
     assert s["era_versions"] == ["MIDAS1.13"], "single version: no structural abort"
     assert s.get("problems", []) == [], "no too-short/unparseable rows on appended grammar"
+
+
+def test_midas_verdict_tolerates_p5_mixed_version_transition(tmp_path):
+    """The REAL v1.16→v1.17 deployment path: a ledger that opens on MIDAS1.16
+    (10-field CLOSE rows), transitions to MIDAS1.17 (12-field P5 rows) with
+    the telemetry-only citation, and mixes both row widths thereafter. The
+    §1 telemetry exemption must admit the version change; r/veq stay
+    positional across BOTH widths; n counts every close."""
+    rows = [f"ERA,MIDAS1.16,{era_mod.ERA_EPOCH},pertick-fills"]
+    for i in range(10):
+        rows.append(f"CLOSE,{1789657200 + i * 3600},{1789657200 + i * 3600},"
+                    f"SL,4320.00000,1.000,1.50,50.00,45.45571,0.50")
+    rows.append(f"ERA,MIDAS1.17,{1789657200 + 10 * 3600},"
+                "pertick-fills+telemetry-only-per-V2-register")
+    for i in range(10, 61):
+        rows.append(f"CLOSE,{1789657200 + i * 3600},{1789657200 + i * 3600},"
+                    f"SL,4320.00000,1.000,1.50,50.00,45.45571,0.50,2.00,0,{i}")
+    s = arm_statistics(str(_write(tmp_path, rows)))
+    assert s["n"] == 61, "both row widths count"
+    assert abs(s["total_r"] - 61.0) < 1e-6, "r positional across the transition"
+    assert sorted(s["era_versions"]) == ["MIDAS1.16", "MIDAS1.17"]
+    assert s.get("problems", []) == [], "cited telemetry transition must not abort"
+
+
+def test_midas_verdict_aborts_uncited_v17_transition(tmp_path):
+    """Both directions: the same version change WITHOUT the citation is the
+    §13 structural abort, exactly as before P5 existed."""
+    rows = [f"ERA,MIDAS1.16,{era_mod.ERA_EPOCH},pertick-fills"]
+    rows.append("CLOSE,1789657200,1789657200,SL,4320.00000,1.000,1.50,50.00,45.45571,0.50")
+    rows.append(f"ERA,MIDAS1.17,{1789660800},pertick-fills")
+    rows.append("CLOSE,1789664400,1789664400,SL,4320.00000,1.000,1.50,50.00,45.45571,0.50,2.00,0,7")
+    s = arm_statistics(str(_write(tmp_path, rows)))
+    assert any("version change" in p for p in s.get("problems", [])), \
+        "uncited v1.17 transition aborts the window"
 
 
 def test_parity_parse_ledger_tolerates_appends(tmp_path):

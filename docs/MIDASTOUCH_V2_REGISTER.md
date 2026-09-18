@@ -411,6 +411,22 @@ same reason P4 is conditional. Fallback: if P4 voids per its own condition
 only the surviving layers as context. P5 is the first registered answer to
 the operator's frequency requirement that does not ship a NO-SHIP variant
 to make the live arm busier.
+**P5 telemetry-first build EXECUTED in-tree (v1.17, 2026-09-18):** the P5
+row's P-T step is done exactly per the R10 pattern — thr, thr_era_id
+(static 0 until the adaptive engine exists) and density (running in-session
+condition-true count, census semantics, counted after the session/Friday
+gates at both ModeDecide sites) ride as END-OF-ROW appends on both paper
+CLOSE writers; ERA note carries `+telemetry-only-per-V2-register`; no
+certified-path behavior change (the certified path may still run any
+pre-v1.17 binary — nothing deployed). Pinned: source-format positional pins
+extended (`tests/test_midas_telemetry.py`, 17 incl. density-counter placement
+and no-reset monotonicity), consumer-completeness tolerance re-verified, and
+the verdict tool pinned BOTH directions on the real transition (cited
+v1.16→v1.17 mixed-width ledger passes; the same transition UNCITED aborts).
+Compiled 0 errors / 0 warnings via the scratch tool with before/after proof
+that the deployed paper, LIVE and parity binaries were never touched
+(VPS-era sync source intact). Per the queue: v1.17 deploys to arms only in
+its registered era, after the 2026-10-01 reading.
 
 ## 3. Sequencing
 
