@@ -51,8 +51,16 @@ PAPER_TAGS = ("M1", "M1t", "M1s", "M1m")
 DEPLOY_TARGETS = (  # (relative to <data folder>/MQL5/Experts, description)
     ("MITEMSHUB_AI/MidastouchAI.ex5", "paper charts' expert path"),
     ("MIDASTOUCH/MidastouchAI.ex5", "canonical location"),
+    # OPERATOR ORDER 2026-09-18 20:57 UTC ("then deploy the binary, what is
+    # holding you"): the live/VPS-sync binary joins the deploy set. Safe
+    # because v1.19's DEFAULTS are behavior-identical to v1.18, the staged
+    # TP/TF presets are NOT spliced onto the LV chart (the reading gates
+    # that), and the dormant local live instance is AutoTrading-OFF in the
+    # VPS era. MT5 virtual hosting syncs this folder to the VPS — this is
+    # the registered propagation channel to the live surface.
+    ("MIDASTOUCH_live/MidastouchAI.ex5", "live/VPS-sync path (operator order; v1.19 defaults inert)"),
 )
-NEVER_TOUCH = ("MIDASTOUCH_parity", "MIDASTOUCH_live")
+NEVER_TOUCH = ("MIDASTOUCH_parity",)
 
 
 def chain_terminal_state(art: Path, now: float | None = None) -> dict:
@@ -118,7 +126,7 @@ def deploy_binaries(scratch_ex5: Path, mql5_experts: Path,
     for rel, why in DEPLOY_TARGETS:
         dst = mql5_experts / rel
         assert not any(rel.startswith(nt) for nt in NEVER_TOUCH), rel
-        bak = dst.with_suffix(".ex5.pre_v118")
+        bak = dst.with_suffix(".ex5.pre_v119")
         if dst.exists():
             bak.write_bytes(dst.read_bytes())
         dst.write_bytes(scratch_ex5.read_bytes())
