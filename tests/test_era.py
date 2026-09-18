@@ -169,8 +169,13 @@ def test_boundary_sits_inside_the_verified_silence_window():
 def test_engine_stamps_carry_the_house_era_format():
     # MIDASTOUCH opens a fresh era at each init (TimeCurrent), not the frozen
     # V75 boundary — but its ERA row must keep the house wire format so
-    # era-aware consumers parse gold ledgers unchanged.
+    # era-aware consumers parse gold ledgers unchanged. v1.09: the era_name
+    # field is the HONEST exec-model note ("bar-model-parity" in BAR parity
+    # passes, "pertick-fills" on the live paper ledger) — era.py reads only
+    # fields 1-3, and tester ledgers are throwaway, so either name parses.
     import re
     src = open("mql5/MIDASTOUCH/MidastouchAI.mq5", encoding="utf-8").read()
-    assert re.search(r'"ERA,%s,%I64d,pertick-fills"', src), (
-        "MidastouchAI must stamp the house ERA row format (OPEN12/CLOSE8 contract)")
+    assert re.search(r'"ERA,%s,%I64d,%s"', src), (
+        "MidastouchAI must stamp the house ERA row wire format (ERA,<ver>,<epoch>,<name>)")
+    assert 'era_note = InpBarModel ? "bar-model-parity" : "pertick-fills"' in src, (
+        "era_name must reflect the actual execution model (honest provenance, v1.09)")

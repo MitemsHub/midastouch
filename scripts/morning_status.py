@@ -35,7 +35,10 @@ Epochs are SECONDS (TimeCurrent).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import glob
+import io
+import json
 import os
 import re
 import subprocess
@@ -334,76 +337,6 @@ def parse_ledger(path: str) -> dict:
     return res
 
 
-def print_floor_zones(inv: list[dict], unhealthy: bool) -> bool:
-    """[4] The floor-mode boundary chain per engine x symbol, computed from
-    live specs + ATR (MT5 python against the running paper terminal) and the
-    ledger veq of every inventoried arm. Fail-closed: no terminal/specs/ATR
-    means a disclosed UNKNOWN, never a guessed boundary."""
-    try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from floor_zone import (ARM_BASE_EQUITY, ARM_ENGINE, SYMBOLS,
-                                compute_boundary, classify, fetch_symbol_data)
-    except Exception as e:
-        print(paint(f"  floor-zone module unavailable: {e}", "y"))
-        return unhealthy
-    engines_needed = sorted({ARM_ENGINE.get(t["name"]) for t in inv
-                             if ARM_ENGINE.get(t["name"])})
-    if not engines_needed:
-        print("  no armed arms inventoried — nothing to bound")
-        return unhealthy
-    sd = None
-    for sym in SYMBOLS:
-        sd = fetch_symbol_data(sym)
-        if sd is not None:
-            break
-    if sd is None:
-        print(paint("  UNKNOWN boundaries: no running terminal reachable for "
-                    "live specs/ATR (start a paper terminal or run during "
-                    "the day window)", "y"))
-        return unhealthy
-    ledgers = {}
-    for t in inv:
-        led = parse_ledger(t["ledger_path"]) if os.path.exists(t["ledger_path"]) else None
-        if led is not None:
-            ledgers[t["name"]] = led["veq_last"]
-    any_row = False
-    for engine in engines_needed:
-        b = compute_boundary(engine, sd.symbol, sd)
-        if b is None:
-            print(paint(f"  {engine}: boundary UNKNOWN (unusable symbol data) — "
-                        "fail-closed", "y"))
-            unhealthy = True
-            continue
-        any_row = True
-        print(f"  {engine} x {b.symbol}: stop {b.stop_distance:,.0f} -> "
-              f"min-lot risk ${b.min_lot_risk:,.2f} | "
-              f"floor onset vEq <= ${b.floor_onset_equity:,.2f} | "
-              f"STRANGULATION <= ${b.strangulation_equity:,.2f}")
-        if b.disclosure:
-            print(paint(f"      note: {b.disclosure}", "y"))
-        # the halt floor is PER-ARM: window-start equity * (1 - 30%)
-        from dataclasses import replace
-        for name, veq in sorted(ledgers.items()):
-            if ARM_ENGINE.get(name) != engine:
-                continue
-            base = ARM_BASE_EQUITY.get(name)
-            bb = replace(b, halt_equity=base * (1.0 - 0.30)
-                         if base is not None else float("nan"))
-            v = classify(veq, bb)
-            vs = f"${veq:,.2f}" if veq is not None else "?"
-            halt_s = (f"${bb.halt_equity:,.2f}"
-                      if bb.halt_equity == bb.halt_equity else "?")
-            style = {"HALTED": "r", "STRANGULATED": "r", "FLOOR_MODE": "y",
-                     "TRADING": "g", "UNKNOWN": "y"}.get(v)
-            line = f"      {name}: veq {vs} -> {v} (halt <= {halt_s})"
-            print(paint(line, style) if style else line)
-            if v in ("HALTED", "STRANGULATED"):
-                unhealthy = True
-    if not any_row:
-        print("  no boundaries computed")
-    return unhealthy
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description="Morning status for the V75 paper A/B")
     ap.add_argument("--days", type=int, default=WINDOW_DAYS, help="journal audit window (days)")
@@ -562,10 +495,6 @@ def main() -> None:
     unhealthy = print_midas_section() or unhealthy
 
     print()
-    print(paint("[4] FLOOR ZONES (min-lot risk vs budget cap, per engine x symbol)", "b"))
-    unhealthy = print_floor_zones(inv, unhealthy)
-
-    print()
     print(paint("Gate reminder (pre-registered):", "b"))
     print(f"  >= {MIN_TRADES} closed arm-A trades with POSITIVE expectancy")
     print("  + tick reconciliation PASS (self-arms at 7d of ledger)")
@@ -622,8 +551,11 @@ def print_midas_section() -> bool:
     problems.extend(parsed["problems"])
     age_h = (datetime.now().timestamp() - os.path.getmtime(ledger_path)) / 3600
     age_s = f"{age_h:.1f}h" if age_h < 72 else f"{age_h / 24:.1f}d"
-    if age_h > 24 * 7:
-        problems.append(f"ledger stale {age_s} (no writes)")
+    # v1.07+ the EA heartbeats the ledger every 15 min (timer-driven, runs
+    # even with the market closed) — a live arm cannot look stale; >1h means
+    # 4+ missed beats.
+    if age_h > 1:
+        problems.append(f"ledger stale {age_s} (heartbeat is 15min on v1.07+)")
     start, live, open_rows = None, None, {}
     try:
         with open(ledger_path) as f:
@@ -660,6 +592,42 @@ def print_midas_section() -> bool:
         print("      exits: " + ", ".join(f"{k}:{v}" for k, v in sorted(reasons.items())))
     else:
         print(f"  closed: 0/{MIN_TRADES} - gate clock starts at first fill")
+    wd_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           ".midas_watchdog_state.json")
+    try:
+        with open(wd_path) as f:
+            wd = json.load(f)
+    except (OSError, ValueError):
+        wd = {}
+    if wd.get("last_alert"):
+        la = wd["last_alert"]
+        print(paint(f"  WATCHDOG ALERT: {la['kind']} at {la['ts']} - {la['detail']}", "r"))
+        problems.append(f"watchdog: {la['kind']} at {la['ts']}")
+    rel = wd.get("relaunches") or {}
+    wd_line = f"  watchdog: {rel.get('day_count', 0)} relaunch(es) today"
+    if wd.get("last_relaunch"):
+        lr = wd["last_relaunch"]
+        wd_line += f" | last {lr.get('ts')} verified={lr.get('verified')}"
+    print(wd_line)
+    # first-fills audit (pre-registered rule compliance; v1.09 era tooling)
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import midas_first_fills_audit as AUD
+        led_path = AUD.discover_ledger()
+        if led_path:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = AUD.run(led_path, AUD.DEFAULT_SESSION, 2.0, AUD.S.DATA_DIR, False)
+            lines = [l for l in buf.getvalue().splitlines() if "summary" in l or "era:" in l]
+            for l in lines:
+                print("  " + l.strip())
+            if rc == 1:
+                print(paint("  AUDIT: RULE VIOLATIONS PRESENT (run scripts/midas_first_fills_audit.py)", "r"))
+                problems.append("first-fills audit: violations present")
+            elif rc == 2:
+                problems.append("first-fills audit: ledger unreadable")
+    except Exception as e:                    # audit failure must not kill status
+        print(paint(f"  first-fills audit unavailable: {e}", "y"))
     for p in problems:
         print(paint(f"  PROBLEM: {p}", "r"))
     return bool(problems)

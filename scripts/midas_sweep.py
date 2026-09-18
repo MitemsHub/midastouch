@@ -181,7 +181,11 @@ class RunResult:
         self.final_equity = START_EQUITY
 
 
-def run_mode(mode: str, t0: int, t1: int, data: dict) -> RunResult:
+def run_mode(mode: str, t0: int, t1: int, data: dict,
+             ses_start: int = 6, ses_end: int = 20) -> RunResult:
+    """Run one mode over [t0, t1]. ses_start/ses_end gate the SIGNAL bar's
+    open hour (defaults = the frozen 06-20 policy); Amendment 4's overlap
+    test passes (12, 16) and nothing else changes."""
     h1, m15, h4 = data["h1"], data["m15"], data["h4"]
     h1_ema, h1_atr = data["h1_ema"], data["h1_atr"]
     h4_ema = data["h4_ema"]
@@ -286,10 +290,11 @@ def run_mode(mode: str, t0: int, t1: int, data: dict) -> RunResult:
         if not take or direction == 0:
             continue
 
-        # 4) session gate (frozen policy: entries only 06:00-20:00 UTC),
+        # 4) session gate (frozen policy default 06:00-20:00 UTC; Amendment
+        #    4 pre-registered overlap test may pass 12-16 — nothing else),
         #    then STASH the signal — it fills at the next bar's open.
         hr = datetime.fromtimestamp(b["time"], tz=timezone.utc).hour
-        if not (6 <= hr < 20):
+        if not (ses_start <= hr < ses_end):
             continue
 
         pending = {"direction": direction, "stop_d": stop_d,
@@ -471,18 +476,39 @@ def selftest() -> int:
     return 0 if ok else 2
 
 
+# ── parity export helpers ──────────────────────────────────────────────────
+def _fmt_px(p: float) -> str:
+    """Exact 5-dp formatting shared by the spread file (EA-side parser relies
+    on plain decimal text; 5dp is lossless for these feeds)."""
+    return f"{p:.5f}"
+
+
+def dump_spread_file(m15: list[dict], path: str) -> int:
+    """Write the recorded per-bar M15 spread series (amendment 3 parity
+    contract): time,spread-dollars per bar, from the same CSV the research
+    engine prices with. The EA's BAR mode reads this file so both engines
+    cost fills/exits identically."""
+    with open(path, "w", newline="") as fh:
+        fh.write("time,spread\n")
+        for b in m15:
+            fh.write(f"{b['time']},{_fmt_px(b['spread'])}\n")
+    return len(m15)
+
+
+def run_window_trades(mode: str, t0: int, t1: int) -> list[dict]:
+    """Trades (full rows, not just R) for one mode over one window — the
+    parity baseline format the driver compares the EA ledger against."""
+    return run_mode(mode, t0, t1, build_data()).trades
+
+
 # ── main ────────────────────────────────────────────────────────────────────
 def iso_to_ts(s: str) -> int:
     return int(datetime.fromisoformat(s).replace(tzinfo=timezone.utc).timestamp())
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--selftest", action="store_true")
-    args = ap.parse_args()
-    if args.selftest:
-        return selftest()
-
+def build_data() -> dict:
+    """Indicator/bars bundle for run_mode — shared by the sweep main and the
+    parity driver so both always compute from the same series, same way."""
     h1 = load_bars(os.path.join(DATA_DIR, "XAUUSD_H1.csv"))
     m15 = load_bars(os.path.join(DATA_DIR, "XAUUSD_M15.csv"))
     h4 = h4_series(h1)
@@ -500,6 +526,38 @@ def main() -> int:
     mc = data["m15_close"]
     for i in range(len(m15)):
         data["m15_bb"][i] = bb_touch(mc, i)
+    return data
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--dump-spreadfile", metavar="PATH",
+                    help="write the recorded M15 spread series for the EA parity mode")
+    ap.add_argument("--window-trades", nargs=3, metavar=("MODE", "T0", "T1"),
+                    help="run one mode over one window, write full trade rows (parity baseline)")
+    args = ap.parse_args()
+    if args.selftest:
+        return selftest()
+
+    if args.dump_spreadfile:
+        m15 = load_bars(os.path.join(DATA_DIR, "XAUUSD_M15.csv"))
+        n = dump_spread_file(m15, args.dump_spreadfile)
+        print(f"spread file: {args.dump_spreadfile} ({n} bars)")
+        return 0
+
+    if args.window_trades:
+        mode, a, bnd = args.window_trades
+        if mode not in MODES:
+            print(f"unknown mode {mode}; one of {MODES}")
+            return 2
+        trades = run_window_trades(mode, iso_to_ts(a), iso_to_ts(bnd))
+        print(f"{mode} {a} -> {bnd}: {len(trades)} trades, "
+              f"sumR {sum(t['r'] for t in trades):+.3f}")
+        print(json.dumps(trades))
+        return 0
+
+    data = build_data()
 
     results: dict = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                      "modes": {}}

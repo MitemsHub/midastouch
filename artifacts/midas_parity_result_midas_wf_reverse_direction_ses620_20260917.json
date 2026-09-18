@@ -1,0 +1,28 @@
+{
+ "ts": "2026-09-17T08:53:48+00:00",
+ "expert": "MITEMSHUB_AI\\MidastouchAI",
+ "tag": "midas_wf_reverse_direction_ses620",
+ "dates": [
+  "2025.09.15",
+  "2026.04.03"
+ ],
+ "symbol": "XAUUSD",
+ "mode": "REVERSE_DIRECTION",
+ "exec_model": "BAR (amendment 3)",
+ "tester_model": "1 (1-minute OHLC)",
+ "regression_fingerprint": "skipped",
+ "python": {
+  "n": 151,
+  "sum_r": 1.474
+ },
+ "ea": {
+  "n": 151,
+  "sum_r": 1.478
+ },
+ "count_match": true,
+ "row_mismatches": 0,
+ "max_abs_dR": 0.0005,
+ "tolerance": 0.01,
+ "verdict": "PASS",
+ "first_mismatch_details": []
+}
