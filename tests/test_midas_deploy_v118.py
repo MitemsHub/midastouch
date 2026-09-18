@@ -91,20 +91,34 @@ def test_deploy_copies_verified_with_backup_and_never_touches_forbidden(
               "MIDASTOUCH_live"):
         (experts / d / "MidastouchAI.ex5").write_bytes(b"OLD")
     scratch = tmp_path / "scratch.ex5"
-    scratch.write_bytes(b"FRESH-V118")
-
+    scratch.write_bytes(b"FRESH-V119")
     logs = []
     res = dep.deploy_binaries(scratch, experts, logs.append)
     assert all(r["ok"] for r in res)
     fresh = scratch.read_bytes()
+
     for rel, _ in dep.DEPLOY_TARGETS:
         p = experts / rel
         assert p.read_bytes() == fresh, f"{rel} must carry the fresh build"
-        assert p.with_suffix(".ex5.pre_v118").read_bytes() == b"OLD"
-    # the forbidden paths are byte-identical to before
+        assert p.with_suffix(".ex5.pre_v119").read_bytes() == b"OLD"
+    # the forbidden path is byte-identical to before (parity shadow only —
+    # the live/VPS-sync path joined DEPLOY_TARGETS on the operator's order;
+    # v1.19 defaults are behavior-identical and the staged presets are
+    # reading-gated, so the binary swap is inert without a preset splice)
     assert (experts / "MIDASTOUCH_parity" / "MidastouchAI.ex5").read_bytes() == b"OLD"
-    assert (experts / "MIDASTOUCH_live" / "MidastouchAI.ex5").read_bytes() == b"OLD"
     assert {l["target"] for l in logs} == {rel for rel, _ in dep.DEPLOY_TARGETS}
+
+
+def test_live_sync_path_in_deploy_targets_by_operator_order():
+    """The operator's 2026-09-18 order moved the live/VPS-sync binary into
+    the deploy set. Pin the new shape: the live path IS deployed, the
+    parity shadow is NEVER touched, and the order's safety rationale rides
+    the source."""
+    targets = {rel for rel, _ in dep.DEPLOY_TARGETS}
+    assert "MIDASTOUCH_live/MidastouchAI.ex5" in targets
+    assert dep.NEVER_TOUCH == ("MIDASTOUCH_parity",)
+    src = (dep.REPO / "scripts" / "midas_deploy_v118.py").read_text(encoding="utf-8")
+    assert "then deploy the binary" in src, "operator order must be cited in-source"
 
 
 # --- verify_arms ----------------------------------------------------------------
