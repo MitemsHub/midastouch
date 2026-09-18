@@ -1,0 +1,10 @@
+{
+ "fetched_utc": "2026-09-18T19:35:30+00:00",
+ "symbol": "XAUUSDmicro",
+ "timeframe": "M5",
+ "source": "MT5 terminal API (broker history)",
+ "rows": 50000,
+ "first_utc": "2026-01-06T01:50:00+00:00",
+ "last_utc": "2026-09-18T19:35:00+00:00",
+ "terminal_server": "MetaTrader 5 Terminal"
+}
