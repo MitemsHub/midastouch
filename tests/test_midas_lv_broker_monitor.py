@@ -198,3 +198,40 @@ def test_algotrading_problem_does_not_suppress_trade_attribution():
     assert len(state["positions"]) == 1
     assert len(state["deals"]) == 1
     assert any("ALGOTRADING_OFF" in p for p in state["problems"])
+
+
+# --- era-awareness (2026-09-18 12:46Z VPS migration) ---------------------------
+
+def test_vps_era_local_on_is_the_hazard():
+    """During VPS hosting the LV EA executes remotely with its own switch;
+    a LOCAL AutoTrading-ON instance races the same signal — the 18:45:01Z
+    netting double-entry hazard (three retcode=10027 rejects prevented a
+    merged 0.2-lot position)."""
+    term = SimpleNamespace(trade_allowed=True)
+    state = mon.build_state(_acct(), [], [], {}, now_epoch=1.0,
+                            terminal=term, vps_era=True)
+    assert any("LOCAL_ALGOTRADING_ON_DURING_VPS" in p
+               for p in state["problems"])
+
+
+def test_vps_era_local_off_is_registered_safe():
+    term = SimpleNamespace(trade_allowed=False)
+    state = mon.build_state(_acct(), [], [], {}, now_epoch=1.0,
+                            terminal=term, vps_era=True)
+    assert state["problems"] == [], "OFF is the safe state in the VPS era"
+    assert state["algo_trading"] is False
+
+
+def test_pre_vps_era_law_unchanged():
+    """vps_era=False preserves the original sentinel exactly; vps_era=None
+    (unknown) alerts only on the OFF hazard and never on ON."""
+    off = SimpleNamespace(trade_allowed=False)
+    on = SimpleNamespace(trade_allowed=True)
+    assert any("ALGOTRADING_OFF" in p for p in mon.build_state(
+        _acct(), [], [], {}, 1.0, terminal=off, vps_era=False)["problems"])
+    assert mon.build_state(_acct(), [], [], {}, 1.0,
+                           terminal=on, vps_era=False)["problems"] == []
+    assert any("ALGOTRADING_OFF" in p for p in mon.build_state(
+        _acct(), [], [], {}, 1.0, terminal=off, vps_era=None)["problems"])
+    assert mon.build_state(_acct(), [], [], {}, 1.0,
+                           terminal=on, vps_era=None)["problems"] == []
