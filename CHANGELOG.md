@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-09-18 — P6 consistent-daily-income study executed (register §2b)
+
+- Pre-registered daily-consistency study (M5/M15 × TP {1,1.5,1.8,2} × k
+  {1,1.5,2}) across the certified M15 corpora and a fresh 50,000-bar broker
+  M5 fetch (provenance artifact). 36 configs; ranking fixed before results;
+  OOS law added before any OOS number was seen (Jan–Mar in-sample,
+  Apr–Sep OOS, same gates).
+- Winner: M5 k=2.0 TP=1.5R — 57.2% positive days, median $6.41/day on the
+  $5k study book, pf 1.368; OOS survivor (pf 1.150, 52.9% positive days).
+  10 of 12 M5 configs failed OOS — the law did its job.
+- M15 cross-check: on the current config the median day declines
+  monotonically with TP length (1.0R +$4.29, 1.5R +$2.91, 1.8R −$2.48,
+  2.0R live −$2.50) — every shortened TP beats the live shape; the
+  amendment targets 1.5R because it alone of {1.5, 1.8} survived the M5
+  OOS gate and 1.0R missed it (pf 1.138 < 1.15).
+- Amendment queued behind the 2026-10-01 reading: M5-entry LV variant (new
+  code, full §1 parity) + interim TP 2.0→1.5 SIA item. No live/paper arm
+  changed tonight from this result.
+- New: scripts/midas_p6_income_study.py (+ its test pins), scripts/midas_fetch_m5.py,
+  artifacts/midas_p6_income_study_20260918.json, artifacts/midas_p6_m5_fetch.json,
+  data/forex/xauusd/XAUUSDmicro_M5.csv.
+
 ## 2026-09-18 — VPS migration law + chain-gated v1.18 paper deploy
 
 - First live trade: BUY 0.10 @ 4381.09 (18:45:01Z) executed on the VPS
