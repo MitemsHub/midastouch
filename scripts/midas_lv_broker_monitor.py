@@ -40,9 +40,19 @@ DEAL_LOOKBACK_H = 24          # deals window per poll (dedup by ticket)
 FRESH_S = 300                 # [3b] treats a snapshot older than this as stale
 
 
-def build_state(acct, positions, deals, prev: dict, now_epoch: float) -> dict:
+def build_state(acct, positions, deals, prev: dict, now_epoch: float,
+                terminal=None) -> dict:
     """Pure snapshot builder. acct/positions/deals are attribute-bearing
     objects (mt5 types or test namespaces); prev is the prior snapshot.
+    terminal is mt5.terminal_info() (or a test namespace) when available.
+
+    Go-live sentinel (2026-09-18): terminal.trade_allowed is the global
+    AutoTrading switch. When it is False the terminal refuses EVERY EA
+    order silently — no journal line, no order error, nothing. The LV
+    stand-down of 2026-09-18 08:36→17:39 UTC was exactly this. So the
+    switch state is recorded on every snapshot (algo_trading) and a
+    False is surfaced as a problem entry that morning status [3b] must
+    show. None (API gave no terminal info) is recorded as None.
 
     Attribution rules (pinned by tests):
       * positions/deals enter ONLY with magic == LV_MAGIC;
@@ -101,17 +111,28 @@ def build_state(acct, positions, deals, prev: dict, now_epoch: float) -> dict:
     if first_fill is None and any(d["entry"] == 0 for d in deals_ring):
         first_fill = min(d["epoch"] for d in deals_ring if d["entry"] == 0)
 
+    algo = None
+    problems = []
+    if terminal is not None:
+        algo = bool(getattr(terminal, "trade_allowed", None))
+        if algo is False:
+            problems.append(
+                "ALGOTRADING_OFF: terminal AutoTrading switch is disabled — "
+                "MT5 refuses every EA order silently (2026-09-18 08:36-17:39Z "
+                "stand-down class). Re-enable the toolbar AutoTrading button.")
+
     return {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "ts_epoch": now_epoch,
             "account": int(getattr(acct, "login", 0)),
             "equity": float(getattr(acct, "equity", 0.0)),
             "balance": float(getattr(acct, "balance", 0.0)),
             "margin": float(getattr(acct, "margin", 0.0)),
+            "algo_trading": algo,
             "positions": positions_out,
             "deals": deals_ring,
             "balance_ops": balops,
             "first_fill_seen": first_fill,
-            "problems": []}
+            "problems": problems}
 
 
 def poll_once() -> dict:
@@ -136,12 +157,15 @@ def poll_once() -> dict:
         return state
     try:
         acct = mt5.account_info()
+        _ti = getattr(mt5, "terminal_info", None)
+        terminal = _ti() if callable(_ti) else None
         positions = mt5.positions_get(symbol=SYMBOL) or []
         since = datetime.fromtimestamp(
             now_epoch - DEAL_LOOKBACK_H * 3600, tz=timezone.utc)
         until = datetime.fromtimestamp(now_epoch + 300, tz=timezone.utc)
         deals = mt5.history_deals_get(since, until) or []
-        state = build_state(acct, positions, deals, prev, now_epoch)
+        state = build_state(acct, positions, deals, prev, now_epoch,
+                            terminal=terminal)
         _save(state)
         return state
     finally:
@@ -164,12 +188,14 @@ def main() -> int:
         while True:
             s = poll_once()
             print(json.dumps({"ts": s["ts"], "equity": s.get("equity"),
+                              "algo_trading": s.get("algo_trading"),
                               "positions": len(s.get("positions", [])),
                               "deals_new": len(s.get("deals", [])),
                               "problems": s.get("problems")}), flush=True)
             time.sleep(interval)
     s = poll_once()
     print(json.dumps({"ts": s["ts"], "equity": s.get("equity"),
+                      "algo_trading": s.get("algo_trading"),
                       "positions": len(s.get("positions", [])),
                       "problems": s.get("problems")}))
     return 0

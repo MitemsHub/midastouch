@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-18 — AutoTrading silent stand-down found and closed (LV live)
+
+- Found: terminal global AutoTrading OFF 08:40→17:39 UTC — MT5 silently refuses
+  every EA order in this state; paper arms unaffected, so nothing else alarmed.
+- Fixed: switch restored ON (API-verified); `midas_lv_broker_monitor.py` now
+  records `algo_trading` every poll and raises `ALGOTRADING_OFF` as a problem;
+  morning status [3b] prints AutoTrading ON/OFF in the LV broker view header.
+- Tests: 4 new sentinel pins (off/on/missing-API/attribution-uncorrupted);
+  monitor+view suites 24/24, morning-status suite 16/16.
+
 ## [LV trigger amendment CORRECTED in-place the same evening: k=1.0/RSI 75-25 by TOTAL OOS RETURN (+21.4R, pf 1.29/1.31 dual-corpus), superseding the 17:30 k=3.0 pass] - 2026-09-18
 
 Self-audit before the report caught two defects in my own 17:30 adjudication: a decimal error ("~1/1.6 days" — real answer ~1/18 days) and the wrong objective (per-trade expectancy instead of total OOS return). Re-ranked the full ORIGINAL k×RSI grid on total OOS return across both independent corpora: k=1.0/75-25 wins decisively — 152 OOS trades, +21.4R, pf 1.287 (repo) / 1.311 (fresh broker), ~1 fill/day, dd 7.5R, recent-30d positive where the frozen baseline was -3.7R. k=3.0 keeps the best per-trade quality (pf 7.2 OOS) but totals only +7.3R OOS at ~1 fill/18d — total-return inferior; k=2.5 OOS-dead; LONG_ONLY OOS-fragile. Deployed 17:38-17:40 UTC via the registered stop->splice->relaunch (chart byte-verified 31/31, backup kept, paper positions restored, LV flat throughout). The 17:30 chart state never traded. Test pin, register, and preset notes all corrected to the same numbers; M1 control unchanged.
