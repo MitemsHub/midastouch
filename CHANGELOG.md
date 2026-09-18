@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-09-18 — VPS migration law + chain-gated v1.18 paper deploy
+
+- First live trade: BUY 0.10 @ 4381.09 (18:45:01Z) executed on the VPS
+  (surface migrated 12:46Z); broker monitor caught it (first_fill_seen,
+  equity $40.36). Local 10027 rejects were the migration-disabled local
+  instance refusing a double-entry race on the netting account.
+- Era law: local AutoTrading OFF during VPS hosting (ON = double-entry
+  hazard); sentinel era-aware both directions; monitor loop restarted on
+  the era-aware build.
+- v1.18 paper deploy: scripts/midas_deploy_v118.py armed detached — waits
+  for v17-cert-complete, then gates → stop → compile → md5-verified copies
+  (never parity shadow / live path) → relaunch → ERA18+diag-nofill verify.
+  LV deploy DEFERRED to the VPS re-sync. 8 hermetic pins + 3 era pins.
+
 ## 2026-09-18 — v1.18 NOFILL diagnostics + external-review adjudication
 
 - Every veto in the PERTICK signal path now logs its reason (honest HUD

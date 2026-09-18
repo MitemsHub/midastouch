@@ -41,18 +41,25 @@ FRESH_S = 300                 # [3b] treats a snapshot older than this as stale
 
 
 def build_state(acct, positions, deals, prev: dict, now_epoch: float,
-                terminal=None) -> dict:
+                terminal=None, vps_era: bool | None = None) -> dict:
     """Pure snapshot builder. acct/positions/deals are attribute-bearing
     objects (mt5 types or test namespaces); prev is the prior snapshot.
     terminal is mt5.terminal_info() (or a test namespace) when available.
+    vps_era: whether MT5 Virtual Hosting hosts the LV surface (None =
+    unknown → no era-conditional alerting).
 
-    Go-live sentinel (2026-09-18): terminal.trade_allowed is the global
-    AutoTrading switch. When it is False the terminal refuses EVERY EA
-    order silently — no journal line, no order error, nothing. The LV
-    stand-down of 2026-09-18 08:36→17:39 UTC was exactly this. So the
-    switch state is recorded on every snapshot (algo_trading) and a
-    False is surfaced as a problem entry that morning status [3b] must
-    show. None (API gave no terminal info) is recorded as None.
+    AutoTrading sentinel (2026-09-18, era-aware after the migration):
+    terminal.trade_allowed is the LOCAL terminal's global AutoTrading
+    switch, and its safe state depends on the era:
+      * pre-VPS era: False silently refuses every EA order (the 08:36→17:39Z
+        stand-down) → ALGOTRADING_OFF problem;
+      * VPS era (2026-09-18 12:46Z migration): the LV EA executes on the
+        VPS with its own switch, and a LOCAL switch left ON races the SAME
+        signal — the 18:45:01Z netting double-entry hazard (the three
+        retcode=10027 rejects were the only thing that prevented a merged
+        0.2-lot position). True is the hazard → LOCAL_ALGOTRADING_ON_
+        DURING_VPS problem; False is the registered-safe state.
+    None (API gave no terminal info) is recorded as None, no alert.
 
     Attribution rules (pinned by tests):
       * positions/deals enter ONLY with magic == LV_MAGIC;
@@ -115,11 +122,17 @@ def build_state(acct, positions, deals, prev: dict, now_epoch: float,
     problems = []
     if terminal is not None:
         algo = bool(getattr(terminal, "trade_allowed", None))
-        if algo is False:
+        if algo is False and not vps_era:
             problems.append(
                 "ALGOTRADING_OFF: terminal AutoTrading switch is disabled — "
                 "MT5 refuses every EA order silently (2026-09-18 08:36-17:39Z "
                 "stand-down class). Re-enable the toolbar AutoTrading button.")
+        elif algo is True and vps_era:
+            problems.append(
+                "LOCAL_ALGOTRADING_ON_DURING_VPS: the LV surface executes on "
+                "the VPS; a local AutoTrading-ON instance races the same "
+                "signal (2026-09-18 18:45Z netting double-entry hazard). "
+                "Disable the local toolbar AutoTrading button.")
 
     return {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "ts_epoch": now_epoch,
@@ -164,8 +177,13 @@ def poll_once() -> dict:
             now_epoch - DEAL_LOOKBACK_H * 3600, tz=timezone.utc)
         until = datetime.fromtimestamp(now_epoch + 300, tz=timezone.utc)
         deals = mt5.history_deals_get(since, until) or []
+        try:
+            from midas_watchdog import vps_hosting_active
+            vps_era = bool(vps_hosting_active())
+        except Exception:
+            vps_era = None
         state = build_state(acct, positions, deals, prev, now_epoch,
-                            terminal=terminal)
+                            terminal=terminal, vps_era=vps_era)
         _save(state)
         return state
     finally:

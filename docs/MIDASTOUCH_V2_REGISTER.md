@@ -95,6 +95,45 @@ a blind spot in the original evidence ring, now closed:
   include `algo_trading: true` from broker evidence. Any [3b] with
   `AutoTrading OFF` or `??` is an actionable alert, not a footnote.
 
+**VPS MIGRATION + DEPLOY v1.18 (2026-09-18 ~19:05 UTC).** Three facts
+that restate the day's operating model, then the deploy:
+
+- **The LV surface migrated to MT5 Virtual Hosting at 12:46:27Z**
+  (journal: "automated trading disabled after migration and enabled on
+  virtual"; artifacts/midas_vps_hosting.json). The 18:45:01Z fill — the
+  program's first live trade, BUY 0.10 @ 4381.09, SL 4344.73 / TP 4453.43
+  (exact 2R geometry) — executed ON THE VPS with its own (enabled)
+  AutoTrading. The local ledger's silence is by design (VPS era).
+- **The local retcode=10027 rejects at 18:45 were protective, not
+  causal:** the dormant local LV instance raced the same signal; the
+  migration-disabled local switch refused it — the ONLY thing preventing
+  a netting double-entry (margin_mode=2: a second BUY would have merged
+  into 0.2 lots). Corollary, registered as law: IN THE VPS ERA THE LOCAL
+  TERMINAL'S AUTOTRADING SWITCH MUST BE OFF; ON is the double-entry
+  hazard. (The pre-migration 08:36-17:39Z stand-down remains valid for
+  the pre-VPS era; the sentinel is now era-aware in both directions —
+  ALGOTRADING_OFF pre-VPS, LOCAL_ALGOTRADING_ON_DURING_VPS after the
+  migration — pinned by tests; the running monitor was restarted on the
+  era-aware build.)
+- **Live evidence flow is healthy:** the broker monitor caught the fill
+  (first_fill_seen=18:45:01Z, equity $40.36 incl. unrealized P/L) —
+  the VPS-era monitoring built this morning did its job on its first
+  real event.
+
+**DEPLOY v1.18 (paper arms + LV):** the paper deploy is executed by
+`scripts/midas_deploy_v118.py` (launched detached, --watch): it waits for
+the v1.17 cert chain's terminal `v17-cert-complete` event, then runs the
+registered gates (all paper books flat; terminal stop; fresh compile 0/0;
+md5-verified copies) and copies the fresh binary to exactly the paper
+charts' expert path (Experts/MITEMSHUB_AI/, the pre-purge path) and the
+canonical Experts/MIDASTOUCH/ — NEVER the parity shadow (the chain owns
+it; a v1.18 shadow refresh is a separate registered task) nor
+Experts/MIDASTOUCH_live (dormant in the VPS era). Post-relaunch each
+paper ledger must carry ERA `MIDAS1.18,...+diag-nofill` and fresh EQ
+heartbeats to record deploy-complete. The LV arm receives v1.18 ONLY via
+the VPS surface's next re-sync (recorded DEFERRED — no local swap of a
+live-money binary that the terminal cannot restart).
+
 **BUILD v1.18 — external-review adjudication + NOFILL diagnostics
 (2026-09-18 ~19:10 UTC, telemetry-only/never-abort class).** An external
 review of MidastouchAI.mq5 proposed three configuration changes and two code
