@@ -20,6 +20,12 @@ def _hermetic_lv_broker_snapshot(monkeypatch, tmp_path):
     snapshot (artifacts/midas_lv_broker_state.json) must never leak into a
     test run. Point morning_status at a nonexistent temp path unless a test
     writes its own fixture file there."""
+    import sys
+
+    scripts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               os.pardir, "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
     import morning_status as _ms
 
     monkeypatch.setattr(

@@ -1,5 +1,10 @@
 # MIDASTOUCH V2 REGISTER
 
+**LV TRIGGER-FREQUENCY AMENDMENT — SUPERSEDED 18:05 UTC by the corrected adjudication below.** The 17:30 pass shipped k=3.0/75-25 on a per-trade-expectancy ranking that (a) contained a decimal error in its frequency line and (b) optimized the wrong metric. Corrected in place the same evening; the 17:30 chart state never traded (zero fills between 17:30 and 17:38) and is preserved in the register history and chart backups (chart05.chr.bak_20260918_173001).
+
+**LV TRIGGER-FREQUENCY AMENDMENT, CORRECTED (2026-09-18 18:05 UTC — executed live).**
+Metric corrected: adjudication on **TOTAL OOS RETURN** (what the account earns), not per-trade expectancy; full ORIGINAL k×RSI grid re-run on both corpora (repo certified 775d + fresh broker 453d). Result: **k=1.0 / RSI 75-25 ORIGINAL — 152 OOS trades, +21.4R total, pf 1.287 OOS / 1.311 fresh-broker (edge holds on BOTH independent corpora), ~1 fill/day, OOS dd 7.5R; recent-30d +1.3R where the frozen 2.0/70-30 lost -3.7R.** k=3.0/75-25 is per-trade-king (pf 7.2 OOS) but total-return inferior (+7.3R OOS, ~1 fill/18d). Loosening to k=1.0 buys ~28x the OLD frequency estimate at ~equal per-trade expectancy (+0.117 vs +0.138 full-corpus) — the rare-quality pattern holds only WITHIN k>=2.5, and k=2.5 itself is OOS-dead (exp ~0). **Executed 17:38-17:40 UTC through the registered stop->splice->relaunch sequence** (second splice; preset parser-verified 31 keys unique; chart byte-verified 31/31, backup chart05.chr.bak_20260918_173855; all five EAs re-attached with fresh heartbeats; the two open paper positions restored; LV flat throughout — zero live exposure). M1 keeps the frozen 2.0/70-30 §13 baseline as paper control; divergence pinned both directions in tests/test_midas_golive_grammar.py. The 2026-10-01 reading judges LV on this corrected geometry. Research artifact: artifacts/midas_variant_research_20260918.json + the 18:05 total-return grid (repo + fresh corpora).
+
 **GO-LIVE EXECUTION BLOCK (2026-09-18 ~08:40 UTC — the first real-money attach).**
 Operator instruction: "we must take trades, the EA must be active."
 Executed through the full registered chain, no step skipped:

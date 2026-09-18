@@ -1,0 +1,68 @@
+; MIDASTOUCH — LIVE arm preset (MidastouchAI_LV_gold.set)
+; ============================================================================
+; GO-LIVE 2026-09-18: the first real-money attach of the MIDASTOUCH gold EA.
+; Operator instruction 2026-09-18: "we must take trades, the EA must be active."
+; Account 140778269 (REAL, DerivSVG-Server-03), terminal 49E0, chart
+; Default/chart05, symbol XAUUSDmicro, build MIDAS1.16
+; (Experts\MIDASTOUCH_live\MidastouchAI.ex5, sha256 \a4bf5e30…).
+;
+; Base: MidastouchAI_M1_gold.set — the certified §13 forward pin set, every
+; strategy/gate/risk value IDENTICAL to the paper arms (mode 0 ORIGINAL,
+; session 06-20 UTC, SL 2xATR(H1), TP 2R, 720-min timeout, risk 1%,
+; InpMaxRiskPct 15 (amendment 6), spread cap 1.5%-of-stop, 3% daily breaker,
+; Friday cutoff/flat 20:00 UTC). The ONLY deltas are identity + execution:
+;   InpArmTag=LV      (distinct ledger/telemetry files; joins the [3b] portfolio)
+;   InpMagic=7801601  (dedicated magic; magic-isolated SelectOurPosition scope)
+;   InpLiveExecution=true (the sole execution switch; PERTICK, not BAR)
+;   InpPaperEquity kept (inert in live; keeps the file spliceable both ways)
+; Symbol: XAUUSDmicro (charter: gold only; geometry measured on the arms'
+; paper rows: min-lot 0.10 risk $2.97-$4.55 = 6-9% of $50.22 — inside the 15% cap)
+InpMagic=7801601
+InpArmTag=LV
+InpMode=0
+InpMacroEmaPeriod=20
+InpBBPeriod=20
+; InpBBDev / InpRSI* AMENDED 2026-09-18 (register: LV trigger-frequency
+; amendment, corrected adjudication 18:05 UTC). First pass ranked configs by
+; per-trade expectancy and shipped k=3.0/75-25; re-adjudication on TOTAL OOS
+; RETURN (the metric the account actually lives on) flips the verdict:
+;   k=1.0/75-25 ORIGINAL: 152 OOS trades, +21.4R total, pf 1.287 OOS /
+;   1.311 fresh-broker (edge holds on BOTH independent corpora), ~1 fill/day,
+;   OOS dd 7.5R; recent-30d +1.3R where k=2.0 lost -3.7R.
+;   k=3.0/75-25: highest per-trade quality (pf 7.2 OOS) but only +7.3R total
+;   and ~1 fill/18d — total-return inferior. k=2.5 (exp ~0) and LONG_ONLY
+;   k=1.5-2.0 (edge vanishes OOS) remain refuted. The frozen 2.0/70-30
+;   baseline: +8.3R OOS, worst recent-30d of the viable cells.
+; Winner: k=1.0, RSI 75/25. M1 keeps the frozen baseline for the reading.
+InpBBDev=1.0
+InpRSIPeriod=14
+InpRSIUpper=75.0
+InpRSILower=25.0
+InpAtrPeriod=14
+InpSlAtrMult=2.0
+InpTpMult=2.0
+InpTimeoutMinutes=720
+InpSessionStartHour=6
+InpSessionEndHour=20
+InpSpreadCapPctStop=1.5
+InpFridayCutoffHour=20
+InpUseNewsFilter=false
+InpStaleMinutes=30
+InpRiskPercent=1.0
+InpMaxRiskPct=15.0
+InpLiveExecution=true
+InpPaperEquity=50.0
+InpDeviationPoints=20
+InpOrderRetries=3
+InpFridayFlatHour=20
+; InpDailyLossCapPct AMENDED 2026-09-18 (register: live-arm daily breaker):
+; 15.0 for the LIVE arm only - at min-lot 6-9% risk the paper default 3.0
+; would let a single stop-out stand the arm down for the UTC day ("one
+; loss is a day"). 15% admits the first full loss, vetoes the second
+; consecutive full-loss day (the review's -45% compounding pattern).
+; Paper arms keep 3.0.
+InpDailyLossCapPct=15.0
+InpBarModel=false
+InpSpreadFile=MIDASTOUCH_spread_M15.csv
+InpWindowStart=0
+InpWindowEnd=0

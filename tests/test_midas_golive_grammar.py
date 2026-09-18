@@ -257,6 +257,17 @@ def test_live_preset_is_dedicated_and_certified_shape() -> None:
     # would let one min-lot stop-out stand the live arm down for the UTC day);
     # the paper arms keep 3.0 (asserted below).
     assert vals["InpDailyLossCapPct"] == "15.0" and vals["InpFridayFlatHour"] == "20"
+    # 2026-09-18 trigger-frequency amendment, CORRECTED adjudication 18:05 UTC.
+    # First pass ranked configs by per-trade expectancy and shipped k=3.0/75-25;
+    # re-adjudication on TOTAL OOS RETURN flipped the verdict: k=1.0/75-25
+    # ORIGINAL — 152 OOS trades, +21.4R total, pf 1.287 OOS / 1.311 fresh-broker
+    # (edge holds on BOTH independent corpora), ~1 fill/day, OOS dd 7.5R.
+    # k=3.0/75-25: highest per-trade quality (pf 7.2 OOS) but only +7.3R total
+    # and ~1 fill/18d — total-return inferior. M1 keeps the frozen §13
+    # baseline 2.0/70-30 as the paper control — the divergence is the
+    # amendment, not drift.
+    assert vals["InpBBDev"] == "1.0"
+    assert vals["InpRSIUpper"] == "75.0" and vals["InpRSILower"] == "25.0"
     # every strategy/gate value equals the M1 paper arm's (single-strategy law)
     m1 = {}
     for line in (REPO / "mql5" / "MIDASTOUCH" / "MidastouchAI_M1_gold.set").read_text().splitlines():
@@ -270,6 +281,10 @@ def test_live_preset_is_dedicated_and_certified_shape() -> None:
         assert vals[k] == m1[k], k
     # the one deliberate divergence (live-arm breaker amendment):
     assert vals["InpDailyLossCapPct"] != m1["InpDailyLossCapPct"]
+    # ...and the trigger-frequency amendment (M1 keeps the frozen §13 baseline
+    # 2.0/70-30 as paper control; LV runs the corrected winner 1.0/75-25):
+    assert m1["InpBBDev"] == "2.0"
+    assert m1["InpRSIUpper"] == "70.0" and m1["InpRSILower"] == "30.0"
     assert m1["InpDailyLossCapPct"] == "3.0"   # paper arms stay certified
     for arm in ("M1t", "M1s", "M1m"):
         t = (REPO / "mql5" / "MIDASTOUCH" / f"MidastouchAI_{arm}_gold.set").read_text()
