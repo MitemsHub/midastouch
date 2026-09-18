@@ -1167,11 +1167,15 @@ def _print_lv_broker_view(state_path: str | None = None) -> None:
         return
     age_s = time.time() - float(s.get("ts_epoch", 0))
     stale = age_s > 300
+    algo = s.get("algo_trading")
+    algo_txt = ("AutoTrading ON" if algo is True else
+                "AutoTrading OFF" if algo is False else "AutoTrading ??")
     head = (f"  [LV broker view] account {s.get('account')} | equity "
             f"${s.get('equity', 0):.2f} | balance ${s.get('balance', 0):.2f} | "
-            f"snapshot {age_s/60:.0f} min old")
+            f"{algo_txt} | snapshot {age_s/60:.0f} min old")
+    color = "r" if (stale or algo is False) else ("y" if stale else "n")
     print(paint(head + ("  (STALE — run scripts/midas_lv_broker_monitor.py)"
-                        if stale else ""), "y" if stale else "n"))
+                        if stale else ""), color))
     if s.get("problems"):
         print(paint(f"    problems: {'; '.join(s['problems'][-2:])}", "y"))
     for p in s.get("positions", []):

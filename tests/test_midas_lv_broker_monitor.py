@@ -11,7 +11,11 @@ surface is the MT5 API. The monitor must:
     the 2026-09-18 12:25:59Z −$10.14 withdrawal is account evidence);
   * dedup deals by ticket across polls (no re-logged deals);
   * set first_fill_seen on the first ENTRY deal and never unset it;
-  * never write to the LV ledger (the EA owns that file).
+  * never write to the LV ledger (the EA owns that file);
+  * record the terminal's global AutoTrading switch (algo_trading) and
+    raise a problem entry when it is False — the 2026-09-18 08:36→17:39Z
+    live stand-down was this exact silent condition (MT5 refuses every
+    EA order with no journal line while the switch is off).
 """
 from __future__ import annotations
 
@@ -158,3 +162,39 @@ def test_poll_keeps_prior_snapshot_on_init_failure(tmp_path: Path, monkeypatch):
         state = mon.poll_once()
     assert state["equity"] == 40.08
     assert any("initialize failed" in p for p in state["problems"])
+
+
+# ── AutoTrading sentinel (2026-09-18 go-live stand-down) ───────────────────
+
+def test_algotrading_off_raises_problem_and_is_recorded():
+    term = SimpleNamespace(trade_allowed=False)
+    state = mon.build_state(_acct(), [], [], {}, now_epoch=1.0, terminal=term)
+    assert state["algo_trading"] is False
+    assert any("ALGOTRADING_OFF" in p for p in state["problems"])
+
+
+def test_algotrading_on_is_clean():
+    term = SimpleNamespace(trade_allowed=True)
+    state = mon.build_state(_acct(), [], [], {}, now_epoch=1.0, terminal=term)
+    assert state["algo_trading"] is True
+    assert state["problems"] == []
+
+
+def test_algotrading_none_when_terminal_info_missing():
+    """No terminal info must never fabricate a False alarm — recorded as
+    None, no sentinel problem (account/broker evidence is still valid)."""
+    state = mon.build_state(_acct(), [], [], {}, now_epoch=1.0, terminal=None)
+    assert state["algo_trading"] is None
+    assert not any("ALGOTRADING" in p for p in state["problems"])
+
+
+def test_algotrading_problem_does_not_suppress_trade_attribution():
+    """A switched-off terminal is still fully audited: LV positions and
+    deals flow through the normal filters on the same snapshot."""
+    term = SimpleNamespace(trade_allowed=False)
+    state = mon.build_state(
+        _acct(), [_pos(3, LV)], [_deal(11, LV, entry=0)], {},
+        now_epoch=1.0, terminal=term)
+    assert len(state["positions"]) == 1
+    assert len(state["deals"]) == 1
+    assert any("ALGOTRADING_OFF" in p for p in state["problems"])

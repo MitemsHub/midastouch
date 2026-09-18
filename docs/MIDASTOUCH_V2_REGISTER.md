@@ -72,6 +72,29 @@ Executed through the full registered chain, no step skipped:
   flat-gated restarts, [3b] drift guards with deferred-pin tolerance (the LV
   chart carries all 31 pins — no deferrals apply).
 
+**INCIDENT + FIX — the silent AutoTrading stand-down (2026-09-18, discovered
+17:45 UTC, closed same hour).** Between ~08:40 UTC (attach; AutoTrading verified ON
+at boot, per this block) and 17:39 UTC the terminal's **global AutoTrading switch
+was switched OFF** — by hand or by focus accident at some point during the day.
+Effect: MT5 refuses every EA order *silently* — no journal line, no order error,
+no ledger trace — while the paper arms kept trading (virtual fills need no
+switch). Result: 9 hours where even a firing ORIGINAL signal (08:15 UTC; the
+live trigger was still k=2.0 then) could not have produced an order. The
+monitoring apparatus watched every file and the account but never the switch —
+a blind spot in the original evidence ring, now closed:
+
+- **Terminal state restored:** `trade_allowed False → True` at 17:47 UTC
+  (verified via `terminal_info()` through the MT5 API immediately after the
+  programmatic toggle; account/broker permissions were always True).
+- **Monitor sentinel (permanent):** `midas_lv_broker_monitor.py` now records
+  `algo_trading` (True/False/None) on every snapshot and emits an
+  `ALGOTRADING_OFF` problem entry when False; the [3b] LV broker view prints
+  `AutoTrading ON/OFF/??` in the header (red when OFF) and surfaces the
+  problem line. Pinned by 4 new tests in `tests/test_midas_lv_broker_monitor.py`.
+- **Standing law:** a go-live-era morning check is INCOMPLETE if it does not
+  include `algo_trading: true` from broker evidence. Any [3b] with
+  `AutoTrading OFF` or `??` is an actionable alert, not a footnote.
+
 **AMENDMENT — live-arm daily breaker (2026-09-18, review-frozen, effective
 immediately).** The operator's structural review flagged the one flaw in
 running the paper default on the live arm: **`InpDailyLossCapPct=3.0` lets a
