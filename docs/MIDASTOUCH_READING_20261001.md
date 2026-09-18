@@ -92,4 +92,8 @@ would be honest evidence, recorded as such.
   rejected claims stay rejected).
 - It does not start the P-series (§2b) — that queue opens only after
   R6/R7b/R8/R9 are all adjudicated, and R7b/R8/R9 are REGISTERED, not
-  built. One amendment at a time remains the law.
+  built. One amendment at a time remains the law. This includes P5 (the
+  adaptive trigger-threshold variant answering the operator's
+  higher-frequency directive): its engine spec and pins exist in-tree,
+  but nothing deploys and no arm changes variant before its place in the
+  queue.

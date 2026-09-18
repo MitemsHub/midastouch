@@ -34,7 +34,7 @@
 //| passing forward gate, in its own reviewed build.                 |
 //+------------------------------------------------------------------+
 #property copyright "MIDASTOUCH"
-#property version   "1.16"   // v1.16: R6 fail-closed preconditions (news-filter input, gold-only charter)
+#property version   "1.17"   // v1.17: P5 telemetry columns on CLOSE rows (thr, thr_era_id, signal density) — never-abort class, behavior on certified paths unchanged
 // Tester agents wipe their Files sandbox at pass start: this property makes
 // the tester copy the recorded-spread series from <data>\MQL5\Files into the
 // agent for every BAR-mode pass (name must be the literal staged file).
@@ -155,6 +155,12 @@ datetime g_lv_open_time = 0;
 datetime g_lv_expiration = 0;    // research timeout mirrored on the real position
 int    g_brk_day = -1;               // daily-loss-breaker day key (UTC yyyymmdd)
 double g_brk_start_eq = 0.0;
+// v1.17 (V2 register P5, telemetry-first, never-abort class): running count
+// of in-session bars whose mode condition was TRUE (ModeDecide passed and
+// the session gates allowed evaluation). Monotone since EA init; the CLOSE
+// rows carry it as `density` so consumers difference consecutive rows for
+// interval signal density. Reset only by re-init (each ERA stamp notes it).
+long g_p5_signals = 0;
 bool   g_brk_tripped = false;
 
 // Dollar-per-unit convenience wrapper (0.0 on bad spec).
@@ -164,7 +170,7 @@ double DollarPerUnit()
    return DollarPerUnitPerLot(dpu) ? dpu : 0.0;
 }
 
-#define APP_VERSION  "MIDAS1.16"   // v1.16: R6 fail-closed preconditions (news-filter input, gold-only charter) — behavior on certified paths unchanged
+#define APP_VERSION  "MIDAS1.17"   // v1.17: P5 telemetry (thr/thr_era_id/density CLOSE appends) — no certified-path behavior change
 #define SPREAD_FLOOR 0.10              // $ — MUST equal midas_sweep.SPREAD_FLOOR
 #define LEDGER_BASE  "MIDASTOUCH_paper"
 
@@ -910,9 +916,9 @@ void BarManage(datetime t, double o, double h, double l, double c)
    double r    = (g_pp_orig_risk > 0) ? pnl / g_pp_eff_risk : 0;
    g_paper_eq += pnl;
    g_cum_r += r; g_trades++; if(pnl > 0) g_wins++;
-   PaperLog(StringFormat("CLOSE,%I64d,%I64u,%s,%.5f,%.3f,%.2f,%.2f,%.5f,%.5f",
+   PaperLog(StringFormat("CLOSE,%I64d,%I64u,%s,%.5f,%.3f,%.2f,%.2f,%.5f,%.5f,%.2f,%I64d,%I64d",
             (long)(t + 900), g_pp_ticket, reason, exit_px, r, pnl, g_paper_eq,
-            sp, 0.0));                       // v1.13 R10: spread_at_close,slippage(=0 model exit)
+            sp, 0.0, InpBBDev, (long)0, g_p5_signals));   // v1.13 R10: spread_at_close,slippage | v1.17 P5: thr,thr_era_id(static),density
    PaperLog(StringFormat("EQ,%.2f", g_paper_eq));
    PrintTradeR(r);
    g_last_action = StringFormat("CLOSE %s R=%+.2f vEq=$%.2f (%s)",   // v1.10 HUD
@@ -1041,6 +1047,7 @@ void BarEvaluateSignal(datetime sig, double so, double sh, double sl_, double sc
    TimeToStruct(sig, dt);
    if(dt.hour < InpSessionStartHour || dt.hour >= InpSessionEndHour) return;
    if(dt.day_of_week == 5 && dt.hour >= InpFridayCutoffHour) return;
+   g_p5_signals++;                     // v1.17 P5 telemetry: condition-true, in-session (census semantics)
 
    g_pending_valid  = true;
    g_pending_sigct  = sig + 900;
@@ -1346,6 +1353,7 @@ void TrackFreshM15Bar()
 
    // Friday cutoff
    if(dt.day_of_week == 5 && dt.hour >= InpFridayCutoffHour) return;
+   g_p5_signals++;                     // v1.17 P5 telemetry: condition-true, in-session (census semantics)
 
    double atr = AtrNow();
    if(atr <= 0) return;
@@ -1472,9 +1480,9 @@ void PaperClose(string reason, double exit_price)
    exit = exit - side * sprd / 2;           // parity: half-spread exit
    double r = g_pp_orig_risk > 0 ? ((g_pp_dir > 0) ? (exit - g_pp_entry) : (g_pp_entry - exit)) / g_pp_orig_risk : 0;
    double pnl = g_pp_eff_risk * r;
-   PaperLog(StringFormat("CLOSE,%I64d,%I64u,%s,%.5f,%.3f,%.2f,%.2f,%.5f,%.5f",
+   PaperLog(StringFormat("CLOSE,%I64d,%I64u,%s,%.5f,%.3f,%.2f,%.2f,%.5f,%.5f,%.2f,%I64d,%I64d",
             (long)TimeCurrent(), g_pp_ticket, reason, exit, r, pnl, PaperEquity() + pnl,
-            sprd, 0.0));                     // v1.13 R10: spread_at_close,slippage(=0 model exit)
+            sprd, 0.0, InpBBDev, (long)0, g_p5_signals));   // v1.13 R10: spread_at_close,slippage | v1.17 P5: thr,thr_era_id(static),density
    g_paper_eq += pnl;
    g_cum_r += r; g_trades++; if(pnl > 0) g_wins++;
    PrintTradeR(r);
