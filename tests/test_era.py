@@ -168,11 +168,16 @@ def test_boundary_sits_inside_the_verified_silence_window():
 
 def test_engine_stamps_carry_the_frozen_boundary():
     # The writers must agree with the reader's frozen boundary — a mismatch
-    # stamps ok=False rows that every consumer would then ignore.
+    # stamps ok=False rows that every consumer would then ignore. Each
+    # engine's stamp is asserted where that engine exists in the tree (the
+    # standalone MIDASTOUCH repo keeps V75MacroEngine only).
+    import os
     import re
-    m = re.search(r'PaperLog\("ERA,"\+APP_VERSION\+",(\d+)',
-                  open("mql5/MITEMSHUB_AI/MitemshubAI.mq5", encoding="utf-8").read())
-    v = re.search(r'PaperAppendLedger\("ERA," \+ ENGINE_VERSION \+ ",(\\-\d+|\d+)',
-                  open("V75MacroEngine.mq5", encoding="utf-8").read())
-    assert m and int(m.group(1)) == era.ERA_EPOCH
-    assert v and int(v.group(1)) == era.ERA_EPOCH
+    if os.path.exists("mql5/MITEMSHUB_AI/MitemshubAI.mq5"):
+        m = re.search(r'PaperLog\("ERA,"\+APP_VERSION\+",(\d+)',
+                      open("mql5/MITEMSHUB_AI/MitemshubAI.mq5", encoding="utf-8").read())
+        assert m and int(m.group(1)) == era.ERA_EPOCH
+    if os.path.exists("V75MacroEngine.mq5"):
+        v = re.search(r'PaperAppendLedger\("ERA," \+ ENGINE_VERSION \+ ",(\-\d+|\d+)',
+                      open("V75MacroEngine.mq5", encoding="utf-8").read())
+        assert v and int(v.group(1)) == era.ERA_EPOCH

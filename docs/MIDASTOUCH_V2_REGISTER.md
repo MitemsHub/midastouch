@@ -1,5 +1,16 @@
 # MIDASTOUCH V2 REGISTER
 
+**REPOSITORY SCOPE PURGE (2026-09-18 ~19:20 UTC — operator directive).**
+Operator instruction: anything in the MIDASTOUCH repo that does not concern
+MIDASTOUCH is to be deleted. Executed as a dependency-audited purge of the
+MIDASTOUCH repository (the GitHub push checkout): 892 foreign paths removed
+(the MITEMSHUB/V75 EA program, the Next.js operator dashboard, the
+synthetic_trader library and its test suite, V75 research scripts, foreign
+app/infra/packaging files). The MIDASTOUCH program is preserved in full:
+EA source, presets, midas_* tooling, watchdog + logon task, certified
+XAUUSD corpus, parity/tester evidence, cited V75-era evidence documents,
+and the 25 gold test suites. Deletions recoverable from git history.
+
 **LV TRIGGER-FREQUENCY AMENDMENT — SUPERSEDED 18:05 UTC by the corrected adjudication below.** The 17:30 pass shipped k=3.0/75-25 on a per-trade-expectancy ranking that (a) contained a decimal error in its frequency line and (b) optimized the wrong metric. Corrected in place the same evening; the 17:30 chart state never traded (zero fills between 17:30 and 17:38) and is preserved in the register history and chart backups (chart05.chr.bak_20260918_173001).
 
 **LV TRIGGER-FREQUENCY AMENDMENT, CORRECTED (2026-09-18 18:05 UTC — executed live).**
