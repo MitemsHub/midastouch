@@ -183,15 +183,50 @@ same tooling.
 
 ## 5. The paper supervisor
 
-The scheduled task `MitemshubPaperSupervisor` runs the paper trader on an
-interval. Two rules:
+The scheduled task `MitemshubPaperSupervisor` runs one supervision pass every 20
+minutes: `scripts\paper_supervisor.cmd` → `scripts\paper_supervisor.py` →
+`scripts\midas_watchdog.py`. Three rules:
 
 - It must point at a path **inside this repo**. `scripts\live_readiness.py`'s
   `scheduled task` leg is the check; if it says `STALE`, re-run
   `powershell -NoProfile -File scripts\install_paper_task.ps1 -Apply` — the
   installer refuses rather than register a task whose wrapper is missing.
-- It is **paper-only**: neither the supervisor nor the trader it invokes
-  contains an order-sending path.
+  **Measured 2026-09-20:** the wrapper did not exist in this repo, so the
+  installer refused and the task kept running the *predecessor* checkout's
+  supervisor; the leg read `STALE` on every run and an unattended machine had no
+  supervision at all. The wrapper and its module now exist, and
+  `tests/test_paper_supervisor.py` fails if they disappear.
+- It is **paper-only**: neither the supervisor nor the watchdog contains an
+  order-sending path. The wrapper logs to `artifacts\live\supervisor.log` and
+  resolves `python` from its own location — never from the predecessor checkout's
+  `.venv`, which would put that project's `src/` on the import path.
+- One pass per firing, and the **exit code means something**: `0` when the pass
+  completed (including `action=NONE`, "no chart attached" — nothing is armed, and a
+  task that goes red every 20 minutes is noise), non-zero only when the watchdog's
+  own escalation says a human must act (`>= 3` unrecovered restups).
+
+### If this machine is ever replaced by hosting / a VPS
+
+MT5's virtual hosting **locks local algo trading off by design** (a local EA and a
+hosted EA would both trade the same hedging account), and the ledger then stops
+advancing on this machine while it keeps advancing on the hosting side. The watchdog
+models this with an operator-managed marker:
+
+```
+artifacts\midas_vps_hosting.json      create it when the migration starts,
+                                      delete it when the surface comes back
+```
+
+While that marker exists the watchdog reports `action=VPS-HOSTING` and does **no**
+local remediation, because "the terminal looks dead" is then the correct reading of a
+healthy system. Nothing else here should try to fix a moved surface either — the local
+ledgers and `live_readiness.py` describe *this* machine, and their silence about the
+hosted one is not evidence that it is down.
+
+**And the standing truth does not change with the machine.** Moving to a VPS does not
+arm anything: `InpLiveExecution=false` in every preset, and `armed.json` is absent. A
+hosted terminal will run the same **paper** mirror, which is the design until a
+walk-forward PASS record exists.
 
 ---
 
