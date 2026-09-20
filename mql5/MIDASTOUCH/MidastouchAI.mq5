@@ -97,6 +97,14 @@ input string              InpSpreadFile       = "MIDASTOUCH_spread_M15.csv"; // 
 input long                InpWindowStart      = 0;     // BAR parity: python window t0 (epoch s; 0 = open-ended)
 input long                InpWindowEnd        = 0;     // BAR parity: python window t1 (epoch s; 0 = open-ended)
 
+input group "=== Prop governor (Upcomers Thunderbolt Classic) ==="
+input bool                InpPropGuard        = true;   // enforce the venue's survival rules before every entry (0 = off, and nothing else will protect you)
+input double              InpPropAccountSize  = 0.0;     // 0 = read balance/equity at first call; set it to the evaluation's starting size
+input double              InpPropTargetPct    = 5.0;     // overall profit target %  (Thunderbolt Classic: 5%)
+input double              InpPropMaxDdPct     = 6.0;     // trailing "Dynamic Risk Shield" % off the equity HWM
+input double              InpPropBestDayPct   = 20.0;    // Best Day share % of the target that caps ONE UTC day
+input double              InpPropPeakOverride = 0.0;     // 0 = derive the HWM; set the TRUE peak after a restart inside a drawdown
+
 //--- state
 CTrade         g_trade;
 int            g_h1_ema = INVALID_HANDLE;
@@ -1374,6 +1382,92 @@ bool DailyBreakerTripped()
    return g_brk_tripped;
 }
 
+//+------------------------------------------------------------------+
+//| PROP GOVERNOR — the venue's other three survival rules            |
+//+------------------------------------------------------------------+
+// MEASURED GAP, 2026-09-20: this EA enforced ONE of the four Thunderbolt Classic
+// rules (the 3% UTC-day loss cap, above). The trailing shield, the profit target and
+// the Best Day share existed only in the Python layer — which cannot reach inside MT5.
+// So the account could have breached three rules it was told the system was enforcing.
+//
+// The arithmetic mirrors src/synthetic_trader/risk/upcomers_rules.py deliberately, so
+// the Python pre-trade gate and the EA cannot drift into disagreeing about the same
+// account. Numbers there: size $25,000, target 5% = $1,250, shield 6% = $1,500,
+// day-profit cap = 20% of the target = $250.
+//
+// ENTRY-ONLY. Every check here decides whether a NEW position may open. Exits are never
+// gated by it: a rule that could trap you in a position while a drawdown deepens would
+// breach the shield it was written to protect.
+//
+// STATED LIMIT. The venue computes the real shield from equity history we cannot read;
+// this is a conservative mirror of it. The one place it can genuinely be wrong is a
+// RESTART: the high-water mark is rebuilt from the higher of balance and equity, which
+// understates a peak reached earlier in a session. InpPropPeakOverride exists for
+// exactly that case, and guessing silently was the alternative.
+double PropGovernorSize()
+{
+   static double size = -1.0;
+   if(size < 0.0)
+      size = (InpPropAccountSize > 0.0)
+             ? InpPropAccountSize
+             : MathMax(AccountInfoDouble(ACCOUNT_BALANCE), AccountInfoDouble(ACCOUNT_EQUITY));
+   return size;
+}
+
+// max(size - maxdd, min(peak - maxdd, size)): the floor STARTS maxdd below the
+// account size, rises with the equity HWM, and freezes once the account is maxdd in
+// profit. The clamp is the whole point — without it the floor would keep climbing and
+// eventually sit above equity on a healthy account.
+double PropShieldFloor()
+{
+   static double peak = -1.0;
+   if(peak < 0.0)
+      peak = (InpPropPeakOverride > 0.0) ? InpPropPeakOverride : PropGovernorSize();
+   peak = MathMax(peak, AccountInfoDouble(ACCOUNT_EQUITY));
+   double size  = PropGovernorSize();
+   double maxdd = size * InpPropMaxDdPct / 100.0;
+   return MathMax(size - maxdd, MathMin(peak - maxdd, size));
+}
+
+// A single trading day's realised+floating gain, capped. This is the only defensible
+// intraday reading of "no single day may exceed 20% of profit": the share is not
+// knowable in advance, so the rule is enforced against its ceiling instead.
+double PropDayProfitCapUsd()
+{
+   double target = PropGovernorSize() * InpPropTargetPct / 100.0;
+   return target * InpPropBestDayPct / 100.0;
+}
+
+// "" = clear to enter. Any other value is the reason, and the caller must not enter.
+string PropGovernorBlock()
+{
+   if(!InpPropGuard) return "";
+   if(DailyBreakerTripped()) return "daily-loss cap (3%)";
+
+   double eq   = AccountInfoDouble(ACCOUNT_EQUITY);
+   double size = PropGovernorSize();
+
+   double floor_usd = PropShieldFloor();
+   if(eq <= floor_usd)
+      return StringFormat("trailing shield: equity %.2f at/below floor %.2f", eq, floor_usd);
+
+   double target = size * InpPropTargetPct / 100.0;
+   if(target > 0.0 && (eq - size) >= target)
+      return StringFormat("profit target MET (+%.2f of %.2f) — stop entering, the shield is the only risk left", eq - size, target);
+
+   MqlDateTime dt;
+   TimeToStruct(TimeUTCNow(), dt);
+   int day = dt.year * 10000 + dt.mon * 100 + dt.day;
+   static int    s_day    = -1;
+   static double s_day_eq = 0.0;
+   if(day != s_day) { s_day = day; s_day_eq = eq; }
+   double cap = PropDayProfitCapUsd();
+   if(cap > 0.0 && (eq - s_day_eq) >= cap)
+      return StringFormat("Best Day cap: today +%.2f >= %.2f", eq - s_day_eq, cap);
+
+   return "";
+}
+
 bool StopsLevelOK(double stop_d)
 {
    long stops = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
@@ -1574,7 +1668,14 @@ void LiveOnTick()
 {
    LiveCheckExits();
    if(g_lv_posid != 0) return;
-   if(DailyBreakerTripped()) { g_nofill_brk++; DiagMaybeWrite(); return; }   // v1.18 diagnostics
+   string prop_block = PropGovernorBlock();   // v1.19+: shield + target + Best Day, not just the daily cap
+   if(prop_block != "")
+   {
+      g_nofill_brk++;
+      PrintFormat(VersionTag() + "PROP VETO: %s — no new entries", prop_block);
+      DiagMaybeWrite();
+      return;
+   }
    TrackFreshM15Bar();
 }
 
