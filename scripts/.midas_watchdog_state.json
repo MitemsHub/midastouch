@@ -1,0 +1,32 @@
+{
+ "relaunches": {
+  "day": "2026-09-17",
+  "day_count": 3,
+  "last": "2026-09-17T12:58:23"
+ },
+ "last_relaunch": {
+  "ts": "2026-09-17T12:58:23",
+  "verified": true
+ },
+ "alerts": {
+  "relaunch-cap": {
+   "count": 1,
+   "first": "2026-09-17T14:28:03",
+   "last": "2026-09-17T14:28:03",
+   "detail": "3 relaunches today, still dead \u2014 manual look needed",
+   "day": "2026-09-17"
+  },
+  "stale-ledger": {
+   "count": 1,
+   "first": "2026-09-17T16:51:59",
+   "last": "2026-09-17T16:51:59",
+   "detail": "ledger age 3096s > 1800s with terminal alive",
+   "day": "2026-09-17"
+  }
+ },
+ "last_alert": {
+  "kind": "stale-ledger",
+  "ts": "2026-09-17T16:51:59",
+  "detail": "ledger age 3096s > 1800s with terminal alive"
+ }
+}
