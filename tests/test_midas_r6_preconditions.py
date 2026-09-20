@@ -2,9 +2,13 @@
 compile contract that produced the binary.
 
 Pins:
-  * both fail-closed preconditions exist and INIT_FAILED — the news-filter
-    input must refuse a protection that does not exist, and a non-gold
-    symbol must refuse an out-of-charter attach;
+  * the news-filter input is NO LONGER an init failure but a fail-closed ENTRY
+    veto (v1.19c): v1.16 refused the true-value because no calendar engine
+    existed, and there is one now — a refused init on a live account holding a
+    position would leave the shield rules unmanaged, which is worse than
+    standing aside. What stays refused is the BAR replay running a rule the
+    other engine cannot see;
+  * a non-gold symbol still INIT_FAILs (an out-of-charter attach);
   * the guards run BEFORE the init banner (a refused attach must never
     announce itself as a healthy start);
   * the banner no longer claims "(calendar pending)" — the input's value
@@ -52,13 +56,22 @@ def body(fn_name: str, path: Path = EA) -> str:
 
 # --- the guards exist, fail-closed, and run before the banner -----------------
 
-def test_news_filter_guard_fails_init() -> None:
+def test_the_news_guard_is_a_veto_and_not_an_init_failure() -> None:
+    """R6 REVISED (v1.19c). v1.16 refused InpUseNewsFilter=true at INIT because no
+    calendar engine existed; inventing one was worse than refusing. There is one now — a
+    shared file both engines read — so the true-value must NOT fail init: it must gate
+    ENTRIES, and it must try to repair the source before judging it."""
     b = body("OnInit")
-    assert 'if(InpUseNewsFilter)' in b, "the R6 news-filter precondition must gate OnInit"
+    assert "if(InpUseNewsFilter)" in b, "OnInit must report/handle the filter's state"
     m = re.search(r"if\(InpUseNewsFilter\)\s*\{(.*?)\}", b, re.S)
-    assert m and "INIT_FAILED" in m.group(1), (
-        "InpUseNewsFilter=true must INIT_FAILED — no protection exists to run under")
-    assert "V2 register R6" in m.group(1), "the refusal must cite the register"
+    assert m and "INIT_FAILED" not in m.group(1), (
+        "a true news filter must not refuse init — a live account holding a position "
+        "would be left with its shield rules unmanaged")
+    assert "NewsRefreshIfDue" in m.group(1), "repair the source before judging it"
+    assert "NewsSourceProblem" in m.group(1), "and report what the source is"
+    gate = body("TrackFreshM15Bar")
+    assert "if(InpUseNewsFilter)" in gate and "g_nofill_news++" in gate, (
+        "the fail-closed veto belongs on the ENTRY path, counted in the NOFILL census")
 
 
 def test_gold_only_guard_fails_init() -> None:
@@ -75,7 +88,7 @@ def test_guards_precede_the_banner() -> None:
     gold = b.find("if(!is_gold)")
     assert -1 not in (banner, news, gold)
     assert news < banner and gold < banner, (
-        "a refused attach must not print the healthy-start banner first")
+        "a source problem must be reported before a healthy-start banner claims one")
 
 
 def test_banner_dropped_the_calendar_pending_label() -> None:
@@ -85,23 +98,23 @@ def test_banner_dropped_the_calendar_pending_label() -> None:
         "true on a running EA (R6 made it a precondition)")
 
 
-def test_news_filter_reader_is_only_the_guard() -> None:
-    """InpUseNewsFilter appears at exactly: the input declaration, the
-    precondition guard (code + its message), and the banner — no decision
-    path may depend on an input whose true-value is impossible.
+def test_every_reader_of_the_news_input_is_registered_here() -> None:
+    """Every reader of InpUseNewsFilter is a DECISION, so the set is pinned: a new one
+    must be registered deliberately rather than appearing silently.
 
-    Pin shape: 4 occurrences in comment-stripped source (input, guard,
-    guard's message string, banner) and exactly ONE `if(InpUseNewsFilter)`
-    code reader. String-literal stripping is deliberately NOT used — quote
-    pairing across MQL continuation lines is fragile and silently swallows
-    regions (found while writing this test)."""
+    Pin shape: 7 occurrences in comment-stripped source and exactly TWO
+    `if(InpUseNewsFilter)` readers — the init block (refresh + report) and the entry
+    veto — plus the BAR-replay refusal (condition + message), the input declaration,
+    the banner field, and the refresher's own early return. String-literal stripping is
+    deliberately NOT used — quote pairing across MQL continuation lines is fragile and
+    silently swallows regions (found while writing this test)."""
     s = src()
     total = len(re.findall(r"InpUseNewsFilter", s))
     guards = len(re.findall(r"if\(InpUseNewsFilter\)", s))
-    assert total == 4 and guards == 1, (
-        f"expected input+guard+message+banner (4 sites, 1 guard); got "
-        f"{total} sites / {guards} guards — a new READER of this input "
-        "must be registered in this test")
+    assert total == 7 and guards == 2, (
+        f"expected 7 sites / 2 guards (input, BAR refusal + its message, init block, "
+        f"banner, refresh early-return, entry veto); got {total} sites / {guards} "
+        f"guards — a new READER of this input must be registered in this test")
 
 
 # --- the harness mirror (one-commit python+EA law) ------------------------------

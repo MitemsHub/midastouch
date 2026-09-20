@@ -305,8 +305,15 @@ class TestJournalRetention:
         now = datetime.now().timestamp()
         root = str(tmp_path)
         self._log(root, mtime=now - 4 * 3600)
+        # The stamp must be INSIDE today, not merely recent: as `now - 700` it lands in
+        # yesterday whenever the suite runs within ~12 minutes of local midnight
+        # (measured 2026-09-21 00:11, 686 s past midnight -> this test failed), and the
+        # guard's whole question is "did an EA init TODAY leave no journal line?".
+        midnight = datetime.combine(datetime.now().date(),
+                                    datetime.min.time()).timestamp()
+        era_ts = max(midnight + 60, now - 700)
         charts = self._chart(root, ledger_mtime=now - 600, ledger_rows=[
-            f"ERA,MIDAS1.10,{now - 700},pertick-fills", "EQ,50.00"])
+            f"ERA,MIDAS1.10,{era_ts},pertick-fills", "EQ,50.00"])
         out = ms.journal_retention_guard(charts, datetime.now())
         assert len(out) == 1 and out[0][0] == "alert" and "REWRITTEN" in out[0][1]
 

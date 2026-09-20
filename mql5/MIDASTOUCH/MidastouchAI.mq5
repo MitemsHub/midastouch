@@ -39,6 +39,12 @@
 // the tester copy the recorded-spread series from <data>\MQL5\Files into the
 // agent for every BAR-mode pass (name must be the literal staged file).
 #property tester_file "MIDASTOUCH_spread_M15.csv"
+// Same mechanism for the news calendar (v1.19c): a tester pass with the gate on would
+// otherwise only ever see an empty sandbox and could rehearse the MISSING refusal but
+// never the usable one. A pass that cannot be given a calendar is a pass that cannot
+// show the gate working, so the file is staged exactly like the spread series; when it
+// is absent the pass simply runs without it, which is the missing-file case.
+#property tester_file "MIDASTOUCH_news_calendar.csv"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -77,7 +83,12 @@ input int                 InpSessionStartHour = 6;     // UTC, entries allowed f
 input int                 InpSessionEndHour   = 20;    // UTC, entries until (exclusive)
 input double              InpSpreadCapPctStop = 1.5;   // veto if spread > this % of stop
 input int                  InpFridayCutoffHour = 20;    // UTC; no new entries after
-input bool                 InpUseNewsFilter    = false; // R6: INIT_FAILED when true — no calendar engine exists (never set true)
+input bool                 InpUseNewsFilter    = false; // news stand-down; ON requires a fresh calendar FILE (see docs/MIDASTOUCH_HEALTH_GUIDE.md section 5a)
+input string               InpNewsFile         = "MIDASTOUCH_news_calendar.csv"; // the shared calendar: this EA refreshes it live, MidasNewsProbe.mq5 measures it
+input int                  InpNewsWindowMin    = 15;    // +/- minutes around a HIGH-importance event
+input int                  InpNewsMaxAgeHours  = 24;    // refuse entries when the calendar is older than this
+input int                  InpNewsCoverHours   = 24;    // refuse entries unless it covers this far ahead
+input int                  InpNewsRefreshHours = 6;     // re-read the venue calendar this often (live only; 0 = never refresh)
 
 input int                 InpStaleMinutes     = 30;    // no M15 bar for N min -> stand down
 input group "=== Risk ==="
@@ -133,8 +144,15 @@ string         g_lv_last_error = "";     // v1.18: last live-order failure detai
 // replay never writes them, so certified ledgers stay byte-identical.
 int            g_nofill_signal = 0, g_nofill_mism = 0, g_nofill_session = 0,
                g_nofill_friday = 0, g_nofill_spread = 0, g_nofill_riskcap = 0,
-               g_nofill_brk = 0, g_nofill_notr = 0, g_nofill_wrote = 0;
+               g_nofill_brk = 0, g_nofill_notr = 0, g_nofill_wrote = 0,
+               g_nofill_news = 0;   // v1.19c: news stand-down (reason in the journal line)
 datetime       g_diag_day0 = 0;
+// v1.19c: calendar-refresh bookkeeping. The gate is fail-closed, so a source that is
+// never refreshed becomes a permanent stand-down — these keep the EA from either
+// hammering the venue's API or silently letting the file age out.
+datetime       g_news_refresh_at = 0;   // last calendar-API attempt
+datetime       g_news_written_at = 0;   // last write THIS EA made (0 = never; a probe file is not ours)
+int            g_news_api_last   = -2;  // last CalendarValueHistory return (-2 = never)
 
 //--- bar-replay parity state (v1.04, EXEC BAR model)
 long           g_sp_t[];         // spread-file bar open times (strictly ascending)
@@ -611,20 +629,45 @@ int OnInit()
       g_win_t1 = (datetime)InpWindowEnd;
    }
 
-   // v1.16 (V2 register R6, fail-closed preconditions — the build-time
-   // decision the register queued): the news-filter input names protection
-   // that does not exist, and MIDASTOUCH is gold-only by charter. Both are
-   // INIT_FAILED preconditions BEFORE the banner prints (a refused attach
-   // must not announce itself as a healthy start), instead of honest labels
-   // on absent protection / an out-of-charter symbol. The tester harness
-   // and every preset pass InpUseNewsFilter=false on a gold symbol, so
-   // behavior on every certified path is unchanged.
+   // BAR parity is the REPLAY of a corpus, and that corpus was certified news-OFF: the
+   // python engine of record does not apply this veto yet, so a BAR pass with the filter
+   // ON would run a rule the other engine cannot see — a filter that silently does
+   // nothing, which is the one failure mode this whole mechanism exists to prevent.
+   // The live and paper arms run PERTICK, where the gate does act. Refuse, do not pretend.
+   if(InpBarModel && InpUseNewsFilter)
+   {
+      Print(VersionTag() + "INIT FAILED: InpBarModel + InpUseNewsFilter — the parity replay "
+            "does not apply the news veto (and neither does the research engine of record "
+            "yet); this combination would name a protection that cannot act. Run the gate "
+            "on the PERTICK path, or leave it off for parity.");
+      return INIT_FAILED;
+   }
+
+   // NEWS FILTER — R6 REVISED, 2026-09-20. The v1.16 decision was an INIT_FAILED
+   // because no calendar engine existed; inventing one was worse than refusing. There is
+   // now a real source: `MidasNewsProbe.mq5` reads MQL5's economic calendar and WRITES IT
+   // to InpNewsFile, which this EA reads. The file (rather than a direct API call) is
+   // deliberate, and it was measured, not assumed:
+   //
+   //   CalendarValueHistory -> -1 value(s), GetLastError=4014   (Strategy Tester,
+   //   2026.09.20) — error 4014 is "function not allowed for call", so the calendar
+   //   cannot be read from inside the tester at all.
+   //
+   // A rule only one engine can see is a rule the parity contract cannot replay, so the
+   // shared file is the contract: both this EA and the Python research engine read the
+   // same events. What changed about the refusal is WHICH failure it protects: an
+   // unusable calendar now vetoes ENTRIES (below), never INIT. A refused init on a live
+   // account with a position open would leave the shield rules unmanaged, which is a
+   // worse outcome than standing aside — the failure modes are not symmetrical.
    if(InpUseNewsFilter)
    {
-      Print(VersionTag() + "INIT FAILED: InpUseNewsFilter=true names a calendar "
-            "engine that does not exist (V2 register R6). No news protection "
-            "can be provided; refusing to run under a false label.");
-      return INIT_FAILED;
+      // Repair the source BEFORE judging it. "ON requires a fresh calendar" is only an
+      // honest requirement if the EA goes and gets one; otherwise the switch reads as
+      // protection and behaves as a permanent stand-down after 24 hours.
+      NewsRefreshIfDue(TimeGMT());
+      string news_init = NewsSourceProblem();
+      PrintFormat(VersionTag() + "NEWS FILTER ON — source %s: %s", InpNewsFile,
+                  (news_init == "") ? "usable" : news_init);
    }
    string symU = _Symbol;
    StringToUpper(symU);
@@ -709,6 +752,7 @@ void OnTimer()
       return;                                          // parity runs: byte-identical ledgers
    PaperLog(StringFormat("EQ,%.2f", PaperEquity()));
    DiagMaybeWrite();                    // v1.18: NOFILL diagnostics flush on the heartbeat
+   NewsRefreshIfDue(TimeGMT());         // v1.19c: keep the calendar source alive (live only)
    HudUpdate();                                        // v1.10: HUD refresh on the heartbeat clock
 }
 
@@ -1189,7 +1233,7 @@ void DiagCountReset()
 {
    g_nofill_signal = 0; g_nofill_mism = 0; g_nofill_session = 0;
    g_nofill_friday = 0; g_nofill_spread = 0; g_nofill_riskcap = 0;
-   g_nofill_brk = 0; g_nofill_notr = 0; g_nofill_wrote = 0;
+   g_nofill_brk = 0; g_nofill_notr = 0; g_nofill_wrote = 0; g_nofill_news = 0;
 }
 string TextVeto(int trigger, int mac)
 {
@@ -1205,10 +1249,13 @@ void DiagMaybeWrite()
    if(g_nofill_signal == 0) return;                       // nothing to account
    if(g_diag_day0 == 0) g_diag_day0 = TimeUTCNow();
    if(TimeUTCNow() - g_diag_day0 < 86400) return;         // once per UTC day
-   PaperLog(StringFormat("NOFILL,%I64d,%d,%d,%d,%d,%d,%d,%d,%d",
+   // The trailing field is APPENDED, never inserted: consumers that read the row by
+   // position keep working, and a census that omitted news vetoes would be misleading
+   // in exactly the way this program refuses to be.
+   PaperLog(StringFormat("NOFILL,%I64d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
             (long)TimeUTCNow(), g_nofill_signal, g_nofill_mism,
             g_nofill_session, g_nofill_friday, g_nofill_spread,
-            g_nofill_riskcap, g_nofill_brk, g_nofill_notr));
+            g_nofill_riskcap, g_nofill_brk, g_nofill_notr, g_nofill_news));
    g_nofill_wrote++;
    DiagCountReset();
 }
@@ -1220,6 +1267,284 @@ void DiagMaybeWrite()
 //| T's open. No pending queue: a pending carried to the next bar    |
 //| detection was the +1-bar parity skew found in the first parity   |
 //| run (EA filled 15 min after the research engine every trade).    |
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| NEWS CALENDAR — the shared file, and why it is a file             |
+//+------------------------------------------------------------------+
+// The economic calendar is not reachable from the Python side at all (MetaTrader5
+// 5.0.5735 exposes no calendar function) and not reachable from the tester either
+// (MQL5 returns error 4014, "function not allowed for call" — measured 2026.09.20). So
+// the events are written down ONCE by MidasNewsProbe.mq5 and read by both engines:
+//
+//   epoch_utc;time_utc;time_server;currency;country;importance;event
+//
+// with `# epoch_generated_utc=`, `# epoch_window_to_utc=`, `# events=` in the header.
+// Epochs are numeric on purpose: a date string would have to be interpreted in someone's
+// timezone, and this program has already paid for one clock mistake.
+//
+// THE REFUSAL IS THE FEATURE. A filter that silently does nothing when its source is
+// absent is worse than no filter, because the journal still says protection is ON. So an
+// unusable source vetoes entries and names the problem: missing, unreadable, stale, no
+// coverage, or EMPTY — and empty is spelled out, because "no events" and "cannot see the
+// events" are different claims and only one of them is knowable from a zero count.
+string NewsSourceProblem()
+{
+   if(!FileIsExist(InpNewsFile))
+      return StringFormat("calendar file missing (%s)", InpNewsFile);
+   int fh = FileOpen(InpNewsFile, FILE_READ | FILE_TXT | FILE_ANSI);
+   if(fh == INVALID_HANDLE)
+      return StringFormat("calendar file unreadable (%s)", InpNewsFile);
+
+   long gen = 0, win_to = 0;
+   long declared = -1;                 // `# events=` — -1 = the writer declared nothing
+   int rows = 0;
+   while(!FileIsEnding(fh))
+   {
+      string line = FileReadString(fh);
+      StringTrimLeft(line);
+      StringTrimRight(line);
+      if(StringLen(line) == 0) continue;
+      if(StringGetCharacter(line, 0) == '#')
+      {
+         int eq = StringFind(line, "=");
+         if(eq > 1)
+         {
+            // BOTH sides of the '=' must be trimmed. This parsed NOTHING before 2026-09-21:
+            // the writers emit "# epoch_generated_utc=..." with a space after the '#', the
+            // substring left it on the key (" epoch_generated_utc"), and only the RIGHT
+            // side was trimmed — so `gen` stayed 0 and EVERY calendar was judged "no
+            // generation time", i.e. the gate could never once see a usable source and
+            // stood the arm down forever. The mirror parsed the same file fine
+            // (`line.lstrip("# ")`), so the two engines disagreed about one file in the
+            // worst possible direction: filled-with-events here, unusable there. Found by
+            // scripts/news_gate_rehearsal.py running the COMPILED EA; the source-text pins
+            // could not see it, which is why that rehearsal exists.
+            string key = StringSubstr(line, 1, eq - 1);
+            StringTrimLeft(key);
+            StringTrimRight(key);
+            string val = StringSubstr(line, eq + 1);
+            StringTrimLeft(val);
+            if(key == "epoch_generated_utc") gen      = (long)StringToInteger(val);
+            if(key == "epoch_window_to_utc") win_to   = (long)StringToInteger(val);
+            if(key == "events")              declared = (long)StringToInteger(val);
+         }
+         continue;
+      }
+      // Count EVENT rows only. The column header starts with "epoch_utc", so the old
+      // "starts with time_utc" test never matched it: the header was counted as a
+      // release, which made an EMPTY calendar look covered and non-empty here while the
+      // python mirror refused the very same file. One file, one count — a row is a line
+      // whose first field is a positive epoch.
+      string first[];
+      if(StringSplit(line, (ushort)';', first) < 7) continue;   // not a 7-field release row
+      if((long)StringToInteger(first[0]) <= 0) continue;
+      rows++;
+   }
+   FileClose(fh);
+
+   datetime now = TimeUTCNow();
+   if(gen <= 0)
+      return "calendar file carries no generation time (cannot judge freshness)";
+   double age_h = (double)((long)now - gen) / 3600.0;
+   if(age_h > (double)InpNewsMaxAgeHours)
+      return StringFormat("calendar stale (%.1fh old > %dh) — refresh it",
+                          age_h, InpNewsMaxAgeHours);
+   if(win_to <= 0)
+      return "calendar file declares no window end (cannot judge coverage)";
+   if((long)win_to < (long)now + (long)InpNewsCoverHours * 3600)
+      return StringFormat("calendar does not cover the next %dh — refresh it",
+                          InpNewsCoverHours);
+   if(declared < 0)
+      return "calendar file declares no event count (cannot judge completeness)";
+   if((long)rows < declared)
+      return StringFormat("calendar truncated (declares %I64d events, holds %d) — refresh it",
+                          declared, rows);
+   if(rows <= 0)
+      return "calendar empty — an empty calendar is not \"no news\"";
+   return "";
+}
+
+//+------------------------------------------------------------------+
+//| "" = clear to enter. Anything else is the reason.
+string NewsVetoReason(datetime now)
+{
+   string problem = NewsSourceProblem();
+   if(problem != "")
+      return problem;                     // fail closed, and say which of the five it is
+
+   long window_s = (long)InpNewsWindowMin * 60;
+   int fh = FileOpen(InpNewsFile, FILE_READ | FILE_TXT | FILE_ANSI);
+   if(fh == INVALID_HANDLE)
+      return StringFormat("calendar file unreadable (%s)", InpNewsFile);
+   while(!FileIsEnding(fh))
+   {
+      string line = FileReadString(fh);
+      StringTrimLeft(line);
+      StringTrimRight(line);
+      if(StringLen(line) == 0) continue;
+      if(StringGetCharacter(line, 0) == '#') continue;
+      string parts[];
+      if(StringSplit(line, (ushort)';', parts) < 7) continue;
+      if(parts[5] != "HIGH") continue;    // top-tier only: the playbook's standing policy
+      long ev = (long)StringToInteger(parts[0]);
+      if(ev <= 0) continue;
+      long delta = (long)now - ev;
+      if(delta < 0) delta = -delta;
+      if(delta <= window_s)
+      {
+         FileClose(fh);
+         return StringFormat("news blackout: %s at %s (within %d min)", parts[6],
+                             TimeToString((datetime)ev, TIME_DATE | TIME_MINUTES),
+                             InpNewsWindowMin);
+      }
+   }
+   FileClose(fh);
+   return "";
+}
+
+//+------------------------------------------------------------------+
+//| THE SOURCE HAS TO REPAIR ITSELF, OR THE GATE IS A PERMANENT STOP  |
+//| (v1.19c continued, 2026-09-20).                                   |
+//|                                                                  |
+//| The gate above is fail-closed, so a calendar nobody refreshes     |
+//| does not degrade politely — it stands the arm down for good. That |
+//| is the right answer to "I cannot see the news" and the wrong      |
+//| answer to "nobody ran the probe this week". So the EA reads the   |
+//| venue's own calendar when it can and writes the SAME file the     |
+//| python engine of record reads: one source, two readers, no second |
+//| implementation to drift. The probe stays for measurement.         |
+//|                                                                  |
+//| IT NEVER OVERWRITES WITH NOTHING. A call returning no usable      |
+//| event is a failure to MEASURE, not news: the file on disk stays   |
+//| untouched, the journal records the return value and errno, and    |
+//| the gate decides on the evidence it actually has.                 |
+//|                                                                  |
+//| Unavailable in the tester by the platform's own rule (4014), so a |
+//| parity replay reads the file and never writes one.                |
+//+------------------------------------------------------------------+
+string NewsClean(string s)
+{
+   StringReplace(s, ";", ",");
+   StringReplace(s, "\r", " ");
+   StringReplace(s, "\n", " ");
+   StringReplace(s, "#", "-");
+   return s;
+}
+string NewsImportanceName(ENUM_CALENDAR_EVENT_IMPORTANCE imp)
+{
+   switch(imp)
+   {
+      case CALENDAR_IMPORTANCE_HIGH:     return "HIGH";
+      case CALENDAR_IMPORTANCE_MODERATE: return "MEDIUM";
+      case CALENDAR_IMPORTANCE_LOW:      return "LOW";
+   }
+   return "NONE";
+}
+
+bool NewsWriteCalendar(datetime now_gmt)
+{
+   datetime now_srv = TimeCurrent();
+   long     off_min = (long)(now_srv - now_gmt) / 60;
+   // The calendar's own frame is the TRADE SERVER's — "all times of events in
+   // MqlCalendarValue ... and the from/to inputs ... are set in a trade server timezone,
+   // rather than a user's local time" — so window and events are both server time and
+   // the UTC column is DERIVED with the same measured offset the CLOCK line prints.
+   // Numeric epochs, exactly like the probe: a reader never has to guess a timezone.
+   datetime from = now_srv - (datetime)(14 * 86400);
+   datetime to   = now_srv + (datetime)(21 * 86400);
+
+   MqlCalendarValue values[];
+   ResetLastError();
+   int n = CalendarValueHistory(values, from, to, NULL, "USD");
+   int err = GetLastError();
+   g_news_api_last = n;
+
+   string body = "";
+   int written = 0, high = 0, errors = 0;
+   for(int i = 0; n > 0 && i < ArraySize(values); i++)
+   {
+      MqlCalendarEvent ev;
+      if(!CalendarEventById(values[i].event_id, ev)) { errors++; continue; }
+      if(ev.importance == CALENDAR_IMPORTANCE_HIGH) high++;
+      // The currency belongs to the COUNTRY, not the event: MqlCalendarEvent has no
+      // `currency` field (measured — declaring one is compile error 256).
+      MqlCalendarCountry country;
+      string cur = "", ccode = "";
+      if(CalendarCountryById(long(ev.country_id), country))
+      {
+         cur   = country.currency;
+         ccode = country.code;
+      }
+      datetime t_srv = values[i].time;
+      datetime t_utc = t_srv - (datetime)(off_min * 60);
+      body += StringFormat("%I64d;%s;%s;%s;%s;%s;%s\r\n", (long)t_utc,
+                           TimeToString(t_utc, TIME_DATE | TIME_SECONDS),
+                           TimeToString(t_srv, TIME_DATE | TIME_SECONDS),
+                           NewsClean(cur), NewsClean(ccode),
+                           NewsImportanceName(ev.importance), NewsClean(ev.name));
+      written++;
+   }
+
+   if(written <= 0)
+   {
+      PrintFormat(VersionTag() + "NEWS SOURCE: CalendarValueHistory -> %d value(s), err=%d, "
+                  "%d usable row(s) — leaving %s alone. An empty answer is a failure to "
+                  "MEASURE, not news, and overwriting a calendar with nothing would "
+                  "manufacture the stand-down this gate exists to express",
+                  n, err, written, InpNewsFile);
+      return false;
+   }
+
+   int fh = FileOpen(InpNewsFile, FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(fh == INVALID_HANDLE)
+   {
+      PrintFormat(VersionTag() + "NEWS SOURCE: cannot write %s (err=%d)",
+                  InpNewsFile, GetLastError());
+      return false;
+   }
+   FileWriteString(fh, "# MIDASTOUCH news calendar — written by MidastouchAI.mq5 "
+                       "(live calendar refresh)\r\n");
+   FileWriteString(fh, StringFormat("# epoch_generated_utc=%I64d\r\n", (long)now_gmt));
+   FileWriteString(fh, StringFormat("# generated_at_server=%s\r\n",
+                                    TimeToString(now_srv, TIME_DATE | TIME_SECONDS)));
+   FileWriteString(fh, StringFormat("# server_offset_min=%I64d\r\n", off_min));
+   FileWriteString(fh, StringFormat("# epoch_window_from_utc=%I64d\r\n",
+                                    (long)(from - (datetime)(off_min * 60))));
+   FileWriteString(fh, StringFormat("# epoch_window_to_utc=%I64d\r\n",
+                                    (long)(to - (datetime)(off_min * 60))));
+   FileWriteString(fh, "# source=mt5_economic_calendar\r\n# currency=USD\r\n");
+   FileWriteString(fh, StringFormat("# api_returned=%d\r\n", n));
+   FileWriteString(fh, StringFormat("# events=%d\r\n# high_importance=%d\r\n"
+                                    "# resolution_errors=%d\r\n",
+                                    written, high, errors));
+   FileWriteString(fh, "epoch_utc;time_utc;time_server;currency;country;importance;event\r\n");
+   FileWriteString(fh, body);
+   FileClose(fh);
+   PrintFormat(VersionTag() + "NEWS SOURCE: refreshed %s — %d event(s), %d HIGH, "
+               "%d unresolvable (api returned %d)", InpNewsFile, written, high, errors, n);
+   return true;
+}
+
+bool NewsRefreshIfDue(datetime now_gmt)
+{
+   if(!InpUseNewsFilter) return false;                 // off: nothing to protect, no file to keep
+   if(MQLInfoInteger(MQL_TESTER)) return false;        // 4014 — not callable in the tester
+   if(InpNewsRefreshHours <= 0) return false;          // operator refreshes it out of band
+   if(g_news_refresh_at != 0 && now_gmt - g_news_refresh_at < 600)
+      return false;                                    // never hammer the venue's API
+   string problem = NewsSourceProblem();
+   if(problem == "" && g_news_written_at != 0 &&
+      now_gmt - g_news_written_at < (long)InpNewsRefreshHours * 3600)
+      return false;                                    // usable, and young enough to trust
+   g_news_refresh_at = now_gmt;
+   if(!NewsWriteCalendar(now_gmt))
+      return false;
+   g_news_written_at = now_gmt;
+   PrintFormat(VersionTag() + "NEWS SOURCE refreshed %s (api=%d; judged before: %s)",
+               InpNewsFile, g_news_api_last, (problem == "") ? "usable" : problem);
+   return true;
+}
+
 //+------------------------------------------------------------------+
 void TrackFreshM15Bar()
 {
@@ -1275,6 +1600,23 @@ void TrackFreshM15Bar()
    if(dt.day_of_week == 5 && dt.hour >= InpFridayCutoffHour)
    { g_nofill_friday++; DiagMaybeWrite(); return; }   // v1.18 diagnostics
    g_p5_signals++;                     // v1.17 P5 telemetry: condition-true, in-session (census semantics)
+
+   // NEWS STAND-DOWN (v1.19c). Sits with the time gates, before sizing, and it is a
+   // FAIL-CLOSED gate: with the filter ON, an unusable calendar (missing, stale, empty,
+   // or not covering now) vetoes the entry and says which of those it is. An empty
+   // calendar is not "no news" — it is "we cannot see the news", and the two must never
+   // be conflated, which is the one failure this whole file exists to prevent.
+   if(InpUseNewsFilter)
+   {
+      string news_reason = NewsVetoReason(TimeUTCNow());
+      if(news_reason != "")
+      {
+         g_nofill_news++; DiagMaybeWrite();
+         PrintFormat(VersionTag() + "NEWS VETO: %s — no new entries", news_reason);
+         g_last_action = "signal vetoed: " + news_reason;
+         return;
+      }
+   }
 
    double atr = AtrNow();
    if(atr <= 0) return;

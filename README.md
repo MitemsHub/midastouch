@@ -55,10 +55,20 @@ One instrument, one arm, one position at a time, intraday-first.
 
 Five gates stand between a signal and an order, all checked **before** the entry: the
 session band, the spread cap (veto when spread > 1.5 % of the stop distance), the staleness
-guard (no fresh bar for 30 min ⇒ stand down, which also covers gold's holidays), the
-weekend policy, and the prop governor below. The news filter is **disabled on purpose**:
-there is no calendar engine, and setting it true raises `INIT_FAILED` rather than trading
-without one.
+guard (no fresh bar for 30 min ⇒ stand down, which also covers gold's holidays), the news
+stand-down, and the prop governor below.
+
+The **news stand-down** (±15 min around top-tier USD releases, entry-only — it may never
+block an exit) is implemented and ships **off** in every preset. It is fail-closed: a
+source that is missing, stale, uncovered, truncated, or **empty** vetoes entries and names
+which one it is, because an empty calendar means *cannot see the news*, not *no news*. The
+events come from one shared file the EA refreshes from the venue's own calendar — the
+Python API has no calendar at all, and the strategy tester refuses the call
+(`GetLastError() = 4014`). It is off for two stated reasons: the certified corpus and the
+walk-forward were measured without it, and this venue's calendar availability is still
+unmeasured, so switching it on may do nothing or may hold the arm until the source is
+real. `docs/MIDASTOUCH_HEALTH_GUIDE.md` §5a carries the decision, the refusal vocabulary,
+and the single journal line that answers it.
 
 **Sizing** is 1 % of equity per trade, converted through the symbol's own tick value with a
 geometric identity check pinned against the broker's *settled* value (`order_calc_profit`),
@@ -114,6 +124,10 @@ Stated plainly, because a front page that omits this is a sales page:
 - **The scheduled supervisor is not this repo's.** See §1 — it points at the predecessor
   checkout, so nothing supervises the gold paper arm. Re-pointing it is an operator action
   with its own record, not a commit.
+- **This venue's economic calendar has not been read successfully yet.** The tester cannot
+  call it and the terminal's news base is 428 bytes, so the news gate's source is
+  unproven here — which is why the gate ships off. The EA's own init line settles it in
+  one read once the gate is switched on (health guide §5a).
 
 ---
 

@@ -370,13 +370,35 @@ def test_nofill_reason_grammar_is_pinned():
 
 
 def test_nofill_format_string_shape():
-    """The NOFILL row: prefix + epoch + exactly 8 counters, comma grammar,
+    """The NOFILL row: prefix + epoch + exactly 9 counters, comma grammar,
     appended by PaperLog. Positional indexes here and in
-    morning_status.nofill_summary must stay in lockstep."""
+    morning_status.nofill_summary must stay in lockstep.
+
+    9 since v1.19c, which APPENDED the news stand-down count: the counter had to be
+    visible or 'why did it not trade' answers with 'the calendar held it' only in a
+    journal line nobody greps, and appending (never inserting) keeps every historical
+    reader working. morning_status.NOFILL_KEYS is the other half of this pin.
+    """
     code = strip_comments(src())
-    m = re.search(r'"NOFILL,%I64d((?:,%d){8})"', code)
-    assert m, "NOFILL format: epoch + exactly 8 comma-separated %%d counters"
-    assert m.group(1).count("%d") == 8
+    m = re.search(r'"NOFILL,%I64d((?:,%d){9})"', code)
+    assert m, "NOFILL format: epoch + exactly 9 comma-separated %%d counters"
+    assert m.group(1).count("%d") == 9
+    from morning_status import NOFILL_KEYS
+    assert len(NOFILL_KEYS) == 9 and NOFILL_KEYS[-1] == "news", (
+        "the reader's key list must carry the appended counter in the same position")
+
+
+def test_a_historical_ten_field_nofill_row_still_parses(tmp_path):
+    """Backwards compatibility is the point of appending: a ledger written by v1.18
+    has 8 counters and must keep answering, without a phantom news count."""
+    from morning_status import nofill_summary
+    p = tmp_path / "ledger.csv"
+    p.write_text("ERA,MIDAS1.18,1789657200,pertick-fills\n"
+                 "NOFILL,1789660800,7,7,0,0,0,0,0,0\nEQ,50.00\n")
+    agg = nofill_summary(str(p), now_ts=1789660800 + 60)
+    assert agg == {"signal": 7, "mismatch": 7, "no_trigger": 0, "session": 0,
+                   "friday": 0, "spread": 0, "riskcap": 0, "breaker": 0}
+    assert "news" not in agg, "an old row must not invent a news count"
 
 
 def test_nofill_rows_are_inert_to_every_consumer(tmp_path):
@@ -384,9 +406,9 @@ def test_nofill_rows_are_inert_to_every_consumer(tmp_path):
     parity pairing, flatness, and the [3b] collector all stay clean."""
     rows = [f"ERA,MIDAS1.18,{era_mod.ERA_EPOCH},"
             "pertick-fills+telemetry-only-per-V2-register+diag-nofill",
-            "NOFILL,1789657200,17,17,0,0,0,0,0,0",
+            "NOFILL,1789657200,17,17,0,0,0,0,0,0,4",
             _appended_open("M1"), _appended_close(),
-            "NOFILL,1789660800,9,9,0,0,0,0,0,0",
+            "NOFILL,1789660800,9,9,0,0,0,0,0,0,5",
             "EQ,50.00"]
     p = str(_write(tmp_path, rows))
     s = arm_statistics(p)
@@ -399,6 +421,7 @@ def test_nofill_rows_are_inert_to_every_consumer(tmp_path):
     agg = nofill_summary(p, now_ts=1789660800 + 60)
     assert agg["signal"] == 26 and agg["mismatch"] == 26
     assert "session" in agg and agg.get("friday") == 0
+    assert agg["news"] == 9, "the appended news counter must survive the read"
 
 
 def test_v119_era_note_carries_full_citation_chain():

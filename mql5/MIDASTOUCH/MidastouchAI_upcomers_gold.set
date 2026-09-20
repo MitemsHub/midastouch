@@ -16,7 +16,17 @@
 ; THE PROP GOVERNOR IS PINNED HERE. The EA now enforces all four venue rules
 ; before an entry: the 3% UTC-day cap, the 6% trailing Dynamic Risk Shield, the
 ; 5% profit target and the 20% Best Day ceiling on one day's gain. Their
-; arithmetic mirrors src/synthetic_trader/risk/upcomers_rules.py.
+; arithmetic mirrors src/midas_prop/risk/upcomers_rules.py.
+;
+; THE NEWS GATE IS OFF HERE, AND THAT IS A DECISION, NOT AN OVERSIGHT.
+; InpUseNewsFilter=false means the playbook's standing policy (+/-15 minutes around
+; top-tier USD releases) is NOT enforced on this arm. Turning it ON is a real
+; configuration change with two consequences worth stating: the EA then refreshes
+; the venue's own calendar and refuses entries whenever that source is missing,
+; stale, uncovered, truncated or EMPTY (an empty calendar is 'cannot see the news',
+; never 'no news'), and this arm would no longer be running the configuration the
+; walk-forward certified. The gate is entry-only either way — it never blocks an
+; exit.
 ;
 ; PAPER ONLY. InpLiveExecution=false is HARD. Arming is a frozen-gate event and
 ; no gold signal has passed that gate — so this preset trades nothing, and the
@@ -54,6 +64,11 @@ InpSessionEndHour=20
 InpSpreadCapPctStop=1.5
 InpFridayCutoffHour=20
 InpUseNewsFilter=false
+InpNewsFile="MIDASTOUCH_news_calendar.csv"
+InpNewsWindowMin=15
+InpNewsMaxAgeHours=24
+InpNewsCoverHours=24
+InpNewsRefreshHours=6
 InpStaleMinutes=30
 InpRiskPercent=1.0
 InpMaxRiskPct=15.0

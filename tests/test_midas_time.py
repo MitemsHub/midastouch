@@ -68,8 +68,15 @@ def test_bar_parity_gate_classifies_bar_epochs() -> None:
 def test_pertick_gate_classifies_bar_epochs() -> None:
     b = strip_comments(body("TrackFreshM15Bar"))
     assert "TimeToStruct(sig_open_time," in b, "PERTICK gate must classify the signal-bar epoch"
-    assert "TimeUTCNow(" not in b and "TimeGMT(" not in b, \
-        "PERTICK gate must never use the wall clock (python classifies epochs)"
+    # The wall clock is allowed at exactly ONE site, and it is named: the news stand-down
+    # compares a real instant against event epochs, so unlike the session/Friday gates it
+    # is about "now" and cannot be derived from the signal bar. Everything else in this
+    # function still classifies the bar epoch, and a SECOND wall-clock use fails here.
+    clock = re.findall(r"TimeUTCNow\(\)|TimeGMT\(\)", b)
+    assert clock == ["TimeUTCNow()"], (
+        f"PERTICK gate must classify bar epochs, not the wall clock (python classifies "
+        f"epochs); the news stand-down is the single legitimate 'now': {clock}")
+    assert "NewsVetoReason(TimeUTCNow())" in b
 
 
 def test_staleness_guard_keeps_server_frame() -> None:
@@ -85,14 +92,25 @@ def test_hour_gates_use_their_declared_frames_and_say_so() -> None:
     time, so the 06–20/Friday gates that classify them must structurize the
     epoch — never UTCNow — or the window shifts with the broker timezone.
     The human-intent gates (breaker day key, Friday flat, live timeout) are
-    the TimeUTCNow() side. Each site must carry its frame in its comment."""
+    the TimeUTCNow() side. Each site must carry its frame in its comment.
+
+    The one exception is named, not waved through: the news stand-down compares a real
+    instant against event epochs, so it is a 'now' gate inside an epoch-classifying
+    function — allowed at exactly that call site."""
     for fn, epoch_var in (("BarEvaluateSignal", "TimeToStruct(sig,"),
-                          ("TrackFreshM15Bar", "TimeToStruct(sig_open_time,")):
-        b = body(fn)
-        assert epoch_var in b, f"{fn}: epoch classification site moved?"
-        assert "SERVER" in b, \
-            f"{fn}: the epoch frame (broker-server) must be documented at the site"
-        assert "UTCNow(" not in b, f"{fn}: epoch gates must not structurize UTC"
+                              ("TrackFreshM15Bar", "TimeToStruct(sig_open_time,")):
+            b = body(fn)
+            assert epoch_var in b, f"{fn}: epoch classification site moved?"
+            assert "SERVER" in b, \
+                f"{fn}: the epoch frame (broker-server) must be documented at the site"
+            if fn == "TrackFreshM15Bar":
+                # One wall-clock use, and it is the news stand-down: that gate compares a
+                # real instant against event epochs and cannot be read off the signal
+                # bar. It is pinned BY NAME so a stray second use still fails.
+                assert b.count("UTCNow(") == 1 and "NewsVetoReason(TimeUTCNow())" in b, \
+                    "the news gate is the only 'now' allowed in an epoch-classifying gate"
+            else:
+                assert "UTCNow(" not in b, f"{fn}: epoch gates must not structurize UTC"
     for fn in ("DailyBreakerTripped", "LiveFridayFlatCheck"):
         assert "UTC" in body(fn), f"{fn}: the UTC frame must be documented at the site"
 
@@ -114,10 +132,23 @@ def test_epoch_gates_and_python_of_record_agree_on_the_frame() -> None:
 # --- live wall-clock decisions: TRUE UTC -------------------------------------
 
 def test_daily_breaker_day_key_is_utc() -> None:
+    """The daily rule's day is a TRUE UTC day — asserted where the key now lives.
+
+    On 2026-09-20 the day key moved into `PropDayAnchorCheck()`, which is taken at the
+    UTC rollover on every tick, because the breaker had been deriving its baseline the
+    first time it was *called* (the day's first entry attempt) — which let a loss taken
+    before that attempt be re-anchored away, and forgot the day across a restart. The
+    guarantee is unchanged; this test follows it to its new home and additionally pins
+    that the breaker did not grow its own server-clock day key back.
+    """
+    anchor = strip_comments(body("PropDayAnchorCheck"))
+    assert "TimeToStruct(TimeUTCNow()" in anchor, "prop day key must be a TRUE UTC day"
+    assert not re.search(r"TimeToStruct\s*\(\s*TimeCurrent", anchor), \
+        "the day key must not structurize from broker-server time"
     b = strip_comments(body("DailyBreakerTripped"))
-    assert "TimeToStruct(TimeUTCNow()" in b, "breaker day key must be a TRUE UTC day"
-    assert not re.search(r"TimeToStruct\s*\(\s*TimeCurrent", b), \
-        "breaker must not structurize from broker-server time"
+    assert "TimeToStruct" not in b, \
+        "the breaker is computing its own day key again instead of using the anchor's"
+    assert "g_brk_start_eq" in b, "the breaker must read the anchored baseline"
 
 
 def test_friday_flat_is_utc() -> None:

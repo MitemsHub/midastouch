@@ -171,7 +171,17 @@ def build(comments: list[str], source_keys: dict[str, str], declared: dict[str, 
         "; THE PROP GOVERNOR IS PINNED HERE. The EA now enforces all four venue rules",
         "; before an entry: the 3% UTC-day cap, the 6% trailing Dynamic Risk Shield, the",
         "; 5% profit target and the 20% Best Day ceiling on one day's gain. Their",
-        "; arithmetic mirrors src/synthetic_trader/risk/upcomers_rules.py.",
+        "; arithmetic mirrors src/midas_prop/risk/upcomers_rules.py.",
+        ";",
+        "; THE NEWS GATE IS OFF HERE, AND THAT IS A DECISION, NOT AN OVERSIGHT.",
+        "; InpUseNewsFilter=false means the playbook's standing policy (+/-15 minutes around",
+        "; top-tier USD releases) is NOT enforced on this arm. Turning it ON is a real",
+        "; configuration change with two consequences worth stating: the EA then refreshes",
+        "; the venue's own calendar and refuses entries whenever that source is missing,",
+        "; stale, uncovered, truncated or EMPTY (an empty calendar is 'cannot see the news',",
+        "; never 'no news'), and this arm would no longer be running the configuration the",
+        "; walk-forward certified. The gate is entry-only either way — it never blocks an",
+        "; exit.",
         ";",
         "; PAPER ONLY. InpLiveExecution=false is HARD. Arming is a frozen-gate event and",
         "; no gold signal has passed that gate — so this preset trades nothing, and the",
@@ -323,8 +333,13 @@ def main(argv: list[str]) -> int:
                     help="set InpLiveExecution=false on every preset still arming real "
                          "orders, recording the old value in a comment")
     ap.add_argument("--offline", action="store_true",
+                    # `%APPDATA%` must be escaped: argparse %-formats help strings, and an
+                    # unescaped % raises "badly formed help string" at add_argument time —
+                    # which made this whole CLI unrunnable while its --help looked fine
+                    # (measured 2026-09-20: the documented `--write` workflow could not run
+                    # at all). The tests never called main(), which is how it survived.
                     help="skip the broker symbol check (the MT5 bridge finds a running "
-                         "terminal regardless of %APPDATA%, so --offline is the only way "
+                         "terminal regardless of %%APPDATA%%, so --offline is the only way "
                          "to test the refusal path)")
     a = ap.parse_args(argv)
 

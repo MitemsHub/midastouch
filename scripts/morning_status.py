@@ -1212,6 +1212,15 @@ def correlate_midas_positions(positions: list[dict],
             for (e, d), tags in sorted(groups.items()) if len(tags) > 1]
 
 
+#: The NOFILL row's counters, in the order the EA writes them. The last one (news, the
+#: v1.19c stand-down) was APPENDED to a 10-field row, so `zip` over a historical row
+#: simply stops early — an old ledger still parses, and a new one reports the gate that
+#: can stop trading for days. That asymmetry is the reason this is a named constant
+#: rather than an inline tuple: the EA's format test and this reader must move together.
+NOFILL_KEYS = ("signal", "mismatch", "no_trigger", "session", "friday", "spread",
+               "riskcap", "breaker", "news")
+
+
 def nofill_summary(path: str, now_ts: float | None = None) -> dict | None:
     """v1.18 NOFILL diagnostics tail: sum the last 24h of daily NOFILL rows
     (the EA writes one per UTC day; consumers difference consecutive rows
@@ -1225,11 +1234,7 @@ def nofill_summary(path: str, now_ts: float | None = None) -> dict | None:
                 if len(p) >= 10 and p[0] == "NOFILL":
                     try:
                         if int(p[1]) >= cutoff:
-                            for key, v in zip(
-                                    ("signal", "mismatch", "no_trigger",
-                                     "session", "friday", "spread",
-                                     "riskcap", "breaker"),
-                                    map(int, p[2:10])):
+                            for key, v in zip(NOFILL_KEYS, map(int, p[2:11])):
                                 agg[key] = agg.get(key, 0) + v
                     except ValueError:
                         continue
@@ -1330,8 +1335,15 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
     print(f"  ledger: {os.path.basename(ledger_path)} | age {age_s} | veq {veq_s}{start_s}")
     nf = nofill_summary(ledger_path)   # v1.18: why-no-trade accounting, 24h
     if nf:
-        top = sorted(nf.items(), key=lambda kv: -kv[1])[:4]
-        print("  no-fill (24h): " + ", ".join(f"{k}={v}" for k, v in top)
+        top = sorted(((k, v) for k, v in nf.items() if v), key=lambda kv: -kv[1])[:4]
+        line = ", ".join(f"{k}={v}" for k, v in top)
+        # The news stand-down is GUARANTEED a place on the line: it is the one gate that
+        # can hold entries for days at a time, and a top-4 cut would hide it behind
+        # ordinary session/no-trigger counts exactly when the operator needs the reason.
+        news = nf.get("news", 0)
+        if news and not any(k == "news" for k, _ in top):
+            line += (", " if line else "") + f"news={news}"
+        print("  no-fill (24h): " + line
               + "  (NOFILL diagnostics — reasons the engine did not trade)")
     if is_live:
         # The LIVE arm's block: open positions from dangling LOPEN rows, equity

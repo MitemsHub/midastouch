@@ -230,6 +230,98 @@ walk-forward PASS record exists.
 
 ---
 
+## 5a. The news stand-down (and why turning it on can stop the arm)
+
+The playbook's standing policy — no new entries in a ±15-minute window around top-tier
+USD releases, with open positions still managed — is implemented, and it is the only
+gate in this EA that can legitimately stop trading for days at a time. Read this before
+switching it on.
+
+**The source is a file, and the EA maintains it.** The Python API has no calendar at
+all (MetaTrader5 5.0.5735 exposes no calendar function) and the strategy tester cannot
+call one (`CalendarValueHistory` returns `GetLastError() = 4014`, measured 2026-09-20),
+so the events live in one shared file that both engines read:
+
+```
+MQL5\Files\MIDASTOUCH_news_calendar.csv
+```
+
+With `InpUseNewsFilter=true` the EA reads the venue's own calendar, writes that file
+(every `InpNewsRefreshHours`, default 6), and vetoes entries inside the window.
+`mql5/MIDASTOUCH/MidasNewsProbe.mq5` is the measurement twin: attach it once and it
+prints what this venue actually returns. The file is only ever **overwritten by a
+non-empty answer** — a call that returns nothing is a failure to measure, not news, and
+destroying a usable calendar with it would manufacture the very stand-down the gate
+exists to express.
+
+**The refusal is the feature.** An unusable source vetoes entries and says which of
+these it is, in the journal and in the daily `NOFILL` row:
+
+| journal says | meaning |
+|---|---|
+| `calendar file missing` | nothing has written it on this machine yet |
+| `calendar stale (Nh old > 24h)` | the source aged out; entries are refused until it is refreshed |
+| `calendar does not cover the next 24h` | the window ends too soon to be trusted |
+| `calendar file declares no event count` / `calendar truncated (declares N, holds M)` | the file was written incompletely |
+| `calendar empty` | the venue returned nothing — **cannot see the news**, which is not the same as no news |
+
+The window is symmetric (±15 min, `InpNewsWindowMin`), top-tier events only, and it is
+**entry-only**: no exit path may ever consult it, because a rule that could trap a
+position through a release would breach the shield it claims to protect.
+
+**Why the presets ship it OFF.** Two reasons, both stated rather than implied: (1) the
+certified corpus and the walk-forward were measured with the gate off, so an arm running
+it is no longer the arm that was validated; (2) on this venue the calendar's own
+availability is **unmeasured** — the terminal's news base is 428 bytes, and the only
+probe we could run (in the tester) was refused by the platform. So switching it on may
+do nothing, or may stand the arm down until the source is real. The read is one line: if
+`NEWS FILTER ON — source …: usable` appears in the Experts log, the calendar came back;
+if it prints one of the phrases above, the gate is holding and **that is why there are no
+entries**. `InpNewsRefreshHours=0` disables the refresh for an operator who supplies the
+file some other way.
+
+Parity is unaffected: the replay runs with the filter off, and `InpBarModel` **plus**
+`InpUseNewsFilter` refuses at init, because the BAR engine cannot apply a rule the other
+engine of record does not — a filter that silently does nothing is the one failure mode
+this whole mechanism exists to prevent.
+
+### It has been rehearsed on the compiled EA (2026-09-21)
+
+```
+python scripts\news_gate_rehearsal.py            # every state; ~90 s, five tester passes
+```
+
+That script writes each calendar state and runs a real pass, so the phrases above are
+MEASURED rather than asserted. On 2026-09-08/XAUUSD it produced, in the EA's own journal:
+
+| fixture | the EA said |
+|---|---|
+| file absent | `NEWS VETO: calendar file missing (MIDASTOUCH_news_calendar.csv)` |
+| `# events=3` with one row | `NEWS VETO: calendar truncated (declares 3 events, holds 1) — refresh it` |
+| `# events=0` | `NEWS VETO: calendar empty — an empty calendar is not "no news"` |
+| generated 30 h before the pass | `NEWS VETO: calendar stale (45.8h old > 24h) — refresh it` |
+| eight HIGH events, fresh | `NEWS FILTER ON — source …: usable`, two `NEWS VETO: news blackout: … (within 15 min)` on the bars that signalled inside a window, and a fill on the bar that did not |
+
+Two real defects came out of running it, both of which every source-level test had passed:
+
+1. **The EA could never judge a calendar fresh.** It keyed on `" epoch_generated_utc"`
+   (the writers put a space after the `#`, and only the right-hand side was trimmed), so
+   `gen` was always 0 and every file — including the eight-event one — was refused as
+   "carries no generation time". A fail-closed gate with a broken reader is not a gate; it
+   is a permanent stand-down that looks like policy.
+2. **The tester driver's defaults still described the closed V75/Deriv program**
+   (`V75MacroEngine` on `Volatility 75 Index`, M30, $10,000, 1:100). A caller launching
+   this repo's gold EA through the driver got a config naming an instrument this venue does
+   not offer: no pass ever started, and the failure looked like a slow machine for the full
+   420 s timeout. The defaults now name this venue, this basis and a tick-covered window.
+
+**Note while reading its output:** inside the strategy tester the EA's clock is the
+SIMULATED window time, so a fixture's freshness must be stated in that frame — a calendar
+stamped with the host's clock reads as the future there, and a "stale" fixture is judged
+usable. The rehearsal anchors to the pass's own day for this reason.
+
+---
+
 ## 6. The instrument screen (why XAUUSD, re-measured any time)
 
 ```

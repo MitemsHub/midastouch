@@ -173,26 +173,43 @@ def test_hud_adds_no_input_and_no_file_access() -> None:
         assert tok not in b, f"HUD must never {tok}"
 
 
+def _preset_keys(path: Path) -> set[str]:
+    keys = set()
+    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        line = line.strip()
+        if line and not line.startswith(";") and "=" in line:
+            keys.add(line.split("=", 1)[0].strip())
+    return keys
+
+
 def test_ea_inputs_match_preset_keys_exactly() -> None:
     """The .set preset is the single source of truth: the EA's input set and
     the pinned key set must be identical (the certified splice chain is
-    byte-exact over all 30 keys)."""
+    byte-exact over all 30 keys).
+
+    Two standards, because two files: the Deriv-era `M1_gold` baseline is history and
+    deliberately does not pin what arrived after it, so the delta over THAT file is
+    asserted to be exactly the registered sets below — while the preset the arm actually
+    runs must pin everything, with no delta of any kind.
+    """
     ea_inputs = set(re.findall(r"^input\s+(?!group)\S+\s+(Inp\w+)", src(), re.M))
-    preset_keys = set()
-    for line in PRESET.read_text(encoding="utf-8-sig", errors="replace").splitlines():
-        line = line.strip()
-        if line and not line.startswith(";") and "=" in line:
-            preset_keys.add(line.split("=", 1)[0].strip())
-    # 2026-09-20: the EA gained the prop governor (six inputs) so that the trailing
-    # shield, the profit target and the Best Day cap are enforced inside MT5 rather
-    # than only in Python. Those keys are deliberately NOT yet pinned into the
-    # historical presets, so the delta is asserted to be EXACTLY that known set — any
-    # other new input still fails here, which is the drift this test exists to catch.
+    preset_keys = _preset_keys(PRESET)
+    # 2026-09-20 prop governor (six inputs: shield, target, Best Day inside MT5 rather
+    # than only in Python) and 2026-09-20 news stand-down (five: the calendar gate). Any
+    # OTHER new input still fails here, which is the drift this test exists to catch.
     prop_governor = {
         "InpPropGuard", "InpPropAccountSize", "InpPropTargetPct",
         "InpPropMaxDdPct", "InpPropBestDayPct", "InpPropPeakOverride",
     }
-    unexpected = ea_inputs - preset_keys - prop_governor
+    news_gate = {
+        "InpNewsFile", "InpNewsWindowMin", "InpNewsMaxAgeHours",
+        "InpNewsCoverHours", "InpNewsRefreshHours",
+    }
+    unexpected = ea_inputs - preset_keys - prop_governor - news_gate
     assert not unexpected, f"unexpected EA-only inputs: {sorted(unexpected)}"
     assert not (preset_keys - ea_inputs), (
         f"preset-only keys: {sorted(preset_keys - ea_inputs)}")
+    live = _preset_keys(PRESET.with_name("MidastouchAI_upcomers_gold.set"))
+    assert live == ea_inputs, (
+        "the preset the arm runs must pin every input — an omission means the EA silently "
+        f"runs its code default: {sorted(ea_inputs ^ live)}")
