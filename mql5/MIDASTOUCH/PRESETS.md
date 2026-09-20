@@ -12,6 +12,7 @@ load", the answer is the first row and only the first row.
 | `MidastouchAI_LV_gold.set` | base of the P6 TP-1.5R comparison; the LV arm's own historical record | no |
 | `MidastouchAI_LV_TP15_M15_gold.set` | **staged**, not run: the P6 variant queued behind the 2026-10-01 reading | no |
 | `MidastouchAI_LV_TP15_M5_gold.set` | **staged**, not run: same reading, M5 entry | no |
+| `MidastouchAI_M1m_gold.set`, `M1o`, `M1s`, `M1t` | historical mode-sweep arms (modes 2/5/6 and the re-pinned ORIGINAL). **Retained only because the monitoring test suite pins them** (`test_midas_p6_build`, `test_midas_golive_grammar`, `test_midas_watchdog` seed charts for `M1o`/`M1t`). They are not trading presets and no chart should carry them. | no |
 
 ## Why the arm presets were not all deleted
 
@@ -26,10 +27,13 @@ They look like clutter and they are not, in three specific ways:
 2. **The P6 pair is staged work, not dead weight.** `LV_TP15_M15` and `LV_TP15_M5` are
    the TP-1.5R variants *queued behind the 2026-10-01 reading* — deleting them would
    delete a planned experiment rather than tidy up after a finished one.
-3. **The code tolerates a missing preset by design.** `preset_for_tag` documents:
-   *"Missing file -> the caller observes without pin enforcement"*. So the four mode-sweep
-   arms (`M1m`, `M1o`, `M1s`, `M1t`) were removed on 2026-09-20 with no crash and no
-   broken test — their selection was over, and their arms do not exist on this account.
+3. **Retiring the four mode-sweep arms is a test change, not a file deletion.**
+   2026-09-20: they were deleted, measured, and restored the same day. `preset_for_tag`
+   tolerates a missing file by design (*"Missing file -> the caller observes without pin
+   enforcement"*), so the *tooling* survives the deletion — but three test files pin those
+   arms by name (they seed `M1o`/`M1t` charts and iterate the arm list), so deleting the
+   files left the suite red. The files stay until those tests are updated to the
+   single-account reality; that update is the follow-up, not a delete.
 
 ## Two things every file here now guarantees
 

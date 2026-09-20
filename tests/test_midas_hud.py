@@ -183,6 +183,16 @@ def test_ea_inputs_match_preset_keys_exactly() -> None:
         line = line.strip()
         if line and not line.startswith(";") and "=" in line:
             preset_keys.add(line.split("=", 1)[0].strip())
-    assert ea_inputs == preset_keys, (
-        f"EA-only inputs: {sorted(ea_inputs - preset_keys)}; "
+    # 2026-09-20: the EA gained the prop governor (six inputs) so that the trailing
+    # shield, the profit target and the Best Day cap are enforced inside MT5 rather
+    # than only in Python. Those keys are deliberately NOT yet pinned into the
+    # historical presets, so the delta is asserted to be EXACTLY that known set — any
+    # other new input still fails here, which is the drift this test exists to catch.
+    prop_governor = {
+        "InpPropGuard", "InpPropAccountSize", "InpPropTargetPct",
+        "InpPropMaxDdPct", "InpPropBestDayPct", "InpPropPeakOverride",
+    }
+    unexpected = ea_inputs - preset_keys - prop_governor
+    assert not unexpected, f"unexpected EA-only inputs: {sorted(unexpected)}"
+    assert not (preset_keys - ea_inputs), (
         f"preset-only keys: {sorted(preset_keys - ea_inputs)}")

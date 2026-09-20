@@ -164,8 +164,12 @@ def test_lv_tp15_m5_preset_is_the_p6_winner():
     assert stg["InpTpMult"] == "1.5"
     diff = {k for k in set(base) | set(stg) if base.get(k) != stg.get(k)}
     assert diff == {"InpTpMult", "InpEntryTF"}, diff
-    # live-identity keys carried over untouched
-    assert stg["InpLiveExecution"] == "true"
+    # live-identity keys carried over untouched, EXCEPT the execution switch:
+    # 2026-09-20 the LV files were neutralised (InpLiveExecution true -> false) because
+    # the account they would arm no longer exists and live execution on the Upcomers
+    # evaluation is a frozen-gate event, never a preset default. Both base and staged
+    # file moved together, so the diff set above is unchanged.
+    assert stg["InpLiveExecution"] == "false"
     assert stg["InpMagic"] == "7801601" and stg["InpArmTag"] == "LV"
     assert stg["InpDailyLossCapPct"] == "15.0"
     head = (REPO / "mql5" / "MIDASTOUCH" / "MidastouchAI_LV_TP15_M5_gold.set") \
@@ -179,7 +183,7 @@ def test_paper_arms_stay_certified_shape():
     line (the house contract: every preset lists every EA input) — the
     certified VALUES are untouched: TP stays 2.0, TF stays M15, execution
     stays paper. The reading adjudicates before any paper arm changes."""
-    for arm in ("M1", "M1t", "M1s", "M1m"):
+    for arm in ("M1", "LV", "upcomers"):
         vals = _preset_vals(f"MidastouchAI_{arm}_gold.set")
         assert vals["InpEntryTF"] == "15", arm
         assert vals["InpTpMult"] == "2.0", arm
