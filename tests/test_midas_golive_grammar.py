@@ -228,8 +228,12 @@ def test_chart_identity_adjudicates_the_real_drift_class(tmp_path: Path) -> None
 
 # --- the preset contract, both directions -----------------------------------------
 
+# 2026-09-20: EVERY preset is now InpLiveExecution=false. The LV arm was the last one
+# carrying true (a live arm on a Deriv account that no longer exists); leaving a file that
+# arms real orders on the funded Upcomers account is a loaded switch, not a record. Arming
+# is a frozen-gate event driven by the arming record, never by a preset default.
 @pytest.mark.parametrize("arm,live", [
-    ("M1", False), ("M1t", False), ("M1s", False), ("M1m", False), ("LV", True),
+    ("M1", False), ("M1t", False), ("M1s", False), ("M1m", False), ("LV", False),
 ])
 def test_execution_switch_by_preset(arm: str, live: bool) -> None:
     vals = {}
