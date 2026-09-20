@@ -1,7 +1,14 @@
-"""One-command morning status for the V75 paper A/B (read-only, no MT5 needed).
+"""One-command morning status: the gold paper arm, plus the retained inventory
+of the retired V75 paper A/B (read-only, no MT5 needed).
 
     python scripts/morning_status.py
     python scripts/morning_status.py --days 1 --strict
+
+Sections [1]-[3] are the V75 A/B inventory carried over from the predecessor
+program; their magics (A2_fwd/B_tp24/C_v75/D_fwd) cannot see the gold arm, which
+is [3b]. On a gold-only machine sections [1]-[3] are normally empty - that is
+the expected reading, not a fault. For this program's go/no-go, use
+`scripts/live_readiness.py` (docs/MIDASTOUCH_HEALTH_GUIDE.md section 0).
 
 Answers, in order:
   [1] ARM HEALTH   - per paper-arm terminal: terminal-process count, the EA's
@@ -20,8 +27,12 @@ Answers, in order:
                      ledger IS the evidence (same wire format, parse_ledger
                      applies unchanged).
 
-The pre-registered gate: >= 30 closed arm-A trades with POSITIVE expectancy
-+ tick reconciliation PASS (self-arms at 7d of ledger) + watchdog CERTIFIED.
+The pre-registered paper gate: >= 30 closed trades on the attached arm with
+POSITIVE expectancy + tick reconciliation PASS (self-arms at 7d of ledger)
++ watchdog CERTIFIED. That clock governs promotion out of paper; it does not
+validate a strategy. Strategy validation is the separate, frozen walk-forward
+gate (docs/GOLD_WFO_PROTOCOL.md section 6), and arming is the arming record
+artifacts/live/armed.json - never an input edit.
 
 Exit code 0 always (a status report, not a check); --strict exits 1 when any
 arm looks unhealthy (telemetry stale > 2h, no telemetry, ledger problems).
@@ -789,7 +800,7 @@ def print_floor_zones(inv: list[dict], unhealthy: bool) -> bool:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Morning status for the V75 paper A/B")
+    ap = argparse.ArgumentParser(description="Morning status: gold paper arm + retained V75 A/B inventory")
     ap.add_argument("--days", type=int, default=WINDOW_DAYS, help="journal audit window (days)")
     ap.add_argument("--strict", action="store_true", help="exit 1 when any arm looks unhealthy")
     ap.add_argument("--verified-offset", type=int, default=None, metavar="MIN",
@@ -815,6 +826,8 @@ def main() -> None:
     print(paint("[1] ARM HEALTH", "b"))
     if not inv:
         print("  no terminal data folder with a V75 chart + arm magic found")
+        print("    (this inventory tracks the retired V75 A/B magics; the gold")
+        print("     arm is [3b] - for gold status run scripts/live_readiness.py)")
         unhealthy = True
     else:
         n_terminals = len({t["dir"] for t in inv})
@@ -959,13 +972,14 @@ def main() -> None:
     unhealthy = print_floor_zones(inv, unhealthy)
 
     print()
-    print(paint("Gate reminder (pre-registered):", "b"))
-    print(f"  >= {MIN_TRADES} closed arm-A trades with POSITIVE expectancy")
+    print(paint("Gate reminder (paper clock, pre-registered):", "b"))
+    print(f"  >= {MIN_TRADES} closed trades on the attached arm with POSITIVE expectancy")
     print("  + tick reconciliation PASS (self-arms at 7d of ledger)")
     print("  + watchdog CERTIFIED  ->  live authorized at the pre-registered size")
-    print("  (A/B are the gate inputs; C_v75 is the V75MacroEngine paper arm:")
-    print("   telemetry only, NOT a gate input; D_fwd is the forward test of the")
-    print("   gated candidate — independent-window evidence, not a gate input)")
+    print("  Strategy validation is the separate, frozen walk-forward gate in")
+    print("  docs/GOLD_WFO_PROTOCOL.md section 6 (ALL legs must hold); arming is the")
+    print("  record artifacts/live/armed.json. The predecessor program's per-arm")
+    print("  attribution (retired with the V75 paper A/B) used to print here.")
 
     if args.strict and unhealthy:
         print(paint("\nSTRICT: unhealthy signals present (see [1])", "r"))

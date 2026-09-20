@@ -1,467 +1,215 @@
-# Synthetic AI Trader
+# MIDASTOUCH
 
-**Institutional-grade AI trading intelligence for synthetic indices — powered by multi-timeframe analysis, probabilistic online learning, and structured explainability.**
+**The XAUUSD program on the Upcomers $25,000 evaluation** — one MT5 Expert Advisor
+(`mql5/MIDASTOUCH/MidastouchAI.mq5`, account **1428765** @ `Upcomers-Server`, magic
+7825001, arm tag `U25`) plus the Python layer that measures it, scores it, and refuses
+to arm it without evidence.
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Next.js 15](https://img.shields.io/badge/next.js-15-black.svg)](https://nextjs.org/)
-[![Tests](https://img.shields.io/badge/tests-313%20passed-brightgreen.svg)](#testing)
-[![License](https://img.shields.io/badge/license-proprietary-red.svg)](#license)
-
----
-
-## What This Is
-
-This is not another one-indicator Expert Advisor. Synthetic AI Trader is a **modular, research-first trading platform** that separates market data ingestion, multi-timeframe feature engineering, probabilistic modeling, decision fusion, risk controls, and execution into independent, testable components.
-
-Built for **Volatility 75 (V75)** and **Volatility 100 (V100)** on Deriv via MT5.
-
-### Key Design Principles
-
-- **Separated concerns** — each module is independently testable and replaceable
-- **Explainability first** — every signal comes with structured rationale, confidence breakdown, and invalidation levels
-- **Paper-first** — the system must prove positive expectancy through walk-forward validation before any real execution
-- **Online learning** — the model continuously adapts to regime changes without catastrophic forgetting
-- **Feature flags** — experimental capabilities are gated and can be toggled without code changes
+**It is not trading, and it is not validated.** `InpLiveExecution=false` in every preset,
+`artifacts/live/armed.json` is absent, and no gold signal has passed the frozen
+walk-forward gate. Arming is an **arming-record event**, never an input edit: if you ever
+see `LIVE` on a chart while that record is missing, that is an incident, not a milestone.
+The strategy is real work; it has not earned a live order yet.
 
 ---
 
-## Architecture
+## 1. What is running right now
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Operator Dashboard (Next.js)              │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐   │
-│  │ Trade    │ │Intelligence│ │ History  │ │   Health     │   │
-│  │  Plan    │ │  Panels   │ │  Panel   │ │  Dashboard   │   │
-│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └──────┬───────┘   │
-│       └─────────────┼───────────┼───────────────┘           │
-│                     │  Engine Bridge (Python ↔ TS)           │
-└─────────────────────┼───────────────────────────────────────┘
-                      │
-┌─────────────────────┼───────────────────────────────────────┐
-│              Python Trading Engine                            │
-│  ┌──────────────┐ ┌──────────────┐ ┌─────────────────────┐  │
-│  │ Market Data  │ │   Strategy   │ │   Risk Engine        │  │
-│  │  Snapshot    │ │  Decision    │ │  Position sizing     │  │
-│  │  Collector   │ │  Engine      │ │  Drawdown limits     │  │
-│  └──────┬───────┘ └──────┬───────┘ └──────────┬──────────┘  │
-│         │                │                     │              │
-│  ┌──────┴───────┐ ┌──────┴───────┐ ┌──────────┴──────────┐  │
-│  │   Feature    │ │    Model     │ │   Execution          │  │
-│  │   Engine     │ │   Ensemble   │ │   Backend            │  │
-│  │  46 features │ │  Online LR   │ │  MT5 / Deriv WS      │  │
-│  └──────────────┘ └──────────────┘ └──────────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
-                      │
-┌─────────────────────┼───────────────────────────────────────┐
-│              Data Layer                                       │
-│  ┌──────────────┐ ┌──────────────┐ ┌─────────────────────┐  │
-│  │   MT5        │ │  Deriv WS    │ │   CSV Tick Store     │  │
-│  │  Terminal    │ │  Adapter     │ │   (append + rotate)  │  │
-│  └──────────────┘ └──────────────┘ └─────────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
-```
+Measured on 2026-09-20, read-only, on this machine:
 
----
+| surface | state |
+|---|---|
+| MT5 terminal | `terminal64.exe` running (build 6204, `C:\Program Files\MetaTrader 5`) |
+| gold arm attached | **no** — the report prints `no MIDASTOUCH chart attached - gold arm not running` |
+| live execution | **OFF** in every preset, and no arming record exists |
+| validation | **NOT VALIDATED** — the walk-forward verdict of 2026-09-19 stands |
+| paper supervisor task | `MitemshubPaperSupervisor` exists and is `Ready`, but its action runs the **predecessor checkout's** own supervisor script (in `Synthetic Indices Bot`, not here), so it supervises nothing in this repository |
 
-## Features
-
-### Phase 3 — Core Intelligence Engine
-
-| Feature | Description |
-|---------|-------------|
-| **4-Timeframe Hierarchy** | 4H → 1H → 15M → 5M with per-timeframe regime detection |
-| **Confluence Scoring** | Cross-timeframe alignment scores (0.4–0.9) |
-| **Call Lifecycle** | `forming` → `actionable` → `confirmed` → `failing` → `cancelled` |
-| **Hurst Exponent** | Long-term memory/persistence detection (0–1) |
-| **Shannon Entropy** | Return distribution randomness quantification |
-| **Market Structure** | FVG detection, internal BOS, equal highs/lows, liquidity sweeps |
-| **Regime Detection** | Trend/range/volatile/compression with Hurst-aware persistence |
-| **Background Scanner** | Async continuous monitoring with regime change alerts |
-
-### Phase 4 — AI Evolution & Self-Improving Intelligence
-
-| Feature | Description |
-|---------|-------------|
-| **FeatureSelector** | Automatic importance ranking, stability tracking, redundancy detection |
-| **ModelCalibrator** | Platt scaling & isotonic regression for probability calibration |
-| **ConfidenceScorer** | Multi-factor confidence (model + regime + structure + displacement) |
-| **EnsembleModel** | Weighted combination of multiple models with online updates |
-| **ModelMonitor** | Drift detection (KS-statistic), performance tracking (ECE, Brier) |
-| **Explainability** | 15+ rationale factors per signal with structured trade rationales |
-
-### Decision Engine — 8-Component Fusion
-
-| Component | Weight | Purpose |
-|-----------|--------|---------|
-| Model | 0.28 | Calibrated directional probability |
-| Structure | 0.22 | BOS, FVG, sweeps, internal structure |
-| Regime | 0.15 | Regime + Hurst + entropy + volatility clustering |
-| Confluence | 0.08 | Multi-timeframe alignment |
-| Mean Reversion | 0.08 | Range position, RSI, Keltner/Donchian channels |
-| Displacement | 0.07 | Body/ATR directional alignment |
-| Momentum | 0.07 | Slope, EMA spread, recent returns |
-| Volatility | 0.05 | ATR ratio, realized vol, volatility clustering |
-
----
-
-## Operator Dashboard
-
-The **MitemsHub Indices** operator dashboard is a Next.js 15 application providing:
-
-- **Trade Plan Panel** — Real-time trade recommendations with entry/invalidation/target levels
-- **AI Market Intelligence** — Regime analysis, bias scoring, and market thesis
-- **Multi-Timeframe Alignment** — Visual alignment matrix across all timeframes
-- **Bullish vs Bearish Evidence** — Ranked evidence with strength bars
-- **Current Market Thesis** — AI-generated thesis with confidence and invalidation
-- **Health Dashboard** — System health monitoring, MT5 diagnostics, bridge status
-- **Trade History** — Complete trade journal with outcomes and performance metrics
-- **Mobile-First Design** — Responsive layout with bottom navigation, haptic feedback, and pull-to-refresh
-
-### Screenshots
-
-The dashboard supports both light and dark themes with a sophisticated glass-morphism design system.
-
----
-
-## Project Structure
-
-```
-Synthetic Indices Bot/
-├── src/synthetic_trader/          # Python trading engine
-│   ├── cli.py                     # Command-line interface
-│   ├── config.py                  # Trader configuration & feature flags
-│   ├── domain.py                  # Domain models (Tick, Candle, Signal)
-│   ├── backtest/                  # Backtesting engine
-│   ├── execution/                 # Execution backends (MT5, Deriv WS)
-│   ├── features/                  # Feature engineering (46 features)
-│   │   ├── indicators.py          # Technical indicators
-│   │   ├── market_structure.py    # SMC/ICT-inspired structure detection
-│   │   ├── regimes.py             # Volatility regime classification
-│   │   └── multi_timeframe_structure.py
-│   ├── journal/                   # Trade journaling
-│   ├── live/                      # Live data collection
-│   │   ├── market_snapshot.py     # Snapshot builder & alert engine
-│   │   ├── signal_guardian.py     # Signal validation
-│   │   └── execution_backends.py  # MT5 execution
-│   ├── models/                    # ML models
-│   │   ├── online.py              # Online logistic regression
-│   │   └── advanced.py            # FeatureSelector, Calibrator, Ensemble
-│   ├── research/                  # Walk-forward validation
-│   ├── risk/                      # Risk management engine
-│   ├── scanner/                   # Background scanner
-│   └── strategy/                  # Decision engine & confirmation
-│
-├── external/mitemshub-indices/    # Next.js operator dashboard
-│   ├── app/                       # Next.js App Router
-│   │   ├── page.tsx               # Main dashboard
-│   │   ├── globals.css            # Design system (light + dark themes)
-│   │   └── api/                   # API routes
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── intelligence/      # AI analysis panels
-│   │   │   ├── operator/          # Dashboard shell & controls
-│   │   │   └── ui/                # Shared UI utilities (haptic, skeleton)
-│   │   └── lib/
-│   │       ├── engine-bridge.ts   # Python ↔ TypeScript bridge
-│   │       ├── health-logic.ts    # System health computation
-│   │       └── python-runner.ts   # Python process management
-│   └── tests/                     # Vitest test suite
-│
-├── infra/                         # AWS infrastructure (Terraform)
-│   ├── main.tf                    # EC2, ALB, Security Groups
-│   ├── variables.tf               # Input variables
-│   ├── outputs.tf                 # Resource outputs
-│   └── user_data.ps1              # Windows Server bootstrap
-│
-├── tests/                         # Python test suite (313 tests)
-├── docs/                          # Architecture & phase documentation
-│   ├── architecture.md            # System architecture
-│   ├── PHASE3_SUMMARY.md          # Phase 3 implementation details
-│   ├── PHASE4_SUMMARY.md          # Phase 4 implementation details
-│   └── superpowers/               # Design specs & plans
-└── pyproject.toml                 # Python project configuration
-```
-
----
-
-## Quick Start
-
-### Prerequisites
-
-- Python 3.11+
-- Node.js 20+
-- MT5 Terminal (Deriv) — for live data
-- Git
-
-### 1. Clone the Repository
+Reproduce that table whenever you like:
 
 ```bash
-git clone https://github.com/MitemsHub/mitemshub-indices.git
-cd "Synthetic Indices Bot"
+python scripts/live_readiness.py    # go/no-go, measured against the running terminal
+python scripts/morning_status.py    # what happened: [3b] is the gold arm, [1]-[3] are retired inventory
 ```
 
-### 2. Set Up Python Engine
-
-```bash
-# Create virtual environment
-python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # macOS/Linux
-
-# Install dependencies
-pip install -e ".[research,live]"
-```
-
-### 3. Set Up Operator Dashboard
-
-```bash
-cd external/mitemshub-indices
-npm install
-```
-
-### 4. Configure Environment
-
-Copy the environment template and fill in your MT5 credentials:
-
-```bash
-cp external/mitemshub-indices/.env.example external/mitemshub-indices/.env.local
-```
-
-Edit `.env.local` with your MT5 server, login, and password:
-
-```
-SYNTHETIC_MT5_SERVER=DerivSVG-Server-03
-SYNTHETIC_MT5_LOGIN=your_login
-SYNTHETIC_MT5_PASSWORD=your_password
-SYNTHETIC_MT5_TERMINAL_PATH=C:\Program Files\MetaTrader 5 Terminal\terminal64.exe
-```
-
-### 5. Start the Dashboard
-
-```bash
-cd external/mitemshub-indices
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+`scripts/live_readiness.py` is the one that matters. Every line is a measurement, not a
+document lookup, and the exit code is non-zero unless every precondition holds — including
+the scheduled-task leg, which is what catches the stale predecessor task above. The
+reasoning behind each line, and the two legs that are *supposed* to look "off", are in
+`docs/MIDASTOUCH_HEALTH_GUIDE.md`.
 
 ---
 
-## CLI Commands
+## 2. What the EA does when it trades
 
-### Backtest
+One instrument, one arm, one position at a time, intraday-first.
 
-```bash
-python -m synthetic_trader.cli backtest --csv data/ticks.csv --symbol R_75 --timeframe 60
-```
+| piece | rule |
+|---|---|
+| **regime** | H1 EMA(20) **and** H4 EMA(20) must agree on a side; disagreement ⇒ no regime, no trade |
+| **trigger** | on the **closed M15 bar**: a band touch-back (previous bar closed outside BB(20, 2σ), signal bar closed back inside) or RSI(14) at an extreme (≥ 70 / ≤ 30) |
+| **mode** | `MODE_REVERSE_DIRECTION` (the certified default): the trade happens only when the trigger **contradicts** the regime, and then it takes the **regime's side** — buy strength or a failed dip inside an uptrend, sell the mirror in a downtrend |
+| **stop** | 2.0 × ATR(14) on H1 — ATR-scaled always, never a fixed dollar distance |
+| **target** | 2.0R = 2 × the stop; untouched positions time out after 48 M15 bars (720 min) |
+| **session** | entries only 06:00–20:00 **UTC**; Friday cutoff 20:00 UTC, flat over the weekend by default |
 
-### Walk-Forward Validation
+Five gates stand between a signal and an order, all checked **before** the entry: the
+session band, the spread cap (veto when spread > 1.5 % of the stop distance), the staleness
+guard (no fresh bar for 30 min ⇒ stand down, which also covers gold's holidays), the
+weekend policy, and the prop governor below. The news filter is **disabled on purpose**:
+there is no calendar engine, and setting it true raises `INIT_FAILED` rather than trading
+without one.
 
-```bash
-python -m synthetic_trader.cli walk-forward --csv data/ticks.csv --symbol R_75 --train-ticks 50000 --test-ticks 10000
-```
-
-### Collect Historical Data
-
-```bash
-python -m synthetic_trader.cli collect-history --symbol R_75 --count 50000 --output data/R_75_ticks.csv
-```
-
-### Paper Trading
-
-```bash
-python -m synthetic_trader.cli paper-live --symbol R_75 --duration-sec 900 --ticks-output data/R_75_live_ticks.csv
-```
-
-### Inspect Data
-
-```bash
-python -m synthetic_trader.cli inspect-data --csv data/ticks.csv --symbol R_75
-```
+**Sizing** is 1 % of equity per trade, converted through the symbol's own tick value with a
+geometric identity check pinned against the broker's *settled* value (`order_calc_profit`),
+with the min-lot floor disclosed at init and a veto when even the minimum lot would risk
+more than 15 % of the sizing basis. The authority order is **settled > geometric > raw**,
+and disagreements **refuse** rather than warn — that rule exists because a $250 intended
+stop was once sized as $2,500 on this venue.
 
 ---
 
-## Testing
+## 3. The venue's rules, and how the EA refuses to break them
 
-### Python Tests (313 tests)
+Upcomers Thunderbolt Classic. All four are enforced in `PropGovernorBlock()`, which gates
+**entries** — it does not manage or force-close open positions except the Friday flat, and
+that limit is deliberate and documented.
+
+| rule | the guard |
+|---|---|
+| **3 % daily loss** (one UTC day) | day-opening equity is captured **at the UTC rollover on every tick**, and reconstructed from the account's own closed deals when the EA starts mid-day, so a restart does not forget the day. Comments on — entries blocked once breached |
+| **6 % trailing "Dynamic Risk Shield"** | measured off the equity high-water mark, derived from the account's own history (with a peak override for a restart inside a drawdown); entries blocked |
+| **5 % profit target** | the evaluation's **pass mark**, and a challenge rule only — the funded phase has none. So reaching it is a **phase transition, not a stop**: the EA reports it once and keeps trading, because the funded account is where the strategy is supposed to earn. The funded phase's own limits (daily DD, max single-trade loss) are still unverified with the venue, so the challenge guards below stay in force and the transition print says so |
+| **20 % Best Day cap** | a single UTC day may contribute at most 20 % of the target, anchored to the same rollover as the daily cap |
+
+Which parts of that rule set are still **unverified by the venue** — and what the EA does
+while they are — is stated in `docs/MIDASTOUCH_GOLD_PLAYBOOK.md` §3 and the rules audit
+`docs/UPCOMERS_RULES_AUDIT_20260919.md`. The playbook does not claim an edge and neither
+does this page: instrument selection is finished, and its measured answer is that gold's
+toll is **0.02473 R per trade** against the only edge this program has ever measured
+(**+0.027 R/trade gross**).
+
+---
+
+## 4. What is not running, and why
+
+Stated plainly, because a front page that omits this is a sales page:
+
+- **The walk-forward gate says no.** 568 out-of-sample trades, **+20.67 R** (+0.0364 R per
+  trade), fold-mean **t = +0.52** against a required ≥ 1.5, 12/30 positive folds against a
+  required 60 %, worst fold −8.06 R against a required > −3.0, median fold −0.72 R. It beats
+  the seeded random-entry control; it fails four of six pre-registered legs, and one
+  profitable path breaches the Best Day cap. Verdict: **NOT VALIDATED**, window closed —
+  `docs/GOLD_WFO_VERDICT_20260919.md`, protocol in `docs/GOLD_WFO_PROTOCOL.md`.
+- **Per-tick parity is restricted to windows the venue can serve.** This venue's real ticks
+  begin **2026-09-04**; before that the tester manufactures them. The parity contract now
+  records the tick model in every artifact and **refuses** a window it cannot cover (both
+  previously certified windows are now REFUSED rather than FAIL), and a key-matched PASS is
+  demoted unless the ticks were real. Decision and evidence:
+  `docs/DATA_SCOPE_AND_CLOCK_20260920.md` §4b.
+- **The EA's fills look faithful where the engines agree; the entry selection does not.**
+  On the tick-covered window the tester produced 9 trades against the Python engine's 8,
+  and on the trades where both engines pick the same bars the fills agree to within 0.02 R —
+  so the open gap is **which bars signal**, not how they fill.
+- **The scheduled supervisor is not this repo's.** See §1 — it points at the predecessor
+  checkout, so nothing supervises the gold paper arm. Re-pointing it is an operator action
+  with its own record, not a commit.
+
+---
+
+## 5. Where the real documentation lives
+
+| want | read |
+|---|---|
+| what is running, and how to read each signal | `docs/MIDASTOUCH_HEALTH_GUIDE.md` |
+| the venue, the instrument, the rules, the measured numbers | `docs/MIDASTOUCH_GOLD_PLAYBOOK.md` |
+| the evidence standard: clocks, data scope, tick coverage, parity state | `docs/DATA_SCOPE_AND_CLOCK_20260920.md` |
+| the validation gate and its frozen pass criteria | `docs/GOLD_WFO_PROTOCOL.md` |
+| the verdict that gate returned | `docs/GOLD_WFO_VERDICT_20260919.md` |
+| the venue's rule set as audited | `docs/UPCOMERS_RULES_AUDIT_20260919.md` |
+| the presets and every input's meaning | `mql5/MIDASTOUCH/PRESETS.md` |
+| operating rules once something is armed | `docs/MIDASTOUCH_PROTOCOL.md` |
+
+Dated reports in `docs/` (`*_2026091*.md`) are **records**, not instructions. A live
+operator document may name only scripts that exist in this repo — that is a test, not a
+convention (`tests/test_operator_docs.py`).
+
+---
+
+## 6. Repository layout
+
+```
+mql5/MIDASTOUCH/      the EA source (MidastouchAI.mq5), its presets and PRESETS.md
+src/midas_prop/       the prop layer: venue rules as arithmetic, sizing/legality/arming,
+                      the paper broker. (Called `synthetic_trader` until 2026-09-20; it
+                      holds no synthetic-index code, and importing the old name is a
+                      test failure by design.)
+scripts/              research and operations: the walk-forward harness, the parity
+                      contract, the MT5 drivers, the status tools, the audits
+tests/                the pins — every refusal in this repo has a test that fails without it
+docs/                 the playbook, the health guide, the protocols, the dated records
+configs/              account registry (account identity → symbol resolution) and shortlists
+data/                 this venue's own bars (the data of record)
+artifacts/            run outputs: parity results, the walk-forward artifact, verification traces
+```
+
+Day-to-day commands:
 
 ```bash
-python -m pytest tests/ -v
+python scripts/compile_midas.py          # compile the EA (0 errors / 0 warnings)
+python -m pytest tests -q                # expect 0 failed; report the count
+python scripts/audit_program_surface.py  # live import closure, dangling residue
+python scripts/gold_walkforward.py       # re-run the research gate
+python scripts/midas_parity.py           # the EA-vs-python contract
 ```
 
-### Next.js Tests (88 tests)
-
-```bash
-cd external/mitemshub-indices
-npm test
-```
-
-### Run All Tests
-
-```bash
-# Python
-python -m pytest tests/ -v
-
-# Next.js
-cd external/mitemshub-indices && npm test
-```
+**Interpreter.** This checkout has **no `.venv` of its own** today — the commands above
+are written for `python`, which on this machine is 3.14.6 at `C:\Python314`. The
+predecessor checkout does have a venv: **do not borrow it.** It carries *that* project's
+`src/` on the import path, which is the cross-repository load that
+`tests/test_local_imports.py` exists to prevent — the same mistake, one layer down. If you
+create a repo-local `.venv`, the operator documents may name it again: the interpreter pin
+in `tests/test_operator_docs.py` requires any venv path a document names to exist.
 
 ---
 
-## Infrastructure (AWS Deployment)
+## 7. The rules this repository holds itself to
 
-The project includes Terraform templates for deploying to AWS EC2:
+These are enforced, not aspirational — each one is a script and a test:
 
-```bash
-cd infra
-
-# Initialize Terraform
-terraform init
-
-# Plan deployment
-terraform plan -var-file="terraform.tfvars"
-
-# Apply deployment
-terraform apply -var-file="terraform.tfvars"
-```
-
-### What Gets Deployed
-
-- **EC2 Instance** — t3.large Windows Server 2022
-- **Application Load Balancer** — HTTP on port 80
-- **Security Groups** — RDP restricted to admin IP, HTTP through ALB
-- **Auto-Start** — PM2 + Windows Scheduled Task for boot persistence
-- **Pre-installed** — Node.js 20, Python 3.10, Git, MT5 Terminal
-
-### Required Variables
-
-```hcl
-aws_access_key    = "your-access-key"
-aws_secret_key    = "your-secret-key"
-aws_region        = "eu-north-1"
-admin_ip          = "your.public.ip"
-mt5_server        = "DerivSVG-Server-03"
-mt5_login         = "your_login"
-mt5_password      = "your_password"
-```
-
-See `infra/terraform.tfvars.example` for a template.
+- **Nothing is armed without a record.** The preset generator refuses to emit a
+  live-enabling preset while no arming record exists (`scripts/gold_preset_upcomers.py`).
+- **No live path reaches dead code.** `scripts/audit_program_surface.py` reports the live
+  import closure and any dangling reference; the answer is expected to be **0 dangling**.
+- **No file from the other program.** `scripts/program_boundary.py` fails on a foreign
+  program file in either checkout; `scripts/cross_repo_duplication.py` fails when a shared
+  asset (the paper broker in particular) silently diverges between them.
+- **An operator document may name only tools that exist.** `tests/test_operator_docs.py`.
+- **A pass has to be produced by the model it declares.** A tester run on generated ticks
+  can never be recorded as a real-tick pass (`tests/mt5_tester_driver.py` + the recording
+  rule in `scripts/midas_parity.py`).
+- **The same clock on both sides.** The EA's tester epochs are converted from venue server
+  time to UTC through a per-window pin that is **asserted** from the venue's own bars and
+  refuses when the offset is not constant (`scripts/midas_parity.py`).
 
 ---
 
-## Configuration
+## 8. History: the predecessor program
 
-### Feature Flags
+MIDASTOUCH began as *Synthetic AI Trader* — Deriv synthetic indices (V75/V100), a Next.js
+dashboard, Terraform — and that program is **retired**: its arms, terminals, presets and
+corpus were deleted here on purpose, and its package name survived only as
+`src/synthetic_trader/` until the rename to `src/midas_prop/` on 2026-09-20.
 
-All experimental capabilities are gated via `FeatureFlags` in `config.py`:
+Two consequences you will meet in this repo:
 
-```python
-from synthetic_trader.config import TraderConfig, FeatureFlags
-
-config = TraderConfig(
-    features=FeatureFlags(
-        enable_hurst=True,                    # Hurst exponent analysis
-        enable_entropy=True,                  # Shannon entropy analysis
-        enable_volatility_clustering=True,    # Vol autocorrelation
-        enable_keltner_donchian=True,         # Channel position signals
-        enable_fvg_detection=True,            # Fair value gap detection
-        enable_internal_structure=True,       # Internal BOS detection
-        enable_equal_highs_lows=True,         # Equal highs/lows detection
-        enable_confidence_calibration=True,   # Probability calibration
-        enable_explainability=True,           # Structured explanations
-        enable_regime_persistence=True,       # Regime persistence tracking
-        enable_multi_tf_confluence=True,      # Multi-timeframe confluence
-    )
-)
-```
-
-### Risk Configuration
-
-```python
-from synthetic_trader.config import RiskConfig
-
-risk = RiskConfig(
-    min_confidence=0.58,      # Minimum confidence to generate a signal
-    max_position_pct=0.02,    # Max 2% of equity per trade
-    max_drawdown_pct=0.10,    # Max 10% drawdown before pause
-)
-```
-
----
-
-## Important Design Stances
-
-### Synthetic Indices vs Real Markets
-
-For synthetic indices, terms like **liquidity sweep**, **fair value gap**, **order block**, and **displacement** are treated as **price-structure features** — not as representations of real institutional order flow. These features are useful only if walk-forward evidence proves they add expectancy.
-
-### Safety-First Upgrade Path
-
-1. ✅ Collect high-quality tick data
-2. ✅ Run walk-forward backtests
-3. ✅ Run paper trading against live ticks
-4. 🔲 Enable tiny-stake supervised live trading
-5. 🔲 Full automation (only after surviving drawdown + drift tests)
-
-**Never enable real execution until the paper journal proves positive expectancy** after realistic execution costs, latency, bad streaks, and regime changes.
-
----
-
-## Monorepo Workflow
-
-This is a monorepo. All Git operations happen at the root, even for changes in `external/mitemshub-indices/`.
-
-```bash
-# Always work from the root
-git status
-git add external/mitemshub-indices/src/components/
-git commit -m "feat(dashboard): add new intelligence panel"
-git push origin feature/mt5-rollout-enablement
-```
-
-Do not create or restore a nested `.git` directory inside `external/mitemshub-indices/`.
-
----
-
-## Branch Strategy
-
-| Branch | Purpose |
-|--------|---------|
-| `main` | Production-ready code |
-| `feature/mt5-rollout-enablement` | Active development for MT5 integration |
-| `feat/phase2-paper-live-reliability` | Paper trading reliability improvements |
-
----
-
-## Technology Stack
-
-| Layer | Technology |
-|-------|------------|
-| **Dashboard** | Next.js 15, React 18, TypeScript 5, Tailwind CSS |
-| **Backend** | Python 3.11+, Online ML, NumPy, Pandas, scikit-learn |
-| **Bridge** | Python child_process ↔ Next.js API routes |
-| **Data** | MT5 Terminal (Deriv), Deriv WebSocket API |
-| **Infrastructure** | Terraform, AWS EC2 (t3.large), ALB, PM2 |
-| **Testing** | pytest (313 tests), Vitest (88 tests) |
-
----
-
-## Contributing
-
-1. Create a feature branch from `main`
-2. Make your changes with tests
-3. Ensure all tests pass: `python -m pytest tests/ -v && cd external/mitemshub-indices && npm test`
-4. Submit a pull request with a clear description
-
----
-
-## License
-
-This is proprietary software. All rights reserved.
-
----
-
-## Acknowledgments
-
-Built with a research-first mindset — every feature must prove its value through walk-forward validation before being trusted with real capital.
+- **The predecessor's README used to be this file.** It is retired from here: it now lives
+  in its own checkout (`Synthetic Indices Bot`, remote `MitemsHub/mitemshub-indices`), and
+  the earlier revision remains in this repository's history. Nothing in it described this
+  account, and the `synthetic_trader` package name it refers to still resolves to *that*
+  checkout — which is exactly how a test can pass while grading another repository's file.
+  `tests/test_local_imports.py` fails if anything here resolves outside this repo.
+- **Residue is reported, not hidden.** Where the predecessor's tooling is still visible on
+  this surface (the retired inventory in `scripts/morning_status.py`, the stale scheduled
+  task in §1, retired-era text inside the tester driver) it is labelled with what it is and
+  what to use instead — rather than quietly left to look current.

@@ -13,7 +13,20 @@ Conventions (2026-09-18 — replaces ad-hoc shell compiles):
     compile_log.txt debris this replaces is never recreated.
 
 Usage:
-  python scripts/compile_midas.py [--target PATH.mq5 ...] [--keep]
+  python scripts/compile_midas.py [--target PATH.mq5 ...] [--deploy] [--keep]
+
+  * `--deploy` copies a VERIFIED .ex5 to the two places it can be attached from: the
+    repo (`mql5/MIDASTOUCH/MidastouchAI.ex5`) and the terminal's own Experts tree
+    (`<data folder>\\MQL5\\Experts\\MIDASTOUCH\\`). Without it a successful compile
+    leaves nothing behind — the    scratch folder is deleted — so a chart keeps loading
+    the previous build and the source can silently outrun the binary. Each copy is
+    read back and hash-compared, and the line prints `source=… ex5=…` because the
+    compiler is not bit-reproducible: provenance is the recorded pair, not a mismatch.
+
+  * the REGISTERED deploy for the paper arms remains `scripts/midas_deploy_v118.py`:
+    stop -> copy -> sha256 verify -> relaunch, gated on the cert chain. `--deploy` here
+    is the manual-attach equivalent (no chain gate) and MT5 re-initialises whatever
+    chart is running the EA, so it is not a substitute for that sequence mid-cert.
 
 Default targets: mql5/MIDASTOUCH/MidastouchAI.mq5,
 mql5/MIDASTOUCH/MidasOffsetProbe.mq5. Prints the produced .ex5 paths.
@@ -91,12 +104,70 @@ def terminal_mql5_dir() -> Path:
     return mql5
 
 
+def deploy_paths(mq5: Path, mql5_dir: Path) -> list[Path]:
+    """Every place a verified .ex5 must live to be attachable.
+
+    Two destinations, because they answer different questions: the repo copy is the
+    record of what was built, and the terminal copy is what a chart actually loads. The
+    terminal path is `<data folder>\\MQL5\\Experts\\<source folder>\\<stem>.ex5` — MT5
+    attaches from the Experts tree, under a folder named after the source's own folder,
+    so the derivation is mechanical rather than remembered.
+    """
+    name = mq5.with_suffix(".ex5").name
+    return [mq5.with_suffix(".ex5"),
+            mql5_dir / "Experts" / mq5.parent.name / name]
+
+
+def sha256_of(p: Path) -> str:
+    import hashlib
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+
+def build_fingerprint(mq5: Path, ex5: Path) -> str:
+    """`source -> binary`, both truncated, for the deploy line.
+
+    MEASURED, 2026-09-20: MetaEditor is **not bit-reproducible**. Two compiles of one
+    unchanged source produced 94,780B and 95,012B. So a binary can never be shown to
+    belong to a source by recompiling and comparing hashes — the only honest provenance
+    is the pair recorded at the moment the artifact was produced and copied. That is what
+    this line prints, and why it is printed at all.
+
+    Call it INSIDE `compile_one`: the scratch folder (the only copy of the binary) is
+    removed in that function's `finally`, so a fingerprint taken later raises rather than
+    printing. That failure is not hypothetical — it was the first version of this call.
+    """
+    return f"source={sha256_of(mq5)[:8]} ex5={sha256_of(ex5)[:8]}"
+
+
+def deploy_ex5(ex5: Path, mq5: Path, mql5_dir: Path) -> list[str]:
+    """Copy a VERIFIED .ex5 to every attachable location. Never called on a failure.
+
+    MEASURED GAP, 2026-09-20: this script verified compiles and then DELETED the binary
+    with its scratch folder, so the attachable `.ex5` could not follow the source. The
+    terminal held a 20:17 build while the 23:02 source compiled clean at a different
+    size — a chart would have loaded a binary that no longer matched the pin tests.
+    Verification that cannot be attached is not a deploy.
+
+    Each copy is read back and hash-compared against the scratch artifact: a truncated or
+    locked-destination copy fails loudly here rather than becoming a chart's silent build.
+    """
+    fresh = sha256_of(ex5)
+    out: list[str] = []
+    for dest in deploy_paths(mq5, mql5_dir):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ex5, dest)
+        if sha256_of(dest) != fresh:
+            raise RuntimeError(f"deploy copy does not match the compiled artifact: {dest}")
+        out.append(str(dest))
+    return out
+
+
 def compile_one(editor: Path, mq5: Path, mql5_dir: Path,
-                keep: bool = False) -> dict:
-    """Compile `mq5` from an in-tree scratch folder; verify 0/0 + .ex5."""
+                keep: bool = False, deploy: bool = False) -> dict:
+    """Compile `mq5` from an in-tree scratch folder; verify 0/0 + .ex5, then deploy."""
     if not mq5.exists():
         return {"target": str(mq5), "ok": False, "errors": None,
-                "warnings": None, "ex5": None,
+                "warnings": None, "ex5": None, "deployed": [], "fingerprint": "",
                 "detail": "source file missing"}
     scratch = mql5_dir / "Experts" / SCRATCH_ROOT / mq5.stem
     scratch.mkdir(parents=True, exist_ok=True)
@@ -109,22 +180,27 @@ def compile_one(editor: Path, mq5: Path, mql5_dir: Path,
     try:
         if not log.exists():
             return {"target": mq5.name, "ok": False, "errors": None,
-                    "warnings": None, "ex5": None,
+                    "warnings": None, "ex5": None, "deployed": [], "fingerprint": "",
                     "detail": "no compile log — editor silently skipped "
                               "(source must live under the terminal MQL5 tree)"}
         text = log.read_text(encoding="utf-16-le", errors="replace")
         m = RESULT_RE.search(text)
         if not m:
             return {"target": mq5.name, "ok": False, "errors": None,
-                    "warnings": None, "ex5": None,
+                    "warnings": None, "ex5": None, "deployed": [], "fingerprint": "",
                     "detail": "log lacks a Result line — failure"}
         errors, warnings = int(m.group(1)), int(m.group(2))
         ok = errors == 0 and warnings == 0 and ex5.exists()
         detail = (f"ex5={ex5.stat().st_size}B" if ex5.exists()
                   else "0/0 log but no .ex5")
+        # Deploy and fingerprint INSIDE the try: the scratch folder (and the only copy
+        # of the binary) is removed in the finally block below unless --keep was passed.
+        deployed = deploy_ex5(ex5, mq5, mql5_dir) if ok and deploy else []
         return {"target": mq5.name, "ok": ok, "errors": errors,
                 "warnings": warnings,
                 "ex5": str(ex5) if ex5.exists() else None,
+                "deployed": deployed,
+                "fingerprint": build_fingerprint(mq5, ex5) if ok else "",
                 "detail": detail}
     finally:
         if not keep:
@@ -138,6 +214,10 @@ def main() -> int:
     ap.add_argument("--editor", default=None, help="MetaEditor64.exe path")
     ap.add_argument("--keep", action="store_true",
                     help="keep the in-tree scratch folder (default: removed)")
+    ap.add_argument("--deploy", action="store_true",
+                    help="after 0/0, copy the verified .ex5 to the repo and to the "
+                         "terminal's Experts tree (default: verified only, and the "
+                         "binary is discarded with the scratch folder)")
     args = ap.parse_args()
     editor = find_metaeditor(args.editor)
     mql5_dir = terminal_mql5_dir()
@@ -145,10 +225,18 @@ def main() -> int:
                for t in args.target] or DEFAULT_TARGETS
     failed = 0
     for t in targets:
-        r = compile_one(editor, t, mql5_dir, keep=args.keep)
+        r = compile_one(editor, t, mql5_dir, keep=args.keep, deploy=args.deploy)
         tag = "OK" if r["ok"] else "FAIL"
         print(f"  {tag} {r['target']}: errors={r['errors']} "
               f"warnings={r['warnings']} ({r['detail']})")
+        if r["ok"] and r.get("deployed"):
+            fp = r.get("fingerprint") or ""
+            for p in r["deployed"]:
+                print(f"      deployed ({fp}) -> {p}")
+        elif r["ok"]:
+            dest = deploy_paths(t, mql5_dir)[1]
+            print(f"      NOT deployed — a chart still loads whatever is at {dest}; "
+                  f"re-run with --deploy to copy this build there")
         failed += 0 if r["ok"] else 1
     return 1 if failed else 0
 

@@ -173,6 +173,8 @@ datetime g_lv_open_time = 0;
 datetime g_lv_expiration = 0;    // research timeout mirrored on the real position
 int    g_brk_day = -1;               // daily-loss-breaker day key (UTC yyyymmdd)
 double g_brk_start_eq = 0.0;
+int    g_prop_day = -1;               // UTC-day key the prop BASELINES belong to
+ double g_prop_day_eq = 0.0;          // that UTC day's opening equity (reconstructed)
 // v1.17 (V2 register P5, telemetry-first, never-abort class): running count
 // of in-session bars whose mode condition was TRUE (ModeDecide passed and
 // the session gates allowed evaluation). Monotone since EA init; the CLOSE
@@ -180,6 +182,8 @@ double g_brk_start_eq = 0.0;
 // interval signal density. Reset only by re-init (each ERA stamp notes it).
 long g_p5_signals = 0;
 bool   g_brk_tripped = false;
+bool   g_prop_passed = false;         // v1.19b: evaluation target met — phase REPORT, never a veto
+bool   g_prop_pass_logged = false;    // the milestone prints once per init, not per tick
 
 // Dollar-per-unit convenience wrapper (0.0 on bad spec).
 double DollarPerUnit()
@@ -361,20 +365,65 @@ bool AtrAtShift(int k, double &out)
 }
 
 //+------------------------------------------------------------------+
-//| Dollar value of one 1.0 price-unit move per 1.0 lot, with the    |
-//| geometric identity check from the playbook (contract x tick).    |
+//| Dollar value of one 1.0 price-unit move per 1.0 lot.             |
+//|                                                                  |
+//| AUTHORITY ORDER (2026-09-20, measured on Upcomers XAUUSD):        |
+//|   1. what the broker SETTLES — OrderCalcProfit over one price     |
+//|      unit per lot. This is the number a position actually pays.   |
+//|   2. contract size (geometric: $ per 1.0 price unit per lot).     |
+//|   3. tick value / tick size.                                      |
+//|                                                                  |
+//| The venue is SELF-INCONSISTENT: contract 100.0 x tick 0.01 = $1.00|
+//| per tick, but SYMBOL_TRADE_TICK_VALUE reports 0.10, so tv/ts = 10 |
+//| while OrderCalcProfit(1 lot, +$1.00) = $100.00. Sizing off tv/ts  |
+//| on the $25,000 evaluation turned an intended $250 (1% risk) stop  |
+//| into $2,500 — two thirds of the 6% trailing budget in one trade.  |
+//| The previous version detected exactly that and used the broker    |
+//| value anyway; a warning is not a guard. It now refuses when no    |
+//| value can be justified instead of choosing the cheaper-looking one.|
 //+------------------------------------------------------------------+
 bool DollarPerUnitPerLot(double &out)
 {
    double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double cs = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
-   if(ts <= 0 || tv <= 0) return false;
-   out = tv / ts;
-   double geo = cs * ts;                    // $ per tick per lot, geometric
-   if(geo > 0 && MathAbs(tv - geo) / geo > 0.05)
-      PrintFormat(VersionTag() + "TICK VALUE WARNING broker=%.5f geometric=%.5f (ratio %.2f) — using broker value",
-                  tv, geo, tv / geo);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if(ask <= 0.0) ask = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   out = 0.0;
+
+   double settled = 0.0, p = 0.0;
+   if(ask > 0.0 && OrderCalcProfit(ORDER_TYPE_BUY, _Symbol, 1.0, ask, ask + 1.0, p) && p > 0.0)
+      settled = p;                                                    // $ per unit per lot
+   double geo    = (cs > 0.0) ? cs : 0.0;
+   double via_tv = (ts > 0.0 && tv > 0.0) ? tv / ts : 0.0;
+
+   if(settled > 0.0 && geo > 0.0 && MathAbs(settled - geo) / settled > 0.02)
+      PrintFormat(VersionTag() + "DOLLAR-PER-UNIT: the broker's own answers disagree — "
+                  "order_calc_profit %.2f vs contract %.2f per price unit; using the settled value",
+                  settled, geo);
+
+   // Same ladder as floor_zone.SymbolData.calibrated_tick_value (python twin):
+   // settled, else a raw value that AGREES with geometry, else geometry, else raw.
+   if(settled > 0.0)
+      out = settled;
+   else if(via_tv > 0.0 && geo > 0.0 && MathAbs(via_tv - geo) / geo <= 0.05)
+      out = via_tv;
+   else if(geo > 0.0)
+      out = geo;
+   else
+      out = via_tv;
+
+   if(out <= 0.0)
+   {
+      PrintFormat(VersionTag() + "FATAL: no usable dollar-per-unit value "
+                  "(contract=%.2f tick_size=%.5f tick_value=%.5f) — REFUSING to size",
+                  cs, ts, tv);
+      return false;
+   }
+   if(via_tv > 0.0 && MathAbs(out - via_tv) / out > 0.05)
+      PrintFormat(VersionTag() + "TICK VALUE MISMATCH broker tv/ts=%.2f vs settled %.2f per price unit "
+                  "(ratio %.2f) — venue spec is self-inconsistent; sizing on the settled value",
+                  via_tv, out, via_tv / out);
    return true;
 }
 
@@ -708,8 +757,38 @@ void RestoreOrVerifyLedger()
 }
 
 //+------------------------------------------------------------------+
+// Phase milestone: the 5% target ends the EVALUATION, not the trading.
+// Reached once it prints one line and sets g_prop_passed; below the target nothing
+// happens. Never returns a block reason, because the governor gates survival rules and
+// a completed evaluation is not a survival rule. The funded phase's own numbers
+// (daily DD %, max single-trade loss %) are still UNVERIFIED with the venue — the
+// audit lists conflicting figures (C2/C3) — so the guards that stay in force are the
+// challenge ones, and the print says so rather than pretending they were re-declared.
+void PropPhaseCheck()
+{
+   double size = PropGovernorSize();
+   double target = size * InpPropTargetPct / 100.0;
+   double progress = AccountInfoDouble(ACCOUNT_EQUITY) - size;
+   if(target > 0.0 && progress >= target)
+   {
+      g_prop_passed = true;
+      if(!g_prop_pass_logged)
+      {
+         g_prop_pass_logged = true;
+         PrintFormat(VersionTag() + "PROP PHASE: EVALUATION COMPLETE — target MET (+%.2f of %.2f). "
+                     "Trading continues under the funded rule set; funded daily-DD %% and max "
+                     "single-trade-loss %% are UNVERIFIED (rules audit C2/C3), so the challenge "
+                     "guards (3%% day cap, %.1f%% shield, Best Day cap) remain in force",
+                     progress, target, InpPropMaxDdPct);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 void OnTick()
 {
+   PropDayAnchorCheck();                   // UTC-day baselines BEFORE any gate reads them
+   PropPhaseCheck();                       // evaluation-complete milestone (never a veto)
    if(InpBarModel)                         // v1.04 research-parity replay
    {
       OnBarReplay();
@@ -1358,18 +1437,69 @@ bool SpreadCapOK(double stop_d)
    return true;
 }
 
+//+------------------------------------------------------------------+
+//| UTC-DAY ANCHOR — the baselines the two DAY rules are measured from |
+//+------------------------------------------------------------------+
+// MEASURED GAP, 2026-09-20. The 3% daily cap and the 20% Best Day ceiling are both
+// rules about ONE UTC day, and both took their baseline from "the equity at the moment
+// this function was first called today" — which is the day's first ENTRY ATTEMPT, not
+// 00:00 UTC. Two consequences, both real:
+//
+//   * any move before that first attempt was invisible. A 3% loss taken at 07:00 was
+//     re-anchored away by the 09:00 entry attempt and the breaker never tripped for a
+//     day the venue had already counted as breached;
+//   * a restart forgot the day, because the anchor lived in a variable. The venue's
+//     rule does not restart with the EA.
+//
+// So the anchor is now taken on EVERY tick at the UTC rollover — the day's opening
+// equity, not the day's first convenience — and when the EA starts mid-day it
+// reconstructs that opening equity from this magic's own closed deals.
+//
+// STATED LIMIT: if a position was carried across 00:00 UTC, the reconstruction misses
+// the floating P&L that existed at the open (open equity = equity now - realised since,
+// and floating-at-open is not recoverable without equity history). It is the closest
+// honest reading of the day, and it matches the venue's baseline for a flat account.
+double PropDayRealisedPnlUtc()
+{
+   datetime now  = TimeUTCNow();
+   datetime from = (datetime)(now - (now % 86400));   // 00:00:00 UTC today
+   if(!HistorySelect(from, now + 1)) return 0.0;
+   double sum = 0.0;
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong t = HistoryDealGetTicket(i);
+      if(t == 0) continue;
+      if((long)HistoryDealGetInteger(t, DEAL_MAGIC) != InpMagic) continue;
+      if((long)HistoryDealGetInteger(t, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+      sum += HistoryDealGetDouble(t, DEAL_PROFIT)
+           + HistoryDealGetDouble(t, DEAL_SWAP)
+           + HistoryDealGetDouble(t, DEAL_COMMISSION);
+   }
+   return sum;
+}
+
+void PropDayAnchorCheck()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeUTCNow(), dt);
+   int day = dt.year * 10000 + dt.mon * 100 + dt.day;
+   if(day == g_prop_day) return;            // same UTC day: the baselines still hold
+   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   g_prop_day    = day;
+   // eq - today's realised P&L == equity at 00:00 UTC for a flat account, and it is
+   // EXACT at the rollover itself (nothing has closed yet today). One formula, so a
+   // mid-day start cannot take a different path from a normal day boundary.
+   g_prop_day_eq  = eq - PropDayRealisedPnlUtc();
+   g_brk_day      = day;
+   g_brk_start_eq = g_prop_day_eq;
+   g_brk_tripped  = false;
+}
+
 bool DailyBreakerTripped()
 {
    if(InpDailyLossCapPct <= 0) return false;
-   MqlDateTime dt;
-   TimeToStruct(TimeUTCNow(), dt);            // v1.15: TRUE UTC day key (the breaker is an operator guarantee)
-   int day = dt.year * 10000 + dt.mon * 100 + dt.day;
-   if(day != g_brk_day)                       // new UTC day: re-arm
-   {
-      g_brk_day = day;
-      g_brk_start_eq = AccountInfoDouble(ACCOUNT_EQUITY);
-      g_brk_tripped = false;
-   }
+   if(g_brk_start_eq <= 0) return false;      // anchor not taken yet (first tick)
    if(!g_brk_tripped && g_brk_start_eq > 0)
    {
       double loss_pct = (g_brk_start_eq - AccountInfoDouble(ACCOUNT_EQUITY)) / g_brk_start_eq * 100.0;
@@ -1390,7 +1520,7 @@ bool DailyBreakerTripped()
 // the Best Day share existed only in the Python layer — which cannot reach inside MT5.
 // So the account could have breached three rules it was told the system was enforcing.
 //
-// The arithmetic mirrors src/synthetic_trader/risk/upcomers_rules.py deliberately, so
+// The arithmetic mirrors src/midas_prop/risk/upcomers_rules.py deliberately, so
 // the Python pre-trade gate and the EA cannot drift into disagreeing about the same
 // account. Numbers there: size $25,000, target 5% = $1,250, shield 6% = $1,500,
 // day-profit cap = 20% of the target = $250.
@@ -1398,6 +1528,10 @@ bool DailyBreakerTripped()
 // ENTRY-ONLY. Every check here decides whether a NEW position may open. Exits are never
 // gated by it: a rule that could trap you in a position while a drawdown deepens would
 // breach the shield it was written to protect.
+//
+// THE TARGET IS A PHASE, NOT A WALL. The 5% target is the challenge's pass mark; the
+// funded phase has no target at all. So reaching it must not stop entries — the phase
+// is reported by PropPhaseCheck() and the survival rules above keep running.
 //
 // STATED LIMIT. The venue computes the real shield from equity history we cannot read;
 // this is a conservative mirror of it. The one place it can genuinely be wrong is a
@@ -1451,19 +1585,20 @@ string PropGovernorBlock()
    if(eq <= floor_usd)
       return StringFormat("trailing shield: equity %.2f at/below floor %.2f", eq, floor_usd);
 
-   double target = size * InpPropTargetPct / 100.0;
-   if(target > 0.0 && (eq - size) >= target)
-      return StringFormat("profit target MET (+%.2f of %.2f) — stop entering, the shield is the only risk left", eq - size, target);
+   // THE TARGET IS NOT A VETO. An earlier build refused entries once equity passed the
+   // 5% target ("stop entering, the shield is the only risk left"), which reads the
+   // evaluation's pass mark as the end of trading. It is not: the venue's own rule table
+   // lists a profit target for the CHALLENGE and NONE for the funded phase
+   // (docs/UPCOMERS_RULES_AUDIT_20260919.md §3), so passing the target ENDS THE
+   // EVALUATION and trading continues under the funded rule set. Trading is the point
+   // of a funded account, and refusing there would throw away the pass. The phase is
+   // therefore REPORTED by PropPhaseCheck() and never gates an entry.
 
-   MqlDateTime dt;
-   TimeToStruct(TimeUTCNow(), dt);
-   int day = dt.year * 10000 + dt.mon * 100 + dt.day;
-   static int    s_day    = -1;
-   static double s_day_eq = 0.0;
-   if(day != s_day) { s_day = day; s_day_eq = eq; }
+   // The day's baseline comes from the per-tick anchor, never from "the equity when we
+   // first happened to look today" — see PropDayAnchorCheck for the measured reason.
    double cap = PropDayProfitCapUsd();
-   if(cap > 0.0 && (eq - s_day_eq) >= cap)
-      return StringFormat("Best Day cap: today +%.2f >= %.2f", eq - s_day_eq, cap);
+   if(cap > 0.0 && g_prop_day_eq > 0.0 && (eq - g_prop_day_eq) >= cap)
+      return StringFormat("Best Day cap: today +%.2f >= %.2f", eq - g_prop_day_eq, cap);
 
    return "";
 }
