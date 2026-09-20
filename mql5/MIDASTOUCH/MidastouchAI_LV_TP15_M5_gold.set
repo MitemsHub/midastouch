@@ -41,7 +41,14 @@ InpUseNewsFilter=false
 InpStaleMinutes=30
 InpRiskPercent=1.0
 InpMaxRiskPct=15.0
-InpLiveExecution=true
+; 2026-09-20 NEUTRALISED: this key was TRUE (the Deriv-era LV arm). The Deriv account
+; is closed, MT5 now points at a funded $25,000 Upcomers evaluation, and no gold
+; signal has passed the walk-forward gate — so a preset that can send real orders is
+; a loaded switch, not a record. What happened under the live setting lives in the
+; ledgers and the commit history, not in this line. Restoring it is a frozen-gate
+; event, not an edit.
+;   was: InpLiveExecution=true
+InpLiveExecution=false
 InpPaperEquity=50.0
 InpDeviationPoints=20
 InpOrderRetries=3

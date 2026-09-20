@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""Build and validate the Upcomers-era gold preset for MIDASTOUCH.
+
+WHY THIS EXISTS. The presets in `mql5/MIDASTOUCH/` were written for the Deriv era, and
+one key in them is not a comment — it is a number the EA sizes with:
+
+    InpPaperEquity=50.0
+
+That was the $50 synthetic arm's virtual equity. On a $25,000 Upcomers evaluation the
+paper mirror would size **every trade as if the account held $50**, so its lots, its R
+and its drawdowns would be unrepresentative of the account by a factor of ~500 — and
+the paper ledger is the only forward record this program has. A preset is not a
+document; it is the configuration under which the forward evidence is collected, which
+is why this is generated and validated rather than hand-edited.
+
+WHAT IT REFUSES. Three failure modes that are silent in MT5 and expensive here:
+
+1. **A key the EA does not have.** MT5 ignores unknown keys in a `.set` without a word,
+   so a preset can look like it pins a rule while the rule is not set at all. Every key
+   is checked against the EA's `input` declarations.
+2. **`InpLiveExecution=true` with no arming record.** Live execution is a frozen-gate
+   event, never an input edit. The builder refuses to emit it, and the checker refuses
+   to pass it.
+3. **An unpinned input.** The repo's convention is that a preset is the *complete* key
+   set, so that what is on disk is what the EA is doing. Any input the file omits is
+   reported — an omission is how a default changes under you.
+
+    python scripts/gold_preset_upcomers.py                # check + show the plan
+    python scripts/gold_preset_upcomers.py --write        # write the preset
+    python scripts/gold_preset_upcomers.py --check        # validate existing presets
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+EA = ROOT / "mql5" / "MIDASTOUCH" / "MidastouchAI.mq5"
+PRESET_DIR = ROOT / "mql5" / "MIDASTOUCH"
+SOURCE = PRESET_DIR / "MidastouchAI_M1_gold.set"
+TARGET = PRESET_DIR / "MidastouchAI_upcomers_gold.set"
+
+#: The account this preset is for. Matches ThunderboltClassicRules' default size.
+ACCOUNT_SIZE = 25_000.0
+#: Distinct from the Deriv-era 7801001 so a ledger cannot mix two eras' fills.
+MAGIC = 7825001
+ARM_TAG = "U25"
+
+#: Pinned to the venue's published rules; these are the EA's own defaults, written out
+#: explicitly so a future change of default cannot silently alter a live account's risk.
+PROP_KEYS = {
+    "InpPropGuard": "true",
+    "InpPropAccountSize": f"{ACCOUNT_SIZE:.1f}",
+    "InpPropTargetPct": "5.0",
+    "InpPropMaxDdPct": "6.0",
+    "InpPropBestDayPct": "20.0",
+    "InpPropPeakOverride": "0.0",
+}
+
+ARMING_RECORD = ROOT / "artifacts" / "live" / "armed.json"
+
+_INPUT_RE = re.compile(r"^\s*input\s+(?!group)([A-Za-z_][\w]*)\s+([A-Za-z_][\w]*)\s*=\s*([^;]+);")
+
+
+def ea_inputs(text: str) -> dict[str, str]:
+    """Every `input` declared by the EA, name -> default literal.
+
+    The regex skips `input group "..."` declarations deliberately: a group is a label,
+    not a parameter, and counting one as a parameter would make every preset look
+    incomplete.
+    """
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        m = _INPUT_RE.match(line)
+        if m:
+            out[m.group(2)] = m.group(3).strip()
+    return out
+
+
+def read_set(path: Path) -> tuple[list[str], dict[str, str], list[str]]:
+    """(comment lines, key -> value, duplicate keys).
+
+    Duplicates are reported rather than silently collapsed, because the neutraliser can
+    MANUFACTURE them when it is wrong: a first version rewrote a comment that merely
+    documented the live key, and then rewrote its own inserted note on a second run. The
+    result was real duplicate keys that had never existed, and this check is what caught
+    it. MT5's behaviour on a repeated key is unspecified, so a file carrying one cannot
+    be read as a statement of what it configures.
+    """
+    comments: list[str] = []
+    keys: dict[str, str] = {}
+    dupes: list[str] = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith(";"):
+            comments.append(raw.rstrip())
+            continue
+        if "=" not in line:
+            raise ValueError(f"{path.name}: not a key=value line: {line!r}")
+        k, v = line.split("=", 1)
+        k = k.strip()
+        if k in keys:
+            dupes.append(k)
+        keys[k] = v.strip()
+    return comments, keys, dupes
+
+
+def classify(keys: dict[str, str], declared: dict[str, str], *,
+             armed: bool, where: str = "preset",
+             dupes: tuple[str, ...] | list[str] = ()) -> tuple[list[str], list[str]]:
+    """Split the problems into (errors, warnings).
+
+    The split is not cosmetic. An ERROR is a preset that is WRONG NOW — it pins a key
+    the EA does not have, or it enables live execution without a gate record. A WARNING
+    is a preset written before an input existed: a genuine historical artifact whose
+    remedy is a new preset, not an edit to the old one. Failing the check on those would
+    mean the checker's first act was to demand history be rewritten.
+    """
+    errs: list[str] = []
+    warns: list[str] = []
+    for k in sorted(set(dupes)):
+        errs.append(f"{where}: key {k!r} is declared more than once — MT5's behaviour on "
+                    f"a repeated key is unspecified, so the file does not state what it "
+                    f"configures")
+    for k in keys:
+        if k not in declared:
+            errs.append(f"{where}: key {k!r} is not an input of the EA — MT5 would "
+                        f"ignore it silently, so it pins nothing")
+    live = str(keys.get("InpLiveExecution", "false")).lower()
+    if live in ("true", "1") and not armed:
+        errs.append(f"{where}: InpLiveExecution is TRUE with no arming record at "
+                    f"{ARMING_RECORD.relative_to(ROOT)} — live execution is a "
+                    f"frozen-gate event, never a preset edit")
+    missing = sorted(set(declared) - set(keys))
+    if missing:
+        warns.append(f"{where}: {len(missing)} input(s) unpinned — the EA runs its code "
+                     f"defaults for these: {', '.join(missing)}")
+    return errs, warns
+
+
+def validate(keys: dict[str, str], declared: dict[str, str], *,
+             armed: bool, where: str = "preset") -> list[str]:
+    """All findings, errors first. Empty means the preset is sound for use."""
+    errs, warns = classify(keys, declared, armed=armed, where=where)
+    return errs + warns
+
+
+def build(comments: list[str], source_keys: dict[str, str], declared: dict[str, str],
+          symbol: str) -> str:
+    """The Upcomers preset as text: source keys, overwritten and completed."""
+    header = [
+        "; MIDASTOUCH — UPCOMERS gold preset (paper arm for the $25,000 evaluation)",
+        "; Generated by scripts/gold_preset_upcomers.py — edit the generator, not this.",
+        ";",
+        f"; Account:  ${ACCOUNT_SIZE:,.0f} Upcomers Thunderbolt Classic (MT5, netting).",
+        f"; Symbol:   {symbol} — chosen on the CHART; a .set cannot pin a symbol, so",
+        ";           this line is documentation and the checker verifies it separately.",
+        f"; Magic:    {MAGIC} (distinct from the Deriv-era 7801001 so no ledger can mix",
+        ";           the two eras' fills) · arm tag " + ARM_TAG + ".",
+        ";",
+        "; WHAT CHANGED FROM THE DERIV-ERA PRESETS, AND WHY: InpPaperEquity was 50.0 —",
+        "; the old $50 synthetic arm — so the paper mirror sized every trade as if the",
+        "; account held $50. On this account that understates every lot by ~500x, which",
+        "; would make the only forward record we have unrepresentative of the account it",
+        "; is supposed to represent.",
+        ";",
+        "; THE PROP GOVERNOR IS PINNED HERE. The EA now enforces all four venue rules",
+        "; before an entry: the 3% UTC-day cap, the 6% trailing Dynamic Risk Shield, the",
+        "; 5% profit target and the 20% Best Day ceiling on one day's gain. Their",
+        "; arithmetic mirrors src/synthetic_trader/risk/upcomers_rules.py.",
+        ";",
+        "; PAPER ONLY. InpLiveExecution=false is HARD. Arming is a frozen-gate event and",
+        "; no gold signal has passed that gate — so this preset trades nothing, and the",
+        "; generator refuses to emit a live-enabling file without an arming record.",
+        ";",
+        "; The original Deriv-era header is kept below as the record it is:",
+    ]
+    body = header + [f";   {c.lstrip('; ')}" for c in comments]
+    keys = dict(source_keys)
+    keys.update({
+        "InpMagic": str(MAGIC),
+        "InpArmTag": ARM_TAG,
+        "InpPaperEquity": f"{ACCOUNT_SIZE:.1f}",
+        "InpLiveExecution": "false",
+        **PROP_KEYS,
+    })
+    for k in declared:
+        keys.setdefault(k, declared[k])
+    ordered = {k: keys[k] for k in declared if k in keys}
+    ordered.update({k: v for k, v in keys.items() if k not in declared})
+    body.append("")
+    body += [f"{k}={v}" for k, v in ordered.items()]
+    return "\n".join(body) + "\n"
+
+
+#: Written verbatim above the key it changes. The original value is kept as a comment
+#: rather than deleted: the question "what was this file doing in September?" must stay
+#: answerable from the file itself.
+NEUTRAL_NOTE = (
+    "; 2026-09-20 NEUTRALISED: this key was TRUE (the Deriv-era LV arm). The Deriv account\n"
+    "; is closed, MT5 now points at a funded $25,000 Upcomers evaluation, and no gold\n"
+    "; signal has passed the walk-forward gate — so a preset that can send real orders is\n"
+    "; a loaded switch, not a record. What happened under the live setting lives in the\n"
+    "; ledgers and the commit history, not in this line. Restoring it is a frozen-gate\n"
+    "; event, not an edit."
+)
+
+
+def neutralise(path: Path) -> str:
+    """Set `InpLiveExecution=false` on a preset that still arms live trading.
+
+    WHY THIS IS A REPO OPERATION AND NOT A HAND EDIT. Three presets in this directory
+    were written to send REAL orders on an account that no longer exists. Loading one on
+    the connected Upcomers account would arm live execution with no gate record, so the
+    fix belongs in version control where it can be reviewed, re-run and tested — and the
+    original value has to survive as a comment, because silently rewriting a live
+    instruction file is how the next person loses the ability to tell what it used to do.
+    """
+    # LINE-WISE AND COMMENT-AWARE, and both of those are lessons from doing it wrong.
+    #
+    # The first version searched the text for the literal `InpLiveExecution=true` and
+    # replaced every hit. Two things went wrong, and neither was visible in the result:
+    #
+    #   1. These headers DOCUMENT the key — `;   InpLiveExecution=true` appears as prose
+    #      describing what the live arm does. A text replace rewrote that comment, which
+    #      injected a real key line into the middle of a comment block.
+    #   2. The inserted note itself contains the string it was searching for, so the next
+    #      run rewrote the note. Running it twice nested the notes and produced real
+    #      duplicate keys that had never existed — and the duplicate-key checker then
+    #      reported a defect that was entirely my own.
+    #
+    # So: skip comments, parse `key=value` from real lines only, and write the note once.
+    lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
+    note_written = any(ln.strip().startswith(";") and "NEUTRALISED" in ln for ln in lines)
+    out: list[str] = []
+    changed = 0
+    for ln in lines:
+        s = ln.strip()
+        if s and not s.startswith(";") and "=" in s:
+            k, v = s.split("=", 1)
+            token = v.strip().split()[0].lower() if v.strip() else ""
+            if k.strip() == "InpLiveExecution" and token in ("true", "1"):
+                if not note_written:
+                    out += [NEUTRAL_NOTE, ";   was: InpLiveExecution=true"]
+                    note_written = True
+                out.append("InpLiveExecution=false")
+                changed += 1
+                continue
+        out.append(ln)
+    if not changed:
+        return f"{path.name}: already inert"
+    path.write_text("\n".join(out), encoding="utf-8", newline="\n")
+    return f"{path.name}: InpLiveExecution true -> false"
+
+
+def collapse_duplicate_keys(path: Path) -> str:
+    """Drop repeated keys whose values agree; REFUSE when they disagree.
+
+    Agreement is compared on the value TOKEN, not the whole tail: these files carry an
+    inline note after some values (`InpLiveExecution=false (the sole execution
+    switch...)`), and comparing whole tails would call two identical settings different.
+    When the tokens disagree, one of the two lines is a lie about the configuration and
+    there is no way to tell which — so the right move is to stop, not to pick one.
+    """
+    lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
+    first: dict[str, str] = {}
+    keep: list[str] = []
+    dropped: list[str] = []
+    for ln in lines:
+        s = ln.strip()
+        if not s or s.startswith(";") or "=" not in s:
+            keep.append(ln)
+            continue
+        k, v = s.split("=", 1)
+        k, token = k.strip(), v.strip().split()[0] if v.strip() else ""
+        if k not in first:
+            first[k] = token
+            keep.append(ln)
+            continue
+        if first[k] != token:
+            raise ValueError(
+                f"{path.name}: {k} declared twice with DIFFERENT values "
+                f"({first[k]!r} and {token!r}) — the file cannot be resolved by guessing")
+        dropped.append(k)
+    if not dropped:
+        return f"{path.name}: no duplicate keys"
+    keep.append(f"; 2026-09-20: removed {len(dropped)} repeated key line(s) whose values "
+                f"agreed: {', '.join(sorted(set(dropped)))}. The first occurrence is kept.")
+    path.write_text("\n".join(keep), encoding="utf-8", newline="\n")
+    return (f"{path.name}: collapsed {len(dropped)} duplicate line(s) "
+            f"({', '.join(sorted(set(dropped))) })")
+
+
+def symbol_present(symbol: str) -> tuple[bool, str]:
+    try:
+        import MetaTrader5 as mt5  # type: ignore
+    except ImportError as exc:
+        return False, f"MetaTrader5 not installed ({exc})"
+    if not mt5.initialize():
+        return False, "terminal not reachable"
+    try:
+        info = mt5.symbol_info(symbol)
+        if info is None:
+            return False, f"{symbol} NOT OFFERED by this broker"
+        return True, (f"{symbol} present: digits {info.digits}, point {info.point}, "
+                      f"min lot {info.volume_min:g}")
+    finally:
+        mt5.shutdown()
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--write", action="store_true", help="write the preset")
+    ap.add_argument("--check", action="store_true",
+                    help="validate the presets on disk and exit non-zero on any problem")
+    ap.add_argument("--symbol", default="XAUUSD")
+    ap.add_argument("--neutralise-live", action="store_true",
+                    help="set InpLiveExecution=false on every preset still arming real "
+                         "orders, recording the old value in a comment")
+    ap.add_argument("--offline", action="store_true",
+                    help="skip the broker symbol check (the MT5 bridge finds a running "
+                         "terminal regardless of %APPDATA%, so --offline is the only way "
+                         "to test the refusal path)")
+    a = ap.parse_args(argv)
+
+    declared = ea_inputs(EA.read_text(encoding="utf-8", errors="replace"))
+    if not declared:
+        print(f"REFUSING: no `input` declarations parsed from {EA.name} — the parser or "
+              f"the file is wrong, and a preset built against nothing is worse than none.")
+        return 3
+    print(f"EA declares {len(declared)} inputs; prop governor present: "
+          f"{sorted(k for k in declared if k.startswith('InpProp'))}")
+
+    if a.neutralise_live:
+        changed = 0
+        for p in sorted(PRESET_DIR.glob("*.set")):
+            for fn in (neutralise, collapse_duplicate_keys):
+                try:
+                    line = fn(p)
+                except ValueError as exc:
+                    print(f"  REFUSED {exc}")
+                    return 2
+                print(f"  {line}")
+                changed += "->" in line or "collapsed" in line
+        print(f"\n{changed} preset(s) changed")
+        if not changed:
+            return 0
+        a.check = True   # fall through to the check so the result is verified, not assumed
+
+    if a.check:
+        errs: list[str] = []
+        warns: list[str] = []
+        presets = sorted(PRESET_DIR.glob("*.set"))
+        armed = ARMING_RECORD.is_file()
+        for p in presets:
+            try:
+                _c, keys, dupes = read_set(p)
+            except ValueError as exc:
+                errs.append(str(exc))
+                continue
+            e, w = classify(keys, declared, armed=armed, where=p.name, dupes=dupes)
+            errs += e
+            warns += w
+        for pr in errs:
+            print(f"  ERROR   {pr}")
+        for pr in warns:
+            print(f"  warning {pr}")
+        print(f"\nchecked {len(presets)} presets: {len(errs)} error(s), "
+              f"{len(warns)} warning(s)")
+        return 1 if errs else 0
+
+    if not a.offline:
+        ok, detail = symbol_present(a.symbol)
+        print(f"  symbol check: {detail}")
+        if not ok:
+            print("REFUSING: the intended symbol is not tradable here, so a preset "
+                  "naming it would be a plan that cannot execute.")
+            return 3
+
+    comments, source_keys, source_dupes = read_set(SOURCE)
+    if source_dupes:
+        print(f"REFUSING: the source preset repeats {sorted(set(source_dupes))} — it does "
+              f"not state its own configuration, so it cannot be the base of another.")
+        return 3
+    text = build(comments, source_keys, declared, a.symbol)
+    new_keys = dict(re.findall(r"^([A-Za-z_]\w*)=(.*)$", text, re.M))
+    problems = validate(new_keys, declared, armed=ARMING_RECORD.is_file(),
+                        where=TARGET.name)
+    if problems:
+        for pr in problems:
+            print(f"  PROBLEM {pr}")
+        print("REFUSING to write a preset that fails validation.")
+        return 1
+
+    armed = ARMING_RECORD.is_file()
+    print(f"  keys: {len(new_keys)} of {len(declared)} declared inputs pinned; "
+          f"live execution false; arming record {'present' if armed else 'ABSENT'}")
+    if not a.write:
+        print(f"\ndry run. Re-run with --write to create {TARGET.relative_to(ROOT)}")
+        return 0
+    TARGET.write_text(text, encoding="utf-8", newline="\r\n")
+    print(f"\nwrote {TARGET.relative_to(ROOT)} ({len(text)} bytes, CRLF)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
