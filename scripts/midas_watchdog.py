@@ -72,20 +72,58 @@ from datetime import datetime, timezone
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "scripts"))
 
-from v28_sweep_runner import (  # noqa: E402  (same terminal install as the gold arm)
-    TERM_EXE, data_folder_for_terminal, relaunch_terminal, stop_terminal,
-    terminal_pids_exact)
+from mt5_ops import (  # noqa: E402  (the LIVE install, by account identity)
+    MT5OpsUnavailable, data_folder_for_terminal, relaunch_terminal, stop_terminal,
+    terminal_exe_or_unknown, terminal_pids_exact)
+
+
+def _live_pids() -> list[int] | None:
+    """PIDs of the live terminal, or None when its identity cannot be resolved.
+
+    None is deliberately NOT the same as []: [] means "resolved, and it is not
+    running", which authorises a relaunch. None means we do not know which install we
+    would be acting on, and acting anyway is how a stop lands on the wrong terminal.
+    """
+    try:
+        return terminal_pids_exact()
+    except MT5OpsUnavailable:
+        return None
 
 REPO_PRESET = os.path.join(REPO, "mql5", "MIDASTOUCH", "MidastouchAI_M1_gold.set")
+#: kept for callers that want the frozen baseline by name rather than by tag
 
 
 def preset_for_tag(tag: str) -> str:
-    """The pinned preset for an arm tag (§14 portfolio): M1 keeps the legacy
-    file name; every portfolio arm carries MidastouchAI_<tag>_gold.set.
-    Missing file -> the caller observes without pin enforcement (§12 rule)."""
-    if tag == "M1":
-        return REPO_PRESET
-    return os.path.join(REPO, "mql5", "MIDASTOUCH", f"MidastouchAI_{tag}_gold.set")
+    """The pinned preset for an arm tag (§14 portfolio).
+
+    Resolved by the tag the ARM reports, read out of the presets themselves. The
+    file name is not the tag: the account's arm carries `InpArmTag=U25` while its
+    file is `MidastouchAI_upcomers_gold.set`, so a name-only lookup failed to pin the
+    one arm that matters here — the chart tag was derived from the EA, the preset
+    was looked up as a filename, and the two silently disagreed.
+
+    Falls back to the MidastouchAI_<tag>_gold.set convention, which is how the
+    legacy M1 arm is named. Missing file -> the caller observes without pin
+    enforcement (§12 rule).
+    """
+    preset_dir = os.path.join(REPO, "mql5", "MIDASTOUCH")
+    try:
+        names = sorted(os.listdir(preset_dir))
+    except OSError:
+        names = []
+    for name in names:
+        if not (name.startswith("MidastouchAI_") and name.endswith("_gold.set")):
+            continue
+        path = os.path.join(preset_dir, name)
+        try:
+            with open(path, encoding="utf-8-sig", errors="replace") as f:
+                for line in f:
+                    s = line.strip()
+                    if s.startswith("InpArmTag=") and s.split("=", 1)[1].strip() == tag:
+                        return path
+        except OSError:
+            continue
+    return os.path.join(preset_dir, f"MidastouchAI_{tag}_gold.set")
 
 ART = os.path.join(REPO, "artifacts")
 STATE_PATH = os.path.join(ART, "midas_watchdog_state.json")
@@ -488,7 +526,7 @@ def check(now_s: float | None = None, dry_run: bool = False,
     the terminal)."""
     now_s = time.time() if now_s is None else now_s
     record: dict = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                    "terminal_exe": TERM_EXE}
+                    "terminal_exe": terminal_exe_or_unknown()}
     state = load_state()
 
     if os.path.exists(PAUSE_MARKER):
@@ -513,7 +551,7 @@ def check(now_s: float | None = None, dry_run: bool = False,
     if not arms:
         record["action"] = "NONE"
         record["problem"] = (f"no MidastouchAI chart found on the gold terminal "
-                             f"({TERM_EXE}) — is the arm attached?")
+                             f"({terminal_exe_or_unknown()}) — is the arm attached?")
         print(json.dumps(record))
         save_record(record)
         return record
@@ -531,7 +569,13 @@ def check(now_s: float | None = None, dry_run: bool = False,
     worst = max((l["mtime_age_min"] or 0.0) for l in ledgers)
     record["ledgers"] = [{k: l[k] for k in ("tag", "exists", "mtime_age_min", "flat")}
                          for l in ledgers]
-    record["terminal_running"] = bool(terminal_pids_exact())
+    live_pids = _live_pids()
+    record["terminal_running"] = None if live_pids is None else bool(live_pids)
+    if live_pids is None:
+        # Unknown is not "not running": the old code recorded False here, which
+        # reads as a cleanly absent terminal and hides an unresolvable install.
+        record.setdefault("problems", []).append(
+            "live terminal identity unresolved — running-state unknown")
 
     # --- per-arm config drift: the CHART FILE is the identity source
     # (2026-09-18 §14 hardening). Banner text is structurally ambiguous for
@@ -629,11 +673,17 @@ def check(now_s: float | None = None, dry_run: bool = False,
                     0, state.get("consecutive_restups", 0) - 1)
                 state["restups_total"] = max(0, state.get("restups_total", 0) - 1)
             else:
-                pids = terminal_pids_exact()
+                pids = _live_pids()
                 record["pids_before"] = pids
-                ok = True
-                if pids:
-                    ok = stop_terminal(pids)
+                # None (unresolved) must not fall through to a relaunch: ok starts
+                # False so the only way into the relaunch is a resolved terminal.
+                ok = False
+                if pids is None:
+                    record["problems"] = problems + [
+                        "live terminal identity unresolved — refusing to stop or "
+                        "relaunch an install that was not resolved"]
+                else:
+                    ok = True if not pids else stop_terminal(pids)
                 if ok:
                     if action == "DRIFT":
                         baks = []

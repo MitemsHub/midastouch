@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """MIDASTOUCH Step 2b — XAUUSD history download + validation (fail-closed).
 
-Pulls the full bar depth the terminal offers for XAUUSD (and XAUUSDmicro for
+Pulls the full bar depth the terminal offers for XAUUSD (and XAUUSD for
 reference) at M15/H1/D1, writes CSVs under data/forex/xauusd/, and runs the
 ANCIENT_WINDOW validation pattern:
   V1  bar count vs calendar (24/5 market: D1 5 bars/week, H1 ~120/wk)
@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 TERMINAL_EXE = r"C:\Program Files\MetaTrader 5 Terminal\terminal64.exe"
 OUT_DIR = os.path.join("data", "forex", "xauusd")
 ART = "artifacts"
-SYMBOLS = ["XAUUSD", "XAUUSDmicro"]
+SYMBOLS = ["XAUUSD", "XAUUSD"]
 TFS = {"H1": 16385, "M15": 15, "D1": 16408}
 # (MetaTrader5.TIMEFRAME_* constants inlined to keep the module import-free
 # of a hard dependency at module import time; values are stable ABI constants.)

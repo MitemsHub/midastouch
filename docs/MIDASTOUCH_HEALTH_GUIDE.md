@@ -18,9 +18,9 @@ A **healthy** `[3b]` section looks like this (real output, 2026-09-17):
 
 ```
 [3b] MIDASTOUCH GOLD ARM (MidastouchAI, paper)
-  chart: XAUUSDmicro M15 | tag M1 | terminal 49E0383C
+  chart: XAUUSD M15 | tag M1 | terminal 49E0383C
   preset: OK (30 inputs byte-identical to repo .set)
-  ledger: MIDASTOUCH_paper_XAUUSDmicro_M1.csv | age 0.1h | veq 50.00 (start 50.00)
+  ledger: MIDASTOUCH_paper_XAUUSD_M1.csv | age 0.1h | veq 50.00 (start 50.00)
   live: flat
   closed: 0/30 - gate clock starts at first fill
   watchdog: 0 consecutive restup(s), 1 lifetime, last restup 2026-09-17T10:42:48+00:00
@@ -71,11 +71,11 @@ after today; older lines may say 1.03/1.09, which is history, not drift).
 **A healthy boot sequence** (real lines, 14:31 today):
 
 ```
-[MIDAS1.10]MIDASTOUCH started | mode=0 | symbol=XAUUSDmicro (GOLD-OK) | macro=H4+H1 EMA20
+[MIDAS1.10]MIDASTOUCH started | mode=0 | symbol=XAUUSD (GOLD-OK) | macro=H4+H1 EMA20
   | trigger=M15 BB(20,2.0)/RSI(14) | SL=2.0xATR(H1) TP=2.0R timeout=720min
   | session=06-20 UTC | spreadcap=1.5%stop | risk=1.00% | execution=PAPER | exec-model=PERTICK
 [MIDAS1.10]PAPER ledger flat — nothing to restore
-[MIDAS1.10]FLOOR TABLE XAUUSDmicro: stop=44.79 ($44.79) minlot=0.10 risk@minlot=$4.48 equity@1%=$448
+[MIDAS1.10]FLOOR TABLE XAUUSD: stop=44.79 ($44.79) minlot=0.10 risk@minlot=$4.48 equity@1%=$448
 [MIDAS1.10]H1 debug dump written (30 bars)
 ```
 
@@ -104,7 +104,7 @@ banner whose four pins disagree with the list above.
 
 ## 2. The ledger (the evidence stream — ground truth)
 
-`49E0…\MQL5\Files\MIDASTOUCH_paper_XAUUSDmicro_M1.csv` — plain CSV, open
+`49E0…\MQL5\Files\MIDASTOUCH_paper_XAUUSD_M1.csv` — plain CSV, open
 in Notepad/Excel. Current healthy content (a fresh §13 book, mid-heartbeat):
 
 ```

@@ -66,12 +66,6 @@ EA_FILES = {
 }
 EA_FILES["MitemshubAI"]["tag"] = {"ledger": LEDGER_D, "telem": TELEM_D}
 TERM_ROOT = os.path.join(os.environ.get("APPDATA", ""), "MetaQuotes", "Terminal")
-# VPS-era LV broker snapshot (scripts/midas_lv_broker_monitor.py output).
-# Module constant so tests can point it at a hermetic fixture — the real
-# operator snapshot must never leak into a test run.
-LV_BROKER_STATE_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "artifacts", "midas_lv_broker_state.json")
 # 2026-09-16: magic 7788075 is now ARM A2 (the v28.10 forward build on the 49E0
 # terminal — REVERSE_BOTH tp2.0, $1,000 virtual basis). Arm A (the ORIGINAL
 # pullback arm) is retired; its ledger is archived under artifacts/paper_ledgers/.
@@ -1126,7 +1120,6 @@ def print_midas_section() -> bool:
     for i, (td, txt) in enumerate(charts, 1):
         unhealthy |= _print_midas_arm(td, txt, multi=len(charts) > 1,
                                       ordinal=i, positions=clustered)
-    _print_lv_broker_view()
     if clustered:
         print(paint("  [3b] correlation: multiple arms hold same-direction "
                     "positions — aggregate exposure is the cluster's SUM, "
@@ -1148,55 +1141,6 @@ def print_midas_section() -> bool:
         else:
             print(f"  journal: {msg}")
     return unhealthy
-
-
-def _print_lv_broker_view(state_path: str | None = None) -> None:
-    """VPS-era LV view (2026-09-18): the live EA's account evidence, polled
-    by scripts/midas_lv_broker_monitor.py from the MT5 API — positions,
-    deals and equity filtered to magic 7801601, plus account-level balance
-    operations (money movement like the 12:25:59Z withdrawal is ACCOUNT
-    evidence, not arm evidence). Rendered whenever a snapshot exists; a
-    stale snapshot is labeled, never hidden."""
-    path = state_path or LV_BROKER_STATE_PATH
-    if not os.path.exists(path):
-        return
-    try:
-        s = json.load(open(path, encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        print(paint(f"  LV broker monitor: snapshot unreadable ({e})", "y"))
-        return
-    age_s = time.time() - float(s.get("ts_epoch", 0))
-    stale = age_s > 300
-    algo = s.get("algo_trading")
-    problems = s.get("problems") or []
-    vps_hazard = any("LOCAL_ALGOTRADING_ON_DURING_VPS" in p for p in problems)
-    algo_txt = ("AutoTrading ON" if algo is True else
-                "AutoTrading OFF" if algo is False else "AutoTrading ??")
-    head = (f"  [LV broker view] account {s.get('account')} | equity "
-            f"${s.get('equity', 0):.2f} | balance ${s.get('balance', 0):.2f} | "
-            f"{algo_txt} | snapshot {age_s/60:.0f} min old")
-    color = "r" if (stale or algo is False or vps_hazard) else ("y" if stale else "n")
-    print(paint(head + ("  (STALE — run scripts/midas_lv_broker_monitor.py)"
-                        if stale else ""), color))
-    if s.get("problems"):
-        print(paint(f"    problems: {'; '.join(s['problems'][-2:])}", "y"))
-    for p in s.get("positions", []):
-        age_h = (time.time() - p["epoch"]) / 3600
-        print(f"    LIVE POSITION (broker): {'LONG' if p['dir'] > 0 else 'SHORT'} "
-              f"{p['volume']} lots @ {p['entry']:.2f} | SL {p['sl']:.2f} "
-              f"TP {p['tp']:.2f} | open {age_h:.1f}h")
-    if not s.get("positions"):
-        print("    positions: none (broker evidence)")
-    for d in s.get("deals", [])[-4:]:
-        kind = "BUY" if d["type"] == 0 else "SELL"
-        inout = "entry" if d["entry"] == 0 else "exit"
-        when = datetime.fromtimestamp(d["epoch"], timezone.utc).strftime("%H:%M:%SZ")
-        print(f"    LV deal {when} {inout} {kind} {d['volume']} @ {d['price']:.2f} "
-              f"| P/L ${d['profit']:+.2f}")
-    for b in s.get("balance_ops", [])[-3:]:
-        when = datetime.fromtimestamp(b["epoch"], timezone.utc).strftime("%H:%M:%SZ")
-        print(paint(f"    balance op {when}: ${b['amount']:+.2f} "
-                    f"('{b['comment'][:24]}') — non-trading money movement", "y"))
 
 
 def collect_midas_positions(charts: list[tuple[str, str]]) -> list[dict]:

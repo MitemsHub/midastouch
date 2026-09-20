@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Fetch XAUUSDmicro M5 bars from the running MT5 terminal → certified CSV.
+"""Fetch XAUUSD M5 bars from the running MT5 terminal → certified CSV.
 
-Writes data/forex/xauusd/XAUUSDmicro_M5.csv with the exact schema of the
+Writes data/forex/xauusd/XAUUSD_M5.csv with the exact schema of the
 certified corpus files (time,iso,open,high,low,close,tick_volume,spread),
 so scripts/midas_sweep.load_bars ingests it unchanged.
 
@@ -23,10 +23,10 @@ import sys
 from datetime import datetime, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(REPO, "data", "forex", "xauusd", "XAUUSDmicro_M5.csv")
+OUT = os.path.join(REPO, "data", "forex", "xauusd", "XAUUSD_M5.csv")
 ART = os.path.join(REPO, "artifacts", "midas_p6_m5_fetch.json")
 POINT = 0.01
-SYMBOL = "XAUUSDmicro"
+SYMBOL = "XAUUSD"
 
 
 def main() -> int:

@@ -7,7 +7,7 @@ specs) and `data/forex/xauusd/XAUUSD_H1.csv` (14,414 continuous bars,
 
 ## 1. The instrument on OUR account (login 140778269, DerivSVG-Server-03, 1:1000)
 
-| spec | XAUUSD (standard) | XAUUSDmicro |
+| spec | XAUUSD (standard) | XAUUSD |
 |---|---|---|
 | point / tick size | 0.01 | 0.01 |
 | tick value | $1.00 per 0.01 move per **1.0 lot** (⇒ 100 oz contract) | $0.01 per 0.01 move per 0.1 lot (⇒ 1 oz/lot basis) |
@@ -17,7 +17,7 @@ specs) and `data/forex/xauusd/XAUUSD_H1.csv` (14,414 continuous bars,
 | typical H1 ATR(14) | ~$24.8 (2× = $49.6 stop) | same market |
 
 **The floor verdict:** at this account's size the tradeable instrument is
-**XAUUSDmicro** ($4.96/trade at min lot). XAUUSD standard re-enters the
+**XAUUSD** ($4.96/trade at min lot). XAUUSD standard re-enters the
 picture only when the book approaches ~$5,000. The EA prices both from the
 symbol's own spec — same logic, two symbols, chosen by `InpSymbol`.
 

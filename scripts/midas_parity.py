@@ -44,11 +44,13 @@ sys.path.insert(0, "scripts")
 sys.path.insert(0, "tests")
 
 import v75_tester_runner as T                       # noqa: E402
-import v28_sweep_runner as R                        # noqa: E402
+import mt5_ops as R                                 # noqa: E402  (terminal ops;
+# was v28_sweep_runner, the closed indices sweep runner, kept alive only for these
+# four primitives — they now resolve the LIVE install by account identity)
 import midas_sweep as M                             # noqa: E402
 
 # --- point the house runner at the default install (49E0 data folder) -------
-T.TERMINAL_EXE = Path(R.TERM_EXE)
+T.TERMINAL_EXE = Path(R.terminal_exe())
 T._BASE_TESTER_INI["Symbol"] = "XAUUSD"
 T._BASE_TESTER_INI["Period"] = "M15"
 T._BASE_TESTER_INI["Leverage"] = "1000"
@@ -147,7 +149,7 @@ INPUTS = build_inputs(MODE, T0, T1)
 
 TRADE_R_RE = re.compile(r"Trade R: ([+-]?\d+\.\d+)")
 TOLERANCE = 0.01
-GOLD_LEDGER = "MIDASTOUCH_paper_XAUUSDmicro_M1.csv"   # the live paper arm's book
+GOLD_LEDGER = "MIDASTOUCH_paper_XAUUSD_M1.csv"   # the live paper arm's book
 
 
 # --- EA evidence ------------------------------------------------------------
@@ -446,8 +448,8 @@ def main() -> int:
         # flat-check gate (v28_sweep_runner discipline): the paper arm's EA
         # adopts a dangling OPEN as a live virtual position, so a tester
         # session never stops its host with an open paper trade.
-        # §14: inventory_arms now sees V75 AND MidastouchAI gold arms —
-        # every paper book on the terminal gates the stop.
+        # Every gold paper book on the terminal gates the stop. The inventory used to
+        # also carry the V75 arms; that program is closed, so no book of its remains.
         data_folder = R.data_folder_for_terminal()
         arms = R.inventory_arms(data_folder)
         flat, bad = R.verify_all_flat(arms)
@@ -467,10 +469,8 @@ def main() -> int:
             for b in bad:
                 print(" ", b)
             return 4
-        n_gold = sum(1 for a in arms if "MIDASTOUCH" in str(a.get("ledger", "")))
-        print(f"flat-check OK ({len(arms)} arm(s) on the terminal: "
-              f"{n_gold} gold + {len(arms) - n_gold} v75; legacy gold ledger "
-              f"{'checked' if gold else 'absent'})")
+        print(f"flat-check OK ({len(arms)} gold arm book(s) on the terminal; legacy "
+              f"gold ledger {'checked' if gold else 'absent'})")
 
         pids = R.terminal_pids_exact()
         if pids:

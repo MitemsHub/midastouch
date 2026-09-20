@@ -62,12 +62,33 @@ def find_metaeditor(explicit: str | None = None) -> Path:
 
 
 def terminal_mql5_dir() -> Path:
-    """The 49E0 terminal's MQL5 folder, via the harness's own locator."""
-    import v28_sweep_runner as R
-    data = R.data_folder_for_terminal()
-    if not data:
-        raise SystemExit("terminal data folder not locatable (origin.txt)")
-    return Path(data) / "MQL5"
+    """The live terminal's MQL5 folder, resolved by ACCOUNT IDENTITY.
+
+    Was `v28_sweep_runner.data_folder_for_terminal()`, which located the V75
+    TESTER terminal by matching its install directory against a pinned exe path.
+    That is the wrong terminal for this program twice over: it is the indices
+    tester, not the Upcomers install, and the pin spoke for an era that has
+    ended. It was also the last live dependency on the indices engine —
+    `scripts/audit_program_surface.py` reported it as the one place where a
+    current entry point still reached into dead code.
+
+    "Which terminal are we compiling for" is an identity question, because an
+    install that merely BOOTED also has a fresh journal, and a compile into the
+    wrong tree yields an .ex5 that never runs. `mt5_terminals.resolve_terminal()`
+    answers it from the account named in the journals and REFUSES when nothing
+    qualifies rather than defaulting to whatever was touched last.
+    """
+    import mt5_terminals as term
+    try:
+        td, why = term.resolve_terminal()
+    except term.TerminalNotFound as exc:
+        raise SystemExit(f"cannot locate the live terminal to compile into:\n{exc}")
+    mql5 = Path(td) / "MQL5"
+    if not mql5.is_dir():
+        raise SystemExit(
+            f"resolved terminal has no MQL5 tree: {mql5}\n(chosen by {why})"
+        )
+    return mql5
 
 
 def compile_one(editor: Path, mq5: Path, mql5_dir: Path,

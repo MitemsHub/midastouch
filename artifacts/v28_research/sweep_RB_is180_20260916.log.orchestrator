@@ -1,5 +1,0 @@
-[10:48:55] arm-B terminal pids: ['18272']
-[10:48:56] arm-B terminal stopped, pids now []
-[10:48:56] sweep starting
-[10:52:22] sweep finished rc=0
-[10:52:42] arm-B terminal relaunched, count -1 (verify banner + veq=$40.20 in the journal)

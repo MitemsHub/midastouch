@@ -42,7 +42,7 @@ CHR_REAL = next(f for f in (REAL_DF / "MQL5/Profiles/Charts").glob("*/*.chr")
                 if "MidastouchAI" in f.read_text(encoding="utf-16", errors="replace"))
 REAL_CHR_BYTES = CHR_REAL.read_bytes()          # containment proof, end of drill
 
-BANNER = ("[MIDAS1.10]MIDASTOUCH started | mode={mode} | symbol=XAUUSDmicro (GOLD-OK) | "
+BANNER = ("[MIDAS1.10]MIDASTOUCH started | mode={mode} | symbol=XAUUSD (GOLD-OK) | "
           "macro=H4+H1 EMA20 | trigger=M15 BB(20,2.0)/RSI(14) | SL=2.0xATR(H1) TP=2.0R "
           "timeout=720min | session={sess:02d}-20 UTC | spreadcap=1.5%stop | risk=1.00% | "
           "execution=PAPER | exec-model=PERTICK | NEWS-FILTER=OFF (calendar pending)")
@@ -56,12 +56,12 @@ def seed_chart(mode: int, sess: int) -> None:
 
 
 def seed_journal(mode: int, sess: int) -> None:
-    line = f"L\t0\t10:00:00.000\tMidastouchAI (XAUUSDmicro,M15)\t{BANNER.format(mode=mode, sess=sess)}\n"
+    line = f"L\t0\t10:00:00.000\tMidastouchAI (XAUUSD,M15)\t{BANNER.format(mode=mode, sess=sess)}\n"
     (SB / "MQL5/Logs/20260917.log").write_text(line, encoding="utf-16")
 
 
 def seed_ledger() -> None:
-    p = SB / "MQL5/Files/MIDASTOUCH_paper_XAUUSDmicro_M1.csv"
+    p = SB / "MQL5/Files/MIDASTOUCH_paper_XAUUSD_M1.csv"
     p.write_text("ERA,MIDAS1.10,1789651864,pertick-fills\nEQ,50.00\nEQ,50.00\n")
     os.utime(p, (time.time(), time.time()))     # fresh heartbeat
 

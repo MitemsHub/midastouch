@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //| MidastouchAI.mq5 — MIDASTOUCH gold engine (paper-default)        |
 //|                                                                  |
-//| Target market: GOLD only (XAUUSD / XAUUSDmicro on Deriv MT5).    |
+//| Target market: GOLD only (XAUUSD / XAUUSD on Deriv MT5).    |
 //| Research basis: docs/MIDASTOUCH_PROTOCOL.md (frozen 2026-09-16)  |
 //| Ground truth:   docs/MIDASTOUCH_GOLD_PLAYBOOK.md (measured)      |
 //|                                                                  |

@@ -32,11 +32,24 @@ import midas_watchdog as wd  # noqa: E402
 # same NOW that decide() receives keeps every mtime age exact regardless of
 # collection-to-execution latency (learned 2026-09-18: garch's 60 s ahead of
 # this suite pushed a 45-min stamp into the 44-min grace band → phantom WAIT).
-NOW = time.time()
+# Pinned, not time.time(). The watchdog's weekend branch is a function of the LOCAL
+# weekday of the instant it is handed, and this file handed it "now" — so the whole
+# suite went red every Saturday and Sunday, because WAIT-WEEKEND short-circuits
+# before every assertion below it. A suite that only passes on weekdays teaches the
+# reader to ignore red. Friday 2026-09-18 12:00 UTC; the weekend branch keeps its own
+# test (test_flat_weekend_stale_is_wait_weekend), which forces the weekday explicitly.
+NOW = 1789713600.0
 
 
-def _ledger(tmp: Path, rows: list[str], mtime_age_min: float = 1.0) -> str:
-    p = tmp / "MIDASTOUCH_paper_XAUUSDmicro_M1.csv"
+def _ledger(tmp: Path, rows: list[str], mtime_age_min: float = 1.0,
+            name: str = "MIDASTOUCH_paper_XAUUSD_M1.csv") -> str:
+    """Write a paper ledger and age it to `mtime_age_min` before NOW.
+
+    `name` exists because a portfolio fixture used to write every arm to the default
+    file name and then `os.replace` it onto the per-arm name — which, for the arm whose
+    tag IS "M1", meant replacing a path with itself and leaving no ledger behind.
+    """
+    p = tmp / name
     p.write_text("\n".join(rows) + "\n")
     stamp = NOW - mtime_age_min * 60
     os.utime(p, (stamp, stamp))
@@ -171,12 +184,12 @@ def test_midas_arm_finds_chart_and_tagged_ledger(tmp_path: Path) -> None:
     prof = tmp_path / "MQL5" / "Profiles" / "Charts" / "Default"
     prof.mkdir(parents=True)
     (prof / "chart01.chr").write_bytes(
-        ("<chart>\nsymbol=XAUUSDmicro\n<expert>\nname=MidastouchAI\n"
+        ("<chart>\nsymbol=XAUUSD\n<expert>\nname=MidastouchAI\n"
          "InpArmTag=M1\n</expert>").encode("utf-16"))
     (tmp_path / "MQL5" / "Files").mkdir(parents=True)
     arm = wd.midas_arm(str(tmp_path))
-    assert arm and arm["symbol"] == "XAUUSDmicro" and arm["tag"] == "M1"
-    assert arm["ledger"].endswith("MIDASTOUCH_paper_XAUUSDmicro_M1.csv")
+    assert arm and arm["symbol"] == "XAUUSD" and arm["tag"] == "M1"
+    assert arm["ledger"].endswith("MIDASTOUCH_paper_XAUUSD_M1.csv")
 
 
 def test_midas_arm_none_without_chart(tmp_path: Path) -> None:
@@ -204,7 +217,7 @@ def test_check_full_restup_flow(fresh_state, monkeypatch, tmp_path: Path) -> Non
     calls: list[str] = []
     monkeypatch.setattr(wd, "data_folder_for_terminal", lambda: str(tmp_path))
     monkeypatch.setattr(wd, "midas_arms", lambda df: [{
-        "chart": "chart01.chr", "symbol": "XAUUSDmicro", "tag": "M1",
+        "chart": "chart01.chr", "symbol": "XAUUSD", "tag": "M1",
         "ledger": _ledger(Path(str(fresh_state.parent)), FLAT,
                           mtime_age_min=wd.STALE_MIN + wd.GRACE_MIN + 1)}])
     monkeypatch.setattr(wd, "terminal_pids_exact", lambda: [4242])
@@ -218,8 +231,8 @@ def test_check_full_restup_flow(fresh_state, monkeypatch, tmp_path: Path) -> Non
 
 # --- banner text is observation only; the CHART is the identity source --------
 
-BANNER_OK = ("JQ\t0\t09:57:31.594\tMidastouchAI (XAUUSDmicro,M15)\t"
-             "[MIDAS1.10]MIDASTOUCH started | mode=0 | symbol=XAUUSDmicro (GOLD-OK) | "
+BANNER_OK = ("JQ\t0\t09:57:31.594\tMidastouchAI (XAUUSD,M15)\t"
+             "[MIDAS1.10]MIDASTOUCH started | mode=0 | symbol=XAUUSD (GOLD-OK) | "
              "macro=H4+H1 EMA20 | trigger=M15 BB(20,2.0)/RSI(14) | SL=2.0xATR(H1) TP=2.0R "
              "timeout=720min | session=06-20 UTC | spreadcap=1.5%stop | risk=1.00% | "
              "execution=PAPER | exec-model=PERTICK | NEWS-FILTER=OFF (calendar pending)")
@@ -249,9 +262,9 @@ def test_ambiguous_banner_cannot_manufacture_drift(fresh_state, monkeypatch,
     ZERO drift — banners are unattributable, the chart decides."""
     monkeypatch.setattr(wd, "data_folder_for_terminal", lambda: str(tmp_path))
     chr_p = tmp_path / "chart01.chr"
-    chr_p.write_bytes(("<chart>\nsymbol=XAUUSDmicro\n<expert>\nname=MidastouchAI\n"
+    chr_p.write_bytes(("<chart>\nsymbol=XAUUSD\n<expert>\nname=MidastouchAI\n"
                        "<inputs>\nInpMode=0\n</inputs>\n</expert>").encode("utf-16"))
-    arm = {"chart": str(chr_p), "symbol": "XAUUSDmicro", "tag": "M1",
+    arm = {"chart": str(chr_p), "symbol": "XAUUSD", "tag": "M1",
            "ledger": _ledger(Path(str(fresh_state.parent)), FLAT, mtime_age_min=2)}
     assert wd.resplice_pins(arm), "fixture chart must be respliceable to its pins"
     monkeypatch.setattr(wd, "midas_arms", lambda df: [arm])
@@ -267,11 +280,11 @@ def test_drift_action_remediates_with_resplice(fresh_state, monkeypatch, tmp_pat
     calls: list[str] = []
     monkeypatch.setattr(wd, "data_folder_for_terminal", lambda: str(tmp_path))
     monkeypatch.setattr(wd, "midas_arms", lambda df: [{
-        "chart": str(tmp_path / "chart01.chr"), "symbol": "XAUUSDmicro", "tag": "M1",
+        "chart": str(tmp_path / "chart01.chr"), "symbol": "XAUUSD", "tag": "M1",
         "ledger": _ledger(Path(str(fresh_state.parent)), FLAT, mtime_age_min=2)}])
     # a real chart file with an inputs block so resplice has something to edit
     chr_p = tmp_path / "chart01.chr"
-    chr_p.write_bytes(("<chart>\nsymbol=XAUUSDmicro\n<expert>\nname=MidastouchAI\n"
+    chr_p.write_bytes(("<chart>\nsymbol=XAUUSD\n<expert>\nname=MidastouchAI\n"
                        "<inputs>\nInpMode=1\nInpSessionStartHour=12\n</inputs>\n"
                        "</expert>").encode("utf-16"))
     monkeypatch.setattr(wd, "terminal_pids_exact", lambda: [4242])
@@ -326,7 +339,7 @@ def test_vps_hosting_marker_absent_restores_normal_supervision(
 def test_pin_check_error_is_observe_only(fresh_state, monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(wd, "data_folder_for_terminal", lambda: str(tmp_path))
     monkeypatch.setattr(wd, "midas_arms", lambda df: [{
-        "chart": "chart01.chr", "symbol": "XAUUSDmicro", "tag": "M1",
+        "chart": "chart01.chr", "symbol": "XAUUSD", "tag": "M1",
         "ledger": _ledger(Path(str(fresh_state.parent)), FLAT, mtime_age_min=2)}])
     # §14: the chart file IS the identity source — unreadable chart means the
     # identity is UNVERIFIABLE, which is observation, never a restart.
@@ -341,9 +354,9 @@ def test_pin_check_error_is_observe_only(fresh_state, monkeypatch, tmp_path: Pat
 def _seed_two_arm_charts(tmp_path: Path) -> None:
     prof = tmp_path / "MQL5" / "Profiles" / "Charts" / "Default"
     prof.mkdir(parents=True, exist_ok=True)
-    for i, (tag, mode) in enumerate([("M1o", "0"), ("M1t", "2")]):
+    for i, (tag, mode) in enumerate([("M1", "0"), ("U25", "2")]):
         (prof / f"chart0{i + 1}.chr").write_bytes(
-            (f"<chart>\nsymbol=XAUUSDmicro\n<expert>\nname=MidastouchAI\n"
+            (f"<chart>\nsymbol=XAUUSD\n<expert>\nname=MidastouchAI\n"
              f"InpArmTag={tag}\n"
              f"<inputs>\nInpMode={mode}\n</inputs>\n</expert>").encode("utf-16"))
     (tmp_path / "MQL5" / "Files").mkdir(parents=True, exist_ok=True)
@@ -352,35 +365,40 @@ def _seed_two_arm_charts(tmp_path: Path) -> None:
 def test_midas_arms_finds_whole_portfolio(tmp_path: Path) -> None:
     _seed_two_arm_charts(tmp_path)
     arms = wd.midas_arms(str(tmp_path))
-    assert [a["tag"] for a in arms] == ["M1o", "M1t"]
-    assert all(a["symbol"] == "XAUUSDmicro" for a in arms)
-    assert arms[1]["ledger"].endswith("MIDASTOUCH_paper_XAUUSDmicro_M1t.csv")
-    assert wd.midas_arm(str(tmp_path))["tag"] == "M1o"   # legacy single-arm view
+    assert [a["tag"] for a in arms] == ["M1", "U25"]
+    assert all(a["symbol"] == "XAUUSD" for a in arms)
+    assert arms[1]["ledger"].endswith("MIDASTOUCH_paper_XAUUSD_U25.csv")
+    assert wd.midas_arm(str(tmp_path))["tag"] == "M1"   # legacy single-arm view
 
 
 def test_preset_for_tag_maps_the_portfolio() -> None:
     assert wd.preset_for_tag("M1").endswith("MidastouchAI_M1_gold.set")
-    assert wd.preset_for_tag("M1t").endswith("MidastouchAI_M1t_gold.set")
+    # the tag/file divergence this repo actually has: the account's arm reports U25
+    # while its preset file is named for the venue. A name-only lookup missed it, so
+    # the drift check would have had no pins for the one arm that matters.
+    assert wd.preset_for_tag("U25").endswith("MidastouchAI_upcomers_gold.set")
     import pytest
     with pytest.raises(OSError):
-        wd.preset_for_tag("M1t") if False else open(wd.preset_for_tag("M9x"))
+        # an arm with no preset must fail LOUDLY: the caller then observes without
+        # pin enforcement rather than pinning to a file that is not there
+        open(wd.preset_for_tag("M9x"))
 
 
 def test_drift_is_attributed_per_arm_and_ignores_others(fresh_state, tmp_path: Path,
                                                         monkeypatch) -> None:
-    """A drifted M1t chart must not blame M1o: attribution is by the arm's
+    """A drifted U25 chart must not blame M1: attribution is by the arm's
     own chart <inputs> vs its own pinned preset (§14 identity source)."""
     _seed_two_arm_charts(tmp_path)
-    for tag in ("M1o", "M1t"):
-        p = tmp_path / "MQL5" / "Files" / f"MIDASTOUCH_paper_XAUUSDmicro_{tag}.csv"
+    for tag in ("M1", "U25"):
+        p = tmp_path / "MQL5" / "Files" / f"MIDASTOUCH_paper_XAUUSD_{tag}.csv"
         p.write_text("\n".join(FLAT) + "\n")
         os.utime(p, (NOW, NOW))
     import midas_watchdog as _wd
     arms = _wd.midas_arms(str(tmp_path))
-    # heal both charts to their full pin sets first, so ONLY M1t is drifted
+    # heal both charts to their full pin sets first, so ONLY U25 is drifted
     for a in arms:
         assert _wd.resplice_pins(a), "seed charts must be respliceable"
-    m1t = [a for a in arms if a["tag"] == "M1t"][0]
+    m1t = [a for a in arms if a["tag"] == "U25"][0]
     txt = open(m1t["chart"], encoding="utf-16", errors="replace").read()
     m = re.search(r"InpMode=(\d+)", txt)
     assert m, "respliced chart must carry InpMode"
@@ -395,9 +413,9 @@ def test_drift_is_attributed_per_arm_and_ignores_others(fresh_state, tmp_path: P
     monkeypatch.setattr(_wd, "relaunch_terminal", lambda: calls.append("relaunch"))
     rec = _wd.check(now_s=NOW)
     assert rec["action"] == "DRIFT" and rec.get("relaunched") is True
-    assert all(d.startswith("[M1t]") for d in rec["drift"]), \
+    assert all(d.startswith("[U25]") for d in rec["drift"]), \
         f"every drift entry must name the drifted arm: {rec['drift']}"
-    assert not any(d.startswith("[M1o]") for d in rec["drift"]), \
+    assert not any(d.startswith("[M1]") for d in rec["drift"]), \
         "the pinned arm must never be blamed for another arm's drift"
     # and the remediation healed the drifted chart back to its pins
     healed = open(m1t["chart"], encoding="utf-16", errors="replace").read()
@@ -411,15 +429,14 @@ def test_portfolio_flat_gate_blocks_stop_when_one_arm_open(fresh_state,
     _seed_two_arm_charts(tmp_path)
     calls: list[str] = []
     ledgers = {}
-    for tag, rows in [("M1o", FLAT), ("M1t", DANGLING)]:
-        tgt = tmp_path / f"MIDASTOUCH_paper_XAUUSDmicro_{tag}.csv"
-        os.replace(_ledger(tmp_path, rows,
-                           mtime_age_min=wd.STALE_MIN + wd.GRACE_MIN + 1), tgt)
-        ledgers[tag] = str(tgt)
+    for tag, rows in [("M1", FLAT), ("U25", DANGLING)]:
+        ledgers[tag] = _ledger(tmp_path, rows,
+                               mtime_age_min=wd.STALE_MIN + wd.GRACE_MIN + 1,
+                               name=f"MIDASTOUCH_paper_XAUUSD_{tag}.csv")
     monkeypatch.setattr(wd, "data_folder_for_terminal", lambda: str(tmp_path))
     monkeypatch.setattr(wd, "midas_arms", lambda df: [
-        {"chart": f"chart0{i}.chr", "symbol": "XAUUSDmicro", "tag": t,
-         "ledger": ledgers[t]} for i, t in enumerate(("M1o", "M1t"), 1)])
+        {"chart": f"chart0{i}.chr", "symbol": "XAUUSD", "tag": t,
+         "ledger": ledgers[t]} for i, t in enumerate(("M1", "U25"), 1)])
     monkeypatch.setattr(wd, "terminal_pids_exact", lambda: [4242])
     monkeypatch.setattr(wd, "stop_terminal", lambda pids: calls.append("stop") or True)
     monkeypatch.setattr(wd, "relaunch_terminal", lambda: calls.append("relaunch"))
@@ -428,9 +445,9 @@ def test_portfolio_flat_gate_blocks_stop_when_one_arm_open(fresh_state,
     assert rec["action"] == "SKIP-OPEN-POSITION"
     assert calls == [], "the stop must never fire with any portfolio arm open"
     # the offending arm is identifiable in the record's per-arm ledger view
-    m1t = next(l for l in rec["ledgers"] if l["tag"] == "M1t")
+    m1t = next(l for l in rec["ledgers"] if l["tag"] == "U25")
     assert m1t["flat"] is False and next(l for l in rec["ledgers"]
-                                         if l["tag"] == "M1o")["flat"] is True
+                                         if l["tag"] == "M1")["flat"] is True
 
 
 def test_portfolio_restup_restarts_everyone_when_all_flat(fresh_state,
@@ -439,22 +456,21 @@ def test_portfolio_restup_restarts_everyone_when_all_flat(fresh_state,
     _seed_two_arm_charts(tmp_path)
     calls: list[str] = []
     ledgers = {}
-    for tag in ("M1o", "M1t"):
-        tgt = tmp_path / f"MIDASTOUCH_paper_XAUUSDmicro_{tag}.csv"
-        os.replace(_ledger(tmp_path, FLAT,
-                           mtime_age_min=wd.STALE_MIN + wd.GRACE_MIN + 1), tgt)
-        ledgers[tag] = str(tgt)
+    for tag in ("M1", "U25"):
+        ledgers[tag] = _ledger(tmp_path, FLAT,
+                               mtime_age_min=wd.STALE_MIN + wd.GRACE_MIN + 1,
+                               name=f"MIDASTOUCH_paper_XAUUSD_{tag}.csv")
     monkeypatch.setattr(wd, "data_folder_for_terminal", lambda: str(tmp_path))
     monkeypatch.setattr(wd, "midas_arms", lambda df: [
-        {"chart": f"chart0{i}.chr", "symbol": "XAUUSDmicro", "tag": t,
-         "ledger": ledgers[t]} for i, t in enumerate(("M1o", "M1t"), 1)])
+        {"chart": f"chart0{i}.chr", "symbol": "XAUUSD", "tag": t,
+         "ledger": ledgers[t]} for i, t in enumerate(("M1", "U25"), 1)])
     monkeypatch.setattr(wd, "terminal_pids_exact", lambda: [4242])
     monkeypatch.setattr(wd, "stop_terminal", lambda pids: calls.append("stop") or True)
     monkeypatch.setattr(wd, "relaunch_terminal", lambda: calls.append("relaunch"))
     monkeypatch.setattr(wd, "recent_banners", lambda df: [])
     rec = wd.check(now_s=NOW)
     assert rec["action"] == "RESTUP" and rec["relaunched"] is True
-    assert rec["restup_tags"] == ["M1o", "M1t"]
+    assert rec["restup_tags"] == ["M1", "U25"]
     assert calls == ["stop", "relaunch"]
 
 

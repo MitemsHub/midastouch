@@ -22,12 +22,12 @@ NOW = datetime(2026, 9, 17, 8, 0, 0)
 
 
 def _probe_line(h: int = 3, m: int = 0) -> str:
-    return (f"PR\t0\t08:00:00.000\tMidasOffsetProbe (XAUUSDmicro,M1)\t"
+    return (f"PR\t0\t08:00:00.000\tMidasOffsetProbe (XAUUSD,M1)\t"
             f"  offset (server-GMT)   = {h:+d} h {m:02d} min")
 
 
 def _banner_line(h: int = 2) -> str:
-    return (f"PR\t0\t08:00:00.000\tMidastouchAI (XAUUSDmicro,M15)\t"
+    return (f"PR\t0\t08:00:00.000\tMidastouchAI (XAUUSD,M15)\t"
             f"MIDAS1.12CLOCK: server=2026.09.17 10:00 | GMT=2026.09.17 08:00 | "
             f"offset={h:+d} h 00 min — session gates classify BAR EPOCHS")
 
@@ -49,7 +49,7 @@ class TestParseOffset:
         assert ms._parse_offset_hm(_probe_line(-5, 30)) == -330
 
     def test_ignores_lines_without_an_offset(self):
-        assert ms._parse_offset_hm("MIDAS OFFSET PROBE on XAUUSDmicro") is None
+        assert ms._parse_offset_hm("MIDAS OFFSET PROBE on XAUUSD") is None
         assert ms._parse_offset_hm("CHECK 1: open a UTC clock") is None
 
     def test_fmt_mirrors_the_mql5_writer(self):
@@ -263,7 +263,7 @@ class TestJournalRetention:
         if with_ledger:
             fd = os.path.join(td, "MQL5", "Files")
             os.makedirs(fd, exist_ok=True)
-            p = os.path.join(fd, "MIDASTOUCH_paper_XAUUSDmicro_M1.csv")
+            p = os.path.join(fd, "MIDASTOUCH_paper_XAUUSD_M1.csv")
             with open(p, "w") as fh:
                 fh.write("\n".join(ledger_rows or ["EQ,50.00"]) + "\n")
             if ledger_mtime is not None:
@@ -277,7 +277,7 @@ class TestJournalRetention:
         p = os.path.join(ld, f"{datetime.now():%Y%m%d}.log")
         with open(p, "w", encoding="utf-8") as fh:
             for _ in range(banners):
-                fh.write("0\t0\t10:31:13.488\tMidastouchAI (XAUUSDmicro,M15)\t"
+                fh.write("0\t0\t10:31:13.488\tMidastouchAI (XAUUSD,M15)\t"
                          "[MIDAS1.10]MIDASTOUCH started | mode=0\n")
         if mtime is not None:
             os.utime(p, (mtime, mtime))
@@ -361,7 +361,7 @@ def test_midas_section_carries_the_clock_offset_line(tmp_path, monkeypatch, caps
         f.write(preset_mod._chart_text())
     fd = os.path.join(root, "FAKEHASH", "MQL5", "Files")
     os.makedirs(fd, exist_ok=True)
-    with open(os.path.join(fd, "MIDASTOUCH_paper_XAUUSDmicro_M1.csv"), "w") as f:
+    with open(os.path.join(fd, "MIDASTOUCH_paper_XAUUSD_M1.csv"), "w") as f:
         f.write("ERA,MIDAS1.10,1757894400,pertick-fills\nEQ,50.00\n")
     ld = os.path.join(root, "FAKEHASH", "MQL5", "Logs")
     os.makedirs(ld, exist_ok=True)

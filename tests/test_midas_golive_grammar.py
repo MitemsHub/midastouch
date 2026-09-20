@@ -17,8 +17,9 @@ LOPEN[2]; LCLOSE carries R, not $). Pinned here:
     reasons, including a corrupt-row fail-closed problem;
   * the parity harness ledger_flatness: same LIVE-grammar awareness (a
     dangling LOPEN refuses the cert session's terminal stop);
-  * the LIVE preset: execution=true, dedicated magic, PERTICK — and the
-    four paper presets stay paper (the one-commit rule, both directions).
+  * the presets: EVERY one of them is paper-only. The contract asserted here is
+    that no file in this repo can arm real orders — the Deriv-era live preset
+    that carried execution=true is gone.
 """
 from __future__ import annotations
 
@@ -97,7 +98,7 @@ def test_lclose_writer_shape_is_6_fields() -> None:
 
 
 def _write(tmp: Path, rows: list[str]) -> str:
-    p = tmp / "MIDASTOUCH_paper_XAUUSDmicro_LV.csv"
+    p = tmp / "MIDASTOUCH_paper_XAUUSD_LV.csv"
     p.write_text("\n".join(["ERA,MIDAS1.16,1789720595,pertick-fills"] + rows) + "\n")
     return str(p)
 
@@ -165,10 +166,11 @@ def test_live_grammar_view_open_position(tmp_path: Path) -> None:
 
 
 def test_parity_harness_flatness_sees_the_live_row(tmp_path: Path) -> None:
-    """The cert session's flat gate (v28_sweep_runner.ledger_flatness) must
-    refuse a terminal stop while LV holds a real position — the 2026-09-18
-    pre-cert fix: the harness had NO LIVE-grammar awareness at all."""
-    import v28_sweep_runner as R  # noqa: E402
+    """The cert session's flat gate (mt5_ops.ledger_flatness) must refuse a terminal
+    stop while the arm holds a real position — the 2026-09-18 pre-cert fix: the harness
+    had NO LIVE-grammar awareness at all. The reader moved to mt5_ops when the V75
+    sweep runner was retired; the grammar it must keep honouring did not change."""
+    import mt5_ops as R  # noqa: E402
     res = R.ledger_flatness(_write(tmp_path, LOPEN_DANGLING))
     assert not res["flat"]
     assert res["open_positions"] and res["open_positions"][0]["ticket"] == "2048845860"
@@ -195,11 +197,11 @@ def test_live_grammar_view_corrupt_row_fails_closed(tmp_path: Path) -> None:
 
 # --- §14 banner attribution: exec-aware matching, no phantom drift ----------------
 
-BANNER_LIVE = ("PR\t0\t09:36:35.210\tMidastouchAI (XAUUSDmicro,M15)\t"
-               "[MIDAS1.16]MIDASTOUCH started | mode=0 | symbol=XAUUSDmicro (GOLD-OK) | "
+BANNER_LIVE = ("PR\t0\t09:36:35.210\tMidastouchAI (XAUUSD,M15)\t"
+               "[MIDAS1.16]MIDASTOUCH started | mode=0 | symbol=XAUUSD (GOLD-OK) | "
                "session=06-20 UTC | execution=LIVE | exec-model=PERTICK")
-BANNER_PAPER_M1 = ("PR\t0\t09:36:35.210\tMidastouchAI (XAUUSDmicro,M15)\t"
-                   "[MIDAS1.10]MIDASTOUCH started | mode=0 | symbol=XAUUSDmicro (GOLD-OK) | "
+BANNER_PAPER_M1 = ("PR\t0\t09:36:35.210\tMidastouchAI (XAUUSD,M15)\t"
+                   "[MIDAS1.10]MIDASTOUCH started | mode=0 | symbol=XAUUSD (GOLD-OK) | "
                    "session=06-20 UTC | execution=PAPER | exec-model=PERTICK")
 BANNER_PAPER_M1T = BANNER_PAPER_M1.replace("mode=0", "mode=2")
 BANNER_LIVE_DRIFTED = BANNER_LIVE.replace("session=06-20", "session=12-16")
@@ -217,10 +219,10 @@ def test_chart_identity_adjudicates_the_real_drift_class(tmp_path: Path) -> None
     part: five charts print identical banner text, so it cannot attribute."""
     from morning_status import preset_identity
     chart = tmp_path / "chart05.chr"
-    chart.write_bytes(("<chart>\nsymbol=XAUUSDmicro\n<expert>\nname=MidastouchAI\n"
+    chart.write_bytes(("<chart>\nsymbol=XAUUSD\n<expert>\nname=MidastouchAI\n"
                        "<inputs>\nInpSessionStartHour=12\n</inputs>\n</expert>").encode("utf-16"))
     txt = open(chart, encoding="utf-16", errors="replace").read()
-    ident = preset_identity(txt, wd.preset_for_tag("LV"))
+    ident = preset_identity(txt, wd.preset_for_tag("upcomers"))
     assert ident["verdict"] == "DRIFT"
     assert any(k == "InpSessionStartHour" for k, _got, _want in ident["drift"]), \
         ident["drift"]
@@ -228,68 +230,104 @@ def test_chart_identity_adjudicates_the_real_drift_class(tmp_path: Path) -> None
 
 # --- the preset contract, both directions -----------------------------------------
 
-# 2026-09-20: EVERY preset is now InpLiveExecution=false. The LV arm was the last one
-# carrying true (a live arm on a Deriv account that no longer exists); leaving a file that
-# arms real orders on the funded Upcomers account is a loaded switch, not a record. Arming
-# is a frozen-gate event driven by the arming record, never by a preset default.
-@pytest.mark.parametrize("arm,live", [
-    ("M1", False), ("M1t", False), ("M1s", False), ("M1m", False), ("LV", False),
-])
-def test_execution_switch_by_preset(arm: str, live: bool) -> None:
-    vals = {}
-    for line in (REPO / "mql5" / "MIDASTOUCH" / f"MidastouchAI_{arm}_gold.set").read_text().splitlines():
+# --- the preset contract, both directions -----------------------------------------
+
+
+def _preset_vals(name: str) -> dict[str, str]:
+    """A .set as key -> value, comments and blanks skipped.
+
+    A REPEATED key raises: MT5's behaviour on a duplicate is unspecified, so a file
+    that declares one twice cannot be read as a statement of what it configures. This
+    repo has already produced one such file by accident.
+    """
+    vals: dict[str, str] = {}
+    for line in (REPO / "mql5" / "MIDASTOUCH" / name).read_text().splitlines():
         s = line.strip()
-        if s and not s.startswith(";") and "=" in s:
-            k, v = s.split("=", 1)
-            vals[k.strip()] = v.strip()
-    assert vals["InpLiveExecution"] == ("true" if live else "false"), arm
+        if not s or s.startswith(";") or "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if k in vals:
+            raise AssertionError(f"{name} declares {k} twice: {vals[k]!r} then {v!r}")
+        vals[k] = v
+    return vals
+
+
+def _presets_on_disk() -> list[str]:
+    """Every gold preset in the tree, enumerated rather than hand-listed.
+
+    The hand list this replaces named the arm portfolio (M1/M1t/M1s/M1m/LV) and went
+    red the day those files were retired — it pinned the era, not the contract. An
+    enumeration cannot be outgrown: a preset added later is checked without anyone
+    remembering to add it here.
+    """
+    found = (REPO / "mql5" / "MIDASTOUCH").glob("MidastouchAI_*_gold.set")
+    return sorted(p.name[len("MidastouchAI_"):-len("_gold.set")] for p in found)
+
+
+# 2026-09-20: no preset in this repo may arm real orders. The LV arm was the last one
+# carrying true (a live arm on a Deriv account that no longer exists); on the funded
+# Upcomers account that is a loaded switch, not a record. Arming is a frozen-gate event
+# driven by an arming record, never by a preset default.
+@pytest.mark.parametrize("arm", _presets_on_disk())
+def test_execution_switch_by_preset(arm: str) -> None:
+    vals = _preset_vals(f"MidastouchAI_{arm}_gold.set")
+    assert vals["InpLiveExecution"] == "false", arm
+
+
+#: The certified strategy values. None of these changed when the venue changed —
+#: trading is the same work, and this is the set the pre-registered studies fitted.
+CERTIFIED_STRATEGY = {
+    "InpMode": "0", "InpMacroEmaPeriod": "20", "InpBBPeriod": "20",
+    "InpBBDev": "2.0", "InpRSIPeriod": "14", "InpRSIUpper": "70.0",
+    "InpRSILower": "30.0", "InpAtrPeriod": "14", "InpSlAtrMult": "2.0",
+    "InpTpMult": "2.0", "InpTimeoutMinutes": "720",
+    "InpSessionStartHour": "6", "InpSessionEndHour": "20",
+    "InpSpreadCapPctStop": "1.5", "InpEntryTF": "15", "InpBarModel": "false",
+    "InpStaleMinutes": "30", "InpFridayFlatHour": "20",
+    "InpDailyLossCapPct": "3.0", "InpUseNewsFilter": "false",
+}
+
+
+@pytest.mark.parametrize("arm", _presets_on_disk())
+def test_every_preset_runs_the_certified_strategy(arm: str) -> None:
+    """Identity and account size may vary per preset; the strategy may not.
+
+    Asserted against a literal rather than against the other preset: two files that
+    drifted together would agree with each other while both being wrong.
+    """
+    vals = _preset_vals(f"MidastouchAI_{arm}_gold.set")
+    for k, v in CERTIFIED_STRATEGY.items():
+        assert vals.get(k) == v, f"{arm}: {k}={vals.get(k)!r}, certified {v!r}"
 
 
 def test_live_preset_is_dedicated_and_certified_shape() -> None:
-    vals = {}
-    for line in (REPO / "mql5" / "MIDASTOUCH" / "MidastouchAI_LV_gold.set").read_text().splitlines():
-        s = line.strip()
-        if s and not s.startswith(";") and "=" in s:
-            k, v = s.split("=", 1)
-            vals[k.strip()] = v.strip()
-    assert vals["InpMagic"] == "7801601"
-    assert vals["InpArmTag"] == "LV"
-    assert vals["InpMode"] == "0" and vals["InpBarModel"] == "false"
-    assert vals["InpRiskPercent"] == "1.0" and vals["InpMaxRiskPct"] == "15.0"
-    assert vals["InpSessionStartHour"] == "6" and vals["InpSessionEndHour"] == "20"
-    # 2026-09-18 review amendment: LIVE breaker is 15% (a 3% paper default
-    # would let one min-lot stop-out stand the live arm down for the UTC day);
-    # the paper arms keep 3.0 (asserted below).
-    assert vals["InpDailyLossCapPct"] == "15.0" and vals["InpFridayFlatHour"] == "20"
-    # 2026-09-18 trigger-frequency amendment, CORRECTED adjudication 18:05 UTC.
-    # First pass ranked configs by per-trade expectancy and shipped k=3.0/75-25;
-    # re-adjudication on TOTAL OOS RETURN flipped the verdict: k=1.0/75-25
-    # ORIGINAL — 152 OOS trades, +21.4R total, pf 1.287 OOS / 1.311 fresh-broker
-    # (edge holds on BOTH independent corpora), ~1 fill/day, OOS dd 7.5R.
-    # k=3.0/75-25: highest per-trade quality (pf 7.2 OOS) but only +7.3R total
-    # and ~1 fill/18d — total-return inferior. M1 keeps the frozen §13
-    # baseline 2.0/70-30 as the paper control — the divergence is the
-    # amendment, not drift.
-    assert vals["InpBBDev"] == "1.0"
-    assert vals["InpRSIUpper"] == "75.0" and vals["InpRSILower"] == "25.0"
-    # every strategy/gate value equals the M1 paper arm's (single-strategy law)
-    m1 = {}
-    for line in (REPO / "mql5" / "MIDASTOUCH" / "MidastouchAI_M1_gold.set").read_text().splitlines():
-        s = line.strip()
-        if s and not s.startswith(";") and "=" in s:
-            k, v = s.split("=", 1)
-            m1[k.strip()] = v.strip()
-    for k in ("InpMode", "InpTpMult", "InpTimeoutMinutes", "InpSlAtrMult",
-              "InpSessionStartHour", "InpSessionEndHour", "InpRiskPercent",
-              "InpMaxRiskPct"):
-        assert vals[k] == m1[k], k
-    # the one deliberate divergence (live-arm breaker amendment):
-    assert vals["InpDailyLossCapPct"] != m1["InpDailyLossCapPct"]
-    # ...and the trigger-frequency amendment (M1 keeps the frozen §13 baseline
-    # 2.0/70-30 as paper control; LV runs the corrected winner 1.0/75-25):
-    assert m1["InpBBDev"] == "2.0"
-    assert m1["InpRSIUpper"] == "70.0" and m1["InpRSILower"] == "30.0"
-    assert m1["InpDailyLossCapPct"] == "3.0"   # paper arms stay certified
-    for arm in ("M1t", "M1s", "M1m"):
-        t = (REPO / "mql5" / "MIDASTOUCH" / f"MidastouchAI_{arm}_gold.set").read_text()
-        assert "InpDailyLossCapPct=3.0" in t, arm
+    """The preset that would run the funded account, asserted key by key.
+
+    Repointed 2026-09-20 from the closed Deriv-era live preset
+    (`MidastouchAI_LV_gold`, magic 7801601, a $1,000 Deriv account) to the Upcomers
+    paper mirror. What is certified here is what must hold before arming is even
+    contemplated: one dedicated magic per era, the frozen strategy, the venue's four
+    numbers, and live execution hard off.
+    """
+    vals = _preset_vals("MidastouchAI_upcomers_gold.set")
+    # identity: a magic distinct from the Deriv-era 7801001, so no ledger can mix the
+    # two eras' fills, and an arm tag naming the account this mirrors
+    assert vals["InpMagic"] == "7825001" and vals["InpArmTag"] == "U25"
+    # the venue's four numbers — mirrored by
+    # src/synthetic_trader/risk/upcomers_rules.py, enforced in the EA's
+    # PropGovernorBlock()
+    assert vals["InpPropGuard"] == "true"
+    assert vals["InpPropAccountSize"] == "25000.0"
+    assert vals["InpPropTargetPct"] == "5.0"
+    assert vals["InpPropMaxDdPct"] == "6.0"
+    assert vals["InpPropBestDayPct"] == "20.0"
+    # the daily breaker is the venue's 3.0, not the Deriv-era live preset's 15.0 (that
+    # 15.0 existed because a min-lot stop-out on a $1,000 account would have stood the
+    # arm down for the day; on this account 3% is the rule that applies)
+    assert vals["InpDailyLossCapPct"] == "3.0"
+    # the paper mirror is sized for the account it mirrors: the Deriv-era $50 equity
+    # understated every lot by ~500x and would have made the only forward record we
+    # have unrepresentative of the account it represents
+    assert vals["InpPaperEquity"] == "25000.0" and vals["InpRiskPercent"] == "1.0"
+    assert vals["InpLiveExecution"] == "false"

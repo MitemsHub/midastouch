@@ -26,7 +26,7 @@ def _preset_input_lines() -> list[str]:
 def _chart_text(overrides: dict[str, str] | None = None,
                 drop: tuple[str, ...] = (), extra: tuple[str, ...] = ()) -> str:
     """A realistic .chr body: MT5 metadata, group headers, and all 30 inputs."""
-    lines = ["; chart", "MidastouchAI", "symbol=XAUUSDmicro", "period_size=15",
+    lines = ["; chart", "MidastouchAI", "symbol=XAUUSD", "period_size=15",
              "==== Strategy (frozen protocol defaults) ===="]
     for ln in _preset_input_lines():
         k = ln.split("=", 1)[0]
@@ -118,7 +118,7 @@ class TestMidasSectionIntegration:
             f.write(chart_txt)
         fd = os.path.join(term_root, "FAKEHASH", "MQL5", "Files")
         os.makedirs(fd, exist_ok=True)
-        with open(os.path.join(fd, "MIDASTOUCH_paper_XAUUSDmicro_M1.csv"), "w") as f:
+        with open(os.path.join(fd, "MIDASTOUCH_paper_XAUUSD_M1.csv"), "w") as f:
             f.write("ERA,MIDAS1.10,1757894400,pertick-fills\nEQ,50.00\n")
         monkeypatch.setattr(ms, "TERM_ROOT", term_root)
 

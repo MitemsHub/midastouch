@@ -1,13 +1,13 @@
 ; MIDASTOUCH — gold paper arm M1 preset (protocol-pinned forward config)
 ; Pins: docs/MIDASTOUCH_PROTOCOL.md §2/§10 Amendment 2 (forward collection on
 ; the plainest variant ORIGINAL, zero selection bias) + MIDASTOUCH_CLOSEOUT
-; Step 6 ($50 virtual equity mirroring the real account floor, XAUUSDmicro).
+; Step 6 ($50 virtual equity mirroring the real account floor, XAUUSD).
 ; 2026-09-17: restored after unregistered chart drift (mode=2 / session 12-16
 ; found live at 09:57 attach); this file is now the complete key set so
 ; scripts/set_chart_preset.py can splice it byte-exact. v1.09 keys pinned at
 ; their code defaults — InpLiveExecution=false is hard (paper arm forever,
 ; live authorization is a frozen-gate event, never an input edit).
-; Symbol: XAUUSDmicro (charter: gold only)
+; Symbol: XAUUSD (charter: gold only)
 InpMagic=7801001
 InpArmTag=M1
 InpMode=0

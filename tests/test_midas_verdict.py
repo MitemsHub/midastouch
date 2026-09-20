@@ -84,7 +84,7 @@ def test_abort_line_is_30pct_drawdown() -> None:
 
 # --- ledger statistics ----------------------------------------------------------
 
-def _write(tmp_path: Path, rows: list[str], name: str = "MIDASTOUCH_paper_XAUUSDmicro_M1.csv") -> str:
+def _write(tmp_path: Path, rows: list[str], name: str = "MIDASTOUCH_paper_XAUUSD_M1.csv") -> str:
     p = tmp_path / name
     p.write_text("".join(r + "\n" for r in rows), encoding="utf-8")
     return str(p)
@@ -387,7 +387,7 @@ def _sandbox(tmp_path, monkeypatch, ledger_rows: list[str],
         (tmp_path / "wd_last.json").write_text(json.dumps(wd_last), encoding="utf-8")
     chart = tmp_path / f"{tag}.chr"
     chart.write_text("".join(f"{k}={v}\n" for k, v in chart_pairs.items()), encoding="utf-16")
-    led = tmp_path / f"MIDASTOUCH_paper_XAUUSDmicro_{tag}.csv"
+    led = tmp_path / f"MIDASTOUCH_paper_XAUUSD_{tag}.csv"
     led.write_text("".join(r + "\n" for r in ledger_rows), encoding="utf-8")
     return mv.adjudicate(tag, str(led), str(chart))
 
@@ -449,11 +449,11 @@ def _portfolio(tmp_path: Path) -> str:
     charts = tmp_path / "MQL5" / "Profiles" / "Charts" / "Default"
     charts.mkdir(parents=True)
     for tag in ("M1", "M1t", "M1orphan"):
-        (files / f"MIDASTOUCH_paper_XAUUSDmicro_{tag}.csv").write_text(
+        (files / f"MIDASTOUCH_paper_XAUUSD_{tag}.csv").write_text(
             ERA_ROW + "\n", encoding="utf-8")
     for tag in ("M1", "M1t", "M1s"):
         (charts / f"{tag}.chr").write_text(
-            f"expert=MidastouchAI\nsymbol=XAUUSDmicro\nInpArmTag={tag}\n",
+            f"expert=MidastouchAI\nsymbol=XAUUSD\nInpArmTag={tag}\n",
             encoding="utf-16")
     return str(tmp_path)
 
@@ -501,7 +501,7 @@ def test_paper_weekly_carries_the_monthly_verdict_leg() -> None:
 # --- CLI smoke ---------------------------------------------------------------------
 
 def test_cli_json_smoke_reports_full_evidence(tmp_path, monkeypatch, capsys) -> None:
-    led = tmp_path / "MIDASTOUCH_paper_XAUUSDmicro_M1.csv"
+    led = tmp_path / "MIDASTOUCH_paper_XAUUSD_M1.csv"
     led.write_text(ERA_ROW + "\nCLOSE,1000,1,TARGET,1.0,+1.00,5.00,55.00\n", encoding="utf-8")
     monkeypatch.setattr(mv, "arms", lambda df=None: [
         {"tag": "M1", "ledger": str(led),

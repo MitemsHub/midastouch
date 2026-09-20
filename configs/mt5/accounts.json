@@ -1,0 +1,57 @@
+{
+  "_README": [
+    "IDENTITY REGISTRY for the terminal resolver (scripts/mt5_terminals.py).",
+    "",
+    "WHY THIS FILE EXISTS. The resolver used to pick the install whose journal was",
+    "written most recently. That is wrong in a specific, measured way: on",
+    "2026-09-19 the DEAD Deriv install (49E0383C) had a logs/20260919.log written",
+    "at 15:58 reading 'MetaTrader 5 Terminal x64 build 6182 started for Deriv.com",
+    "Limited'. A terminal that merely BOOTED satisfied every recency test, so an",
+    "install with no account, no EA and no relation to the live venue was a",
+    "plausible answer to 'which terminal are we trading on?'.",
+    "",
+    "The fix is to identify installs by the ACCOUNT NUMBER in their journals",
+    "rather than by mtime. MT5 writes unambiguous identity lines:",
+    "",
+    "    '1428765': authorized on Upcomers-Server",
+    "    '1428765': terminal synchronized with Upcomers Ltd.: 0 positions, ...",
+    "",
+    "So an install that cites an account we do not trade can NEVER be selected,",
+    "however recently it was touched.",
+    "",
+    "EXCLUSION COMES FROM 'active' ALONE. Any install citing an account that is",
+    "not the active one is classified foreign and excluded from every fallback,",
+    "whether or not it appears in the 'retired' list below. The retired list does",
+    "not do the excluding -- it gives the excluded install a NAME, so a refusal",
+    "can say 'that is the closed MIDASTOUCH gold install' rather than only",
+    "'acct 140778269'. Keep the entries current for that reason, not for safety:",
+    "the safety is in 'active' being correct.",
+    "",
+    "Update 'active' whenever the trading account changes. If the declared account",
+    "is not found in any install, the resolver says so rather than falling back to",
+    "recency. An install citing NO account is eligible but flagged as unconfirmed,",
+    "so ambiguity is reported instead of hidden.",
+    "",
+    "Override for CI/tests: MITEMSHUB_MT5_ACCOUNT=<number> replaces the declared",
+    "active account; MITEMSHUB_MT5_REGISTRY=<path> points at a different registry."
+  ],
+  "active": {
+    "account": "1428765",
+    "server": "Upcomers-Server",
+    "company": "Upcomers Ltd.",
+    "venue": "Upcomers Thunderbolt Classic ($25,000, MT5)",
+    "since": "2026-09-19",
+    "note": "Funded evaluation account. The only install that may be resolved as live."
+  },
+  "retired": [
+    {
+      "account": "140778269",
+      "server": "DerivSVG-Server-03",
+      "company": "Deriv (SVG) LLC",
+      "venue": "Deriv",
+      "program": "MIDASTOUCH (XAUUSD gold)",
+      "retired": "2026-09-19",
+      "reason": "Program closed and the account defunded; the Deriv terminal was uninstalled. Its data directories remain on disk and must never be resolved as live. See docs/MIDASTOUCH_CLOSEOUT_20260919.md and docs/GOLD_SURFACE_RETIREMENT_20260919.md."
+    }
+  ]
+}

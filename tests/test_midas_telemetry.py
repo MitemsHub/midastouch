@@ -153,7 +153,7 @@ def test_version_bumped_and_property_consistent() -> None:
 # --- the safety net: every python consumer tolerates the appended rows --------
 
 def _write(tmp_path: Path, rows: list[str]) -> Path:
-    p = tmp_path / "MIDASTOUCH_paper_XAUUSDmicro_M1.csv"
+    p = tmp_path / "MIDASTOUCH_paper_XAUUSD_M1.csv"
     p.write_text("\n".join(rows) + "\n", encoding="utf-8")
     return p
 
@@ -228,7 +228,7 @@ def test_parity_parse_ledger_tolerates_appends(tmp_path):
 
 
 def test_ledger_flatness_tolerates_appends(tmp_path):
-    from v28_sweep_runner import ledger_flatness
+    from mt5_ops import ledger_flatness
     rows = [f"ERA,MIDAS1.13,{era_mod.ERA_EPOCH},"
             "pertick-fills+telemetry-only-per-V2-register",
             _appended_open("M1"), _appended_close(), "EQ,50.00"]
@@ -240,12 +240,12 @@ def test_ledger_flatness_tolerates_appends(tmp_path):
 def test_morning_status_collectors_tolerate_appends(tmp_path):
     d = tmp_path / "MQL5" / "Files"
     d.mkdir(parents=True)
-    (d / "MIDASTOUCH_paper_XAUUSDmicro_M1t.csv").write_text(
+    (d / "MIDASTOUCH_paper_XAUUSD_M1t.csv").write_text(
         _appended_open("M1t") + "\n", encoding="utf-8")
-    (d / "MIDASTOUCH_paper_XAUUSDmicro_M1m.csv").write_text(
+    (d / "MIDASTOUCH_paper_XAUUSD_M1m.csv").write_text(
         _appended_open("M1m") + "\n", encoding="utf-8")
-    charts = [(str(tmp_path), "symbol=XAUUSDmicro\nInpArmTag=M1t\n"),
-              (str(tmp_path), "symbol=XAUUSDmicro\nInpArmTag=M1m\n")]
+    charts = [(str(tmp_path), "symbol=XAUUSD\nInpArmTag=M1t\n"),
+              (str(tmp_path), "symbol=XAUUSD\nInpArmTag=M1m\n")]
     pos = collect_midas_positions(charts)
     assert len(pos) == 2, "appended OPEN rows must still count as live positions"
     clusters = correlate_midas_positions(pos)
@@ -285,9 +285,13 @@ def _ledger_grammar_consumers() -> list[str]:
 
 def test_consumer_enumerate_matches_the_hand_list() -> None:
     consumers = set(_ledger_grammar_consumers())
-    known = {"midas_verdict", "midas_parity", "v28_sweep_runner",
-             "morning_status", "midas_watchdog", "ab_adjudicate",
-             "adjudicate_arm_c", "deploy_portfolio"}
+    # Relisted 2026-09-20 to the consumers that exist. The previous list named
+    # `v28_sweep_runner` (the closed indices sweep runner), `ab_adjudicate`,
+    # `adjudicate_arm_c` and `deploy_portfolio` (the closed Deriv-era deployer) — every
+    # one of them absent, so the missing-module filter silently reduced this pin to
+    # nothing. A completeness check whose known set is all-absent proves nothing.
+    known = {"midas_verdict", "midas_parity", "mt5_ops", "morning_status",
+             "midas_watchdog"}
     # consumers are asserted only where they exist in the tree — the
     # standalone MIDASTOUCH repo keeps a subset of the shared scripts/
     missing_module = {n for n in known
@@ -312,7 +316,7 @@ def test_every_enumerated_consumer_tolerates_appends(tmp_path):
     assert arm_statistics(p)["n"] == 1
     trades = parse_ledger(p)
     assert len(trades) == 1 and trades[0]["r"] == -0.750
-    from v28_sweep_runner import ledger_flatness
+    from mt5_ops import ledger_flatness
     f = ledger_flatness(p)
     assert f["flat"] and f["closed"] == 1
     import importlib.util as _ilu
@@ -331,9 +335,8 @@ def test_every_enumerated_consumer_tolerates_appends(tmp_path):
     from midas_watchdog import ledger_health
     h = ledger_health(p, now_s=0.0)
     assert h["flat"] and h["closed"] == 1 and not h["problems"]
-    # morning_status.collect_midas_positions + deploy_portfolio (via
-    # v28_sweep_runner.ledger_flatness) are covered by the tests above and
-    # by the dynamic-enumerate pin; their grammars share the readers here.
+    # morning_status.collect_midas_positions is covered by the tests above and by the
+    # dynamic-enumerate pin; its grammar shares the readers here.
 
 
 # --- v1.18 NOFILL diagnostics (register review item 1) ------------------------
@@ -389,7 +392,7 @@ def test_nofill_rows_are_inert_to_every_consumer(tmp_path):
     s = arm_statistics(p)
     assert s["n"] == 1 and not s.get("problems"), "NOFILL never counts as a trade"
     assert parse_ledger(p)[0]["r"] == -0.750
-    from v28_sweep_runner import ledger_flatness
+    from mt5_ops import ledger_flatness
     f = ledger_flatness(p)
     assert f["flat"] and not f["problems"]
     from morning_status import nofill_summary

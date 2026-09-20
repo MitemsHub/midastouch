@@ -167,7 +167,7 @@ def run_pass(tag: str, tester_inputs: dict[str, str], timeout_s: int = PASS_TIME
             f"launch would be a silent single-instance no-op. Stop the terminal "
             f"first (its paper arm's ledger read + confirmed flat), then rerun: "
             f"see V28_RESEARCH_PROTOCOL.md §2 terminal-host precondition and "
-            f"scripts/v28_sweep_runner.py, which enforces the stop/flat-check/"
+            f"scripts/mt5_ops.py, which enforces the stop/flat-check/"
             f"sweep/relaunch discipline end to end.")
 
     subprocess.Popen([str(TERMINAL_EXE), f"/config:{ini_path}"])
