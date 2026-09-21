@@ -10,8 +10,11 @@ build/
 dist/
 *.egg-info/
 data/
-!src/synthetic_trader/data/
-!src/synthetic_trader/data/*.py
+# Un-ignores a `data/` subpackage under the prop layer if one is ever added; no such
+# subpackage exists today, so these two lines currently match nothing. They name the
+# package's post-2026-09-20 path (it was `src/synthetic_trader/` before the rename).
+!src/midas_prop/data/
+!src/midas_prop/data/*.py
 journals/
 models/*.json
 artifacts/

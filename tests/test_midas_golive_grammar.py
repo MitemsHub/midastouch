@@ -315,7 +315,7 @@ def test_live_preset_is_dedicated_and_certified_shape() -> None:
     # two eras' fills, and an arm tag naming the account this mirrors
     assert vals["InpMagic"] == "7825001" and vals["InpArmTag"] == "U25"
     # the venue's four numbers — mirrored by
-    # src/synthetic_trader/risk/upcomers_rules.py, enforced in the EA's
+    # src/midas_prop/risk/upcomers_rules.py, enforced in the EA's
     # PropGovernorBlock()
     assert vals["InpPropGuard"] == "true"
     assert vals["InpPropAccountSize"] == "25000.0"
