@@ -1,0 +1,99 @@
+{
+  "_README": [
+    "Shortlist for the Upcomers $25,000 Thunderbolt Classic instrument decision.",
+    "ASSUMPTION WARNING: every price/atr_price/spread_price below is a REPRESENTATIVE",
+    "value, not a measurement. They exist so the cost-per-R ranking can be produced",
+    "and reasoned about before the terminal is logged in, and they are replaced by",
+    "scripts/venue_probe.py + scripts/upcomers_instrument_screen.py --live output the",
+    "moment the server is reachable. Commission rates are NOT assumptions -- they are",
+    "the venue's published schedule and live in upcomers_rules.py.",
+    "atr_price is ATR on H1, approximated as daily_range_pct / 4.",
+    "spread_price is the quoted bid/ask in price units."
+  ],
+  "candidates": [
+    {
+      "symbol": "NACUSD.c",
+      "asset_class": "indices",
+      "path": "Indices\\Indices\\NACUSD.c",
+      "price": 22000.0,
+      "contract_size": 1.0,
+      "atr_price": 82.0,
+      "spread_price": 2.0,
+      "min_lot": 0.1,
+      "weekend_capable": false,
+      "notes": "Nasdaq-100 CFD, zero commission. Daily range ~1.5%, tick 0.25 => spread ~0.1-0.2 bps"
+    },
+    {
+      "symbol": "SPCUSD.c",
+      "asset_class": "indices",
+      "path": "Indices\\Indices\\SPCUSD.c",
+      "price": 6000.0,
+      "contract_size": 1.0,
+      "atr_price": 15.0,
+      "spread_price": 0.5,
+      "min_lot": 0.1,
+      "weekend_capable": false,
+      "notes": "S&P 500 CFD, zero commission. Daily range ~1.0%, most liquid index contract"
+    },
+    {
+      "symbol": "GECEUR.c",
+      "asset_class": "indices",
+      "path": "Indices\\Indices\\GECEUR.c",
+      "price": 19000.0,
+      "contract_size": 1.0,
+      "atr_price": 57.0,
+      "spread_price": 1.5,
+      "min_lot": 0.1,
+      "weekend_capable": false,
+      "notes": "DAX CFD, zero commission. European session -- best fit for a GMT+1 operator"
+    },
+    {
+      "symbol": "XAUUSD",
+      "asset_class": "metals",
+      "path": "Commodities (Metals)\\Precious Metals\\XAUUSD",
+      "price": 2650.0,
+      "contract_size": 100.0,
+      "atr_price": 8.0,
+      "spread_price": 0.30,
+      "min_lot": 0.01,
+      "weekend_capable": false,
+      "notes": "Gold. $5/lot commission. The MIDASTOUCH instrument -- live-unprofitable, parked 2026-09-19"
+    },
+    {
+      "symbol": "USOIL.c",
+      "asset_class": "indices",
+      "path": "Indices\\Indices\\USOIL.c",
+      "price": 70.0,
+      "contract_size": 1000.0,
+      "atr_price": 0.35,
+      "spread_price": 0.03,
+      "min_lot": 0.01,
+      "weekend_capable": false,
+      "notes": "WTI filed under Indices by the venue; same zero-commission band. EIA-driven news risk"
+    },
+    {
+      "symbol": "EURUSD",
+      "asset_class": "forex",
+      "path": "Forex\\Major Pairs\\EURUSD",
+      "price": 1.10,
+      "contract_size": 100000.0,
+      "atr_price": 0.0008,
+      "spread_price": 0.00002,
+      "min_lot": 0.01,
+      "weekend_capable": false,
+      "notes": "Tightest absolute spread, but $5/lot commission is ~1.0 pip per round trip"
+    },
+    {
+      "symbol": "BTCUSD.nx",
+      "asset_class": "crypto",
+      "path": "Crypto\\Crypto/Fiat\\BTCUSD.nx",
+      "price": 100000.0,
+      "contract_size": 1.0,
+      "atr_price": 625.0,
+      "spread_price": 30.0,
+      "min_lot": 0.01,
+      "weekend_capable": true,
+      "notes": "The only weekend-capable class. 0.04% commission = $80 round trip per BTC, before spread"
+    }
+  ]
+}
