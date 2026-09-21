@@ -153,7 +153,7 @@ artifact: artifacts/midas_parity_result_20260921_1107.json
 ```
 
 Nine trades is a small window, and it is the only one this venue can certify on real ticks.
-`anchor NO-ANCHOR` is expected and not a defect: the frozen sweep anchor was computed on the
+`anchor NO-ANCHOR` is expected and not a defect: the sweep anchor was computed on the now-deleted
 legacy corpus, so the venue leg has nothing to anchor against.
 
 ## 5b. The same check on the long windows, and the two that cannot be run
@@ -219,13 +219,18 @@ real-tick trades. The REFUSED verdicts on the three `Model=1` windows are the ha
 its own line: a key-matched PASS there is demoted because the tester ran on generated ticks, so
 none of them can become a certificate. Only `tickcov` is certifiable, and it passed on real ticks.
 
-### The archive still reproduces the evidence it was kept for — measured, not asserted
+### The archive reproduced the evidence it was kept for — measured, then deleted
 
-Re-running `scripts/midas_sweep.py` against the archived bytes reproduces **32 of 32 sweep
+Re-running `scripts/midas_sweep.py` against the archived bytes reproduced **32 of 32 sweep
 anchors exactly** (`n` and `net_r` for every mode × window), including the one parity reads as
-its anchor: `REVERSE_DIRECTION/wf` = **151 trades, +1.474R** — the same law
-`tests/test_midas_minlot_veto.py` pins as a literal. That is the point of keeping the bytes: the
-numbers that predate the venue's history are still reproducible on demand.
+its anchor: `REVERSE_DIRECTION/wf` = **151 trades, +1.474R**. That measurement was taken while
+the bytes were present, and the same day the operator had them **deleted**: the reproduction was
+sound, but it required a series nobody else could obtain, which makes every citation from it
+un-auditable. The regression law was therefore re-pointed onto the venue's own bars
+(`tests/test_midas_minlot_veto.py`: **n=53 / +14.256R / vetoed=0** over 2026-01-12..03-31), and
+`docs/FROZEN_CORPUS_20260921.md` §4 lists exactly which citations stopped being checkable.
+Nothing in this document's parity results depends on the deleted bytes — all four windows ran
+`corpus: venue`.
 
 **One correction, recorded because the first draft of the frozen-corpus page got it wrong.**
 `artifacts/gold_wfo.json` and the verdict in `docs/GOLD_WFO_VERDICT_20260919.md` are *not*

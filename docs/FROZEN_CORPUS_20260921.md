@@ -53,12 +53,12 @@ is only one series a forward-looking pass can reach.
 ## 2. What was done
 
 - **The retired series left the data of record.** `data/forex/xauusd/XAUUSD_{M15,H1,D1}.csv`
-  are deleted (they remain in git history; the bytes are preserved, below).
-- **It moved to `archive/frozen_corpus/`**, beside the other archived evidence
-  (`archive/v75_ledgers_20260916/`), and **is committed** — a retirement that deletes the
-  evidence is not a retirement, it is an unfalsifiable claim.
+  moved to `archive/frozen_corpus/` (committed in `248db66`) and were then **deleted from the
+  working tree the same day** — §5 records why, and gives the one-command restore.
 - **`configs/frozen_corpus.json` pins every file** by SHA-256, size, bar count, first/last
-  bar, provenance, and — importantly — by `what_it_is_not` and `superseded_by`.
+  bar, provenance, and — importantly — by `what_it_is_not` and `superseded_by`, plus the
+  deletion record and the list of citations that stopped being checkable. The pins are what
+  make a restore verifiable rather than hopeful: the loader refuses bytes that do not match.
 - **`midas_sweep.frozen_bars(stem)` is the only reader.** It resolves its own path, verifies
   the hash against that manifest, and raises `SystemExit` on a mismatch or a missing file.
   There is no `load_bars("data/.../XAUUSD_M15.csv")` call site left that could find it.
@@ -86,10 +86,10 @@ Measured, at each window's asserted offset (`corpus_alignment`):
 | `tickcov` (2026-09-04 → 09-16) | venue | 3 | 18 |
 | `veto` (2026-05-11 → 05-16) | venue | 0 | 1 |
 
-`wf` cannot be compared at all: 7,752 of its bars exist only in the archive, so there is no EA
-side to walk through 75% of that span. The harness refuses it before stopping the terminal
-rather than comparing two markets. `oos` cannot be *certified* because a `Model=4` pass there
-runs on generated ticks (the venue's real ticks begin 2026-09-04) — it aborts on
+`wf` cannot be compared at all: 7,752 of its bars existed only in the research series, so there
+is no EA side to walk through 75% of that span. The harness refuses it before stopping the
+terminal rather than comparing two markets. `oos` cannot be *certified* because a `Model=4` pass
+there runs on generated ticks (the venue's real ticks begin 2026-09-04) — it aborts on
 `assert_declared_tick_model` when declared honestly, and is demoted to `REFUSED` when declared
 on the model it can actually run.
 
@@ -97,37 +97,48 @@ So the certification question this program is carrying is not "which series do w
 is now settled — but: **the only window this venue can certify per-tick begins 2026-09-04.**
 See `docs/PARITY_ENTRY_SIGNALS_20260921.md` §5b.
 
-## 4. What may still read the archive, and why that is not a loophole
+## 4. The series was then DELETED, and this is exactly what that costs
 
-Three readers, each deliberate and each named:
+Keeping the bytes had one real benefit — the certified arithmetic was computed on them — and one
+real price: **it made the program's central evidence un-checkable by anyone without a copy**, on
+a series that no fetch can reproduce. On 2026-09-21 the operator's call was to delete the copy
+and re-point the law at the series that still exists. The record of that trade, so it is not
+re-litigated from memory:
 
-1. **`scripts/midas_sweep.py:main`** — the research sweep. Its arithmetic *is* defined on this
-   series: it writes the sweep artifact that `scripts/midas_parity.py` reads as `SWEEP_ANCHOR`
-   (`artifacts/midas_sweep_20260917.json`, whose `REVERSE_DIRECTION/wf` entry is **n=151,
-   net_r +1.474**). Re-basing the sweep would not be a bug fix, it would change the numbers the
-   anchor reproduces. It is the **reproduction path**, and it says so in its own header.
+| citation | what happens to it |
+|---|---|
+| `tests/test_midas_minlot_veto.py` — the `n=151 / +1.474R` regression law | **RE-POINTED**, not dropped: the same claim (the min-lot veto does not move the engine of record's trade set) is now pinned on the venue's own bars — `n=53 / +14.256R` over 2026-01-12..03-31 at the account basis, `vetoed=0`, measured before pinning. |
+| `artifacts/midas_sweep_20260917.json` — the sweep artifact `midas_parity` reads as `SWEEP_ANCHOR` (`REVERSE_DIRECTION/wf` = 151 / +1.474) | **No longer regenerable.** `midas_sweep.py:main` reads the deleted series and refuses. `anchor_match()` can never be satisfied again; it already reported `NO-ANCHOR` on every venue-corpus window, so no live pass loses a check it was passing. |
+| `scripts/midas_sweep.py:main`, `scripts/midas_variant_research.py` | **Refuse** with the restore command, rather than silently running on the venue's bars and producing numbers that look like the certified ones. |
+| `--window wf\|oos --corpus frozen` | **Unrunnable without a restore** — by construction now, not just by span. |
+| `docs/MIDASTOUCH_PROTOCOL.md` §1, §10, §15; `docs/MIDASTOUCH_V2_REGISTER.md`; `docs/MIDASTOUCH_CLOSEOUT_20260917.md`; `docs/MIDASTOUCH_CLOSEOUT_20260919.md`; `docs/DATA_SCOPE_AND_CLOCK_20260920.md` | **True as history, no longer re-derivable.** Each cites 151 trades / +1.474R / max\|dR\| 0.0005 / the sweep anchor. None of them is wrong; none of them can be re-run without §5. |
+| `docs/PARITY_VETO_AND_CORPUS_20260921.md` (the 21-bar disagreement), `docs/PARITY_ENTRY_SIGNALS_20260921.md` §5c (“32 of 32 sweep anchors reproduce”) | **A record now, not a check.** That is why the disagreement counts (3 / 18) are pinned in the manifest instead of living only in prose. |
+| `docs/GOLD_ARMING_DECISION_20260921.md` (the certified-window row of the power table) | **Conclusion stands, sample gone.** The `+0.0098R/trade, sd 1.082` measurement is still the basis of the power argument; the 151 trades it came from can no longer be re-derived from a checkout. |
 
-   **A correction worth keeping visible, because this document got it wrong first.** The
-   obvious candidate for "the frozen artifact" is `artifacts/gold_wfo.json` and the verdict in
-   `docs/GOLD_WFO_VERDICT_20260919.md`, and the first draft of this page listed both as
-   computed on this archive. They are not. `scripts/gold_walkforward.py` loads its bars through
-   `mt5_data.load_m5(...)` — the terminal, at run time — and re-running it on 2026-09-21
-   confirms which corpus that is: its own `data` block reports **16,278 bars from 2026-01-12
-   13:15**, i.e. the venue's span, not this archive's 2024-08 start. So the walk-forward verdict
-   (fold-mean t = +0.52) is a **venue-corpus** number and is untouched by the retirement. That
-   is the better outcome, and it is only knowable because the claim was measured instead of
-   assumed — which is the whole argument for this page existing.
-2. **`tests/test_midas_minlot_veto.py`** — pins the certified regression law (`n=151`,
-   `+1.474R`) as a literal, which is only meaningful against the bytes it was computed on.
-3. **`--window wf|oos --corpus frozen`** — the two windows that have no venue bars. They exist
-   so that running one is a *declaration* rather than a silent fallback, and so the reason they
-   cannot run is printed instead of assumed.
+**What did *not* depend on it, named explicitly** — because the first draft of this page inferred
+the opposite and had to be corrected: `artifacts/gold_wfo.json` and
+`docs/GOLD_WFO_VERDICT_20260919.md` come from `scripts/gold_walkforward.py`, which loads bars
+from the terminal (`mt5_data.load_m5`) at run time. Re-running it on 2026-09-21 confirms which
+corpus that is: its own `data` block reports **16,278 bars from 2026-01-12 13:15** — the venue's
+span, not the 2024-08 start of the deleted series. So the walk-forward verdict (fold-mean
+t = +0.52) is a venue-corpus number and survives the deletion intact, as do the news
+measurements (`docs/GOLD_NEWS_SENSITIVITY_20260921.md`, `docs/GOLD_NEWS_WIDTH_20260921.md`),
+whose harness also imports `gold_walkforward`/`mt5_data`.
 
-Everything else — the parity engine's `venue` path, the live EA, any new research — must read
+Everything else — the parity engine's `venue` path, the live EA, any new research — reads
 `data/forex/xauusd/*_upcomers.csv`. `corpus_bars("venue", …)` never touches the archive, which
 is pinned by test: the archive is made to raise and the venue path is asserted to be unaffected.
 
-## 5. Two traps this export carries, recorded so they are not re-learned
+## 5. Restoring it, and the two traps the export carries
+
+**Restore (one command): `git checkout 248db66 -- archive/frozen_corpus`**, then set the
+manifest's `status` back to a kept state. Every file's SHA-256 is pinned, so a partial or edited
+restore fails loudly instead of quietly changing what the old numbers describe. The tests that
+compare against the actual bytes (`tests/test_parity_corpus.py`) skip while it is deleted and
+carry that command in their skip message; the hash-pin and deletion-record tests run either way,
+on a fixture of their own.
+
+Two traps this export carries, recorded so they are not re-learned:
 
 - **The `iso` column lies about its frame.** The venue's CSV has
   `time,iso,…` = `1768223700,2026-01-12T13:15:00+00:00` — an epoch and a string both stamped
@@ -136,32 +147,30 @@ is pinned by test: the archive is made to raise and the venue path is asserted t
 - **One offset does not convert the whole file.** The venue's stamps move with EU DST while
   gold's daily break follows US Eastern, so the offset steps at a different moment than either
   alone implies. A single offset is valid only *within one DST era*; `configs/mt5/server_offsets.json`
-  records the measured eras and the parity harness refuses a window that crosses a step.
-
-## 6. Reproducing the frozen numbers
+  records the measured eras and the parity harness refuses a window that crosses a step.## 6. Reproducing the numbers that still exist
 
 ```
-python scripts/midas_sweep.py                          # the sweep on the frozen series ->
-                                                       #   artifacts/midas_sweep_<date>.json,
-                                                       #   REVERSE_DIRECTION/wf = n 151, +1.474R
-python -m pytest tests/test_midas_minlot_veto.py -q    # the 151-trade regression law
-python scripts/midas_parity.py --window wf  --corpus frozen
-python scripts/midas_parity.py --window oos --corpus frozen
+python -m pytest tests/test_midas_minlot_veto.py -q    # the regression law, now on the venue's
+                                                       #   own bars: n=53 / +14.256R, vetoed=0
+python scripts/gold_walkforward.py                     # the walk-forward verdict (venue corpus)
+python scripts/midas_parity.py --window tickcov --corpus venue   # the certifiable window
 ```
 
-`python scripts/gold_walkforward.py` is deliberately **not** on this list: it reads the
-terminal's own history (the venue corpus) and writes the walk-forward verdict, which therefore
-never depended on the archive.
+The deleted series' numbers need §5 first. `midas_sweep.py` and `midas_variant_research.py`
+will tell you the same thing if you run them, in their refusal messages.
 
-If any of these stops reproducing, the first thing to check is the archive's hash — the
-manifest exists so that "the numbers moved" and "the bytes moved" cannot be confused.
+If one of the surviving checks stops reproducing, the first thing to establish is whether the
+*bytes* moved or the *numbers* moved: the venue series is re-fetched from the terminal, so it
+can legitimately grow, and `corpus_alignment()` will say so bar by bar.
 
 ## 7. When a pinned series stops pinning
 
-A hash pin makes the archive immutable, not eternal. Citations from it expire when:
+A hash pin makes a series immutable, not eternal. Citations from it expire when:
 
 - the pin is edited (the reader refuses, and the refusal names both hashes), or
-- a venue series with an overlapping span becomes available, which would make a *cross*-
-  market measurement possible where today there is only the 21-bar disagreement — or
-- the frozen artifact is superseded by a certification on the venue's own bars, at which
-  point this archive becomes history rather than evidence.
+- the bytes are deleted, as here — in which case the pins become the restore contract, and
+the citation list in `configs/frozen_corpus.json` is what a reader is owed instead of the
+numbers, or
+- the series is superseded by a certification on the venue's own bars, at which point it is
+  history rather than evidence — which is where this program already stands for the `wf`/`oos`
+  windows.

@@ -52,7 +52,7 @@ Same mode, same basis, python leg of the certified parity runs (0 mismatches aga
 
 | sample | window | trades | mean R/trade | sd | t | total |
 |---|---|---|---|---|---|---|
-| certified window (retired corpus) | 2025-09-15 → 2026-03-31 | 151 | **+0.0098** | 1.082 | **+0.11** | +1.474R |
+| certified window (retired corpus, since **deleted** — so this sample is no longer re-derivable from a checkout; `docs/FROZEN_CORPUS_20260921.md` §4) | 2025-09-15 → 2026-03-31 | 151 | **+0.0098** | 1.082 | **+0.11** | +1.474R |
 | venue, first quarter | 2026-01-12 → 03-31 | 53 | **+0.2690** | 1.159 | +1.69 | +14.256R |
 | venue, next 5.5 months | 2026-04-01 → 09-16 | 107 | **−0.0312** | 1.025 | −0.31 | −3.338R |
 | venue, combined | 2026-01-12 → 09-16 | **160** | **+0.0682** | 1.081 | **+0.80** | +10.918R |

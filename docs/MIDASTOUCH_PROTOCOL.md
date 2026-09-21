@@ -482,16 +482,26 @@ Changed, all of it on 2026-09-21:
 - **Data of record = the venue's own series**: `XAUUSD_{M15,H1,D1}_upcomers.csv`
   in `data/forex/xauusd/`, the terminal's history for account 1428765.
   `scripts/midas_fetch_history.py --suffix _upcomers` is the fetch of record.
-- **The research series is RETIRED, not deleted**, to a hash-pinned archive:
-  `archive/frozen_corpus/` + `configs/frozen_corpus.json`, readable only through
-  `midas_sweep.frozen_bars()`, which refuses a file that does not match its pinned
-  SHA-256. Kept because §9-§15's certified arithmetic (n=151 / +1.474R, the sweep
-  anchors) is stated on those bytes — re-running the sweep on 2026-09-21
-  reproduces **32 of 32** anchors exactly.
+- **The research series is RETIRED and then DELETED** (2026-09-21): one commit in a
+  hash-pinned archive (`archive/frozen_corpus/`, committed in `248db66`), then removed
+  from the working tree, because §9-§15's certified arithmetic being stated on bytes
+  nobody else can obtain is a citation that cannot be checked. `midas_sweep.frozen_bars()`
+  remains as the only reader and verifies every SHA-256 in `configs/frozen_corpus.json`,
+  which is what makes the restore (`git checkout 248db66 -- archive/frozen_corpus`)
+  verifiable. **The arithmetic in §9-§15 stays true as history and stops being
+  re-derivable** — the survey of exactly which citations that costs is in
+  `docs/FROZEN_CORPUS_20260921.md` §4, and the regression law was re-pointed onto the
+  venue's own bars (§16 note below).
 - **Every window declares its corpus and there is no default.** Parity's four
   comparison windows declare `venue`; `wf`/`oos` declare `frozen`, because the
   venue cannot serve them (`wf`: 7,752 of its bars exist only in the archive).
-- **What this means for the certification, plainly**: the walk-forward verdict
+- **The veto's own regression law moved with the corpus**: `tests/test_midas_minlot_veto.py`
+  now pins n=53 / +14.256R / vetoed=0 on the venue's bars over 2026-01-12..03-31
+  (measured 2026-09-21), instead of n=151 / +1.474R on a series that no longer exists.
+  The claim being tested is unchanged: the min-lot veto does not move the engine of
+  record's trade set.
+
+**What this means for the certification, plainly**: the walk-forward verdict
   (fold-mean t = +0.52) is a **venue-corpus** number — `gold_walkforward.py` reads
   the terminal, not the archive — so the re-basing did not move it. But §4's
   window cannot be walked on the venue's own bars before 2026-01-12, and the

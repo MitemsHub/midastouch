@@ -75,24 +75,40 @@ def test_veto_is_pure_and_sign_safe():
 
 # --- certified-corpus regression law --------------------------------------------
 
-def test_certified_wf_regen_unchanged_by_the_amendment():
-    """n=151 / +1.474R is certificate …_1258's python leg (engine of record,
-    pre-amendment). At the frozen 15% cap the veto must never fire on the
-    certified corpus — if it ever does, the amendment's corpus-neutrality
-    claim is false and this suite fails.
+def test_wf_regen_unchanged_by_the_amendment():
+    """RE-POINTED 2026-09-21: n=53 / +14.256R is the engine of record on the VENUE's own bars
+    over the venue-served part of the walk-forward window (2026-01-12 → 03-31), at the account
+    basis. At the frozen 15% cap the min-lot veto must never fire there — if it ever does, the
+    amendment's corpus-neutrality claim is false and this suite fails.
 
-    `corpus='frozen'` — deliberately, and it is the ONLY test that asks for it: those 151
-    trades are the frozen certificate's arithmetic, computed on the research series that is
-    now archived (archive/frozen_corpus/, hash-pinned) because it is not the market the EA
-    trades. It skips when the archive is not restored rather than quietly re-running on the
-    venue's bars, which would silently compare two different certificates."""
+    WHAT THIS REPLACED, AND WHY. This test used to pin n=151 / +1.474R on the retired research
+    series (`corpus='frozen'`). That series was deleted on 2026-09-21: the law was mathematically
+    sound but it could only be re-checked by someone holding a copy of bytes that no fetch can
+    reproduce, which makes it a certificate nobody can audit. The same claim — the veto does not
+    move the engine of record's trade set — is now stated on the series the EA actually trades,
+    whose bars are re-fetchable (`scripts/midas_fetch_history.py --suffix _upcomers`).
+
+    The 151-trade figure is not lost as history (it is cited in docs/MIDASTOUCH_PROTOCOL.md
+    §9-§15 with its corpus named); it is lost as a *re-runnable* check, which is the honest
+    trade this change makes. See docs/FROZEN_CORPUS_20260921.md §4.
+
+    Reproducibility of the pinned numbers was verified before pinning them: the parity harness's
+    own wfv run on the same window, basis and corpus reports 53 trades / +14.2563R (artifact
+    artifacts/midas_parity_result_20260921_1213.json), and the veto count was measured as 0.
+    """
     import midas_parity as P
+    spec = P._window_spec("wfv")
     try:
-        data = P.python_build_data(corpus="frozen")
+        data = P.python_build_data(offset_min=P.assert_server_offset(spec), corpus="venue")
     except SystemExit as exc:
         from pytest import skip
-        skip(f"the frozen corpus is not restored on this checkout: {exc}")
-    rr = P.M.run_mode(P.MODE, P.T0, P.T1, data)
-    assert len(rr.trades) == 151
-    assert abs(sum(t["r"] for t in rr.trades) - 1.474) < 5e-4
-    assert rr.vetoed == 0, "the veto fired on the certified corpus — amendment 6's unchanged-claim is FALSE"
+        skip(f"the venue's own series is not on this checkout: {exc}")
+    prev = P.M._BASIS
+    P.M.use_basis(P.ACCOUNT_BASIS_USD)
+    try:
+        rr = P.M.run_mode(spec["mode"], spec["t0"], spec["t1"], data)
+    finally:
+        P.M._BASIS = prev
+    assert len(rr.trades) == 53
+    assert abs(sum(t["r"] for t in rr.trades) - 14.256) < 5e-4
+    assert rr.vetoed == 0, "the veto fired on the venue corpus — amendment 6's unchanged-claim is FALSE"

@@ -166,22 +166,28 @@ MODES = ["ORIGINAL", "REVERSE_DIRECTION", "REVERSE_TRIGGER", "REVERSE_BOTH",
 # ── THE RETIRED CORPUS, AND WHY NOTHING MAY REACH IT BY DEFAULT ───────────────
 #: `data/forex/xauusd/` is the DATA OF RECORD and holds the venue's own series only. The
 #: 50,000-bar series this program was researched on (`XAUUSD_M15.csv` and its H1/D1 siblings,
-#: fetched 2026-09-17, stamped in true UTC) was removed from there on 2026-09-21 and moved to
-#: the archive below. It is a DIFFERENT MARKET from the venue's own history — measured: the
+#: fetched 2026-09-17, stamped in true UTC) was removed from there on 2026-09-21, held in the
+#: archive below for one commit, and then DELETED (`git rm`) — see `frozen_bars` below and
+#: docs/FROZEN_CORPUS_20260921.md. The pins stay so a restore is verifiable.
+#: It is a DIFFERENT MARKET from the venue's own history — measured: the
 #: two disagree about 21 bars inside the tick-covered window, and even about the units of
 #: their spread column — and having two series both answer to "the gold bars" is what made a
 #: data-source change read as a clock fault for a day.
 #:
-#: The bytes are KEPT, and kept committed, for exactly one reason: the frozen certification
+#: The bytes WERE kept, and kept committed, for exactly one reason: the frozen certification
 #: was computed on them (the sweep artifact that `midas_parity` reads as SWEEP_ANCHOR —
 #: `artifacts/midas_sweep_20260917.json`, REVERSE_DIRECTION/wf = n=151 / +1.474R — and the
-#: regression law in tests/test_midas_minlot_veto.py that pins the same numbers). Reproducing
-#: the program's central evidence needs them. NOT `artifacts/gold_wfo.json`: that one is
-#: written by scripts/gold_walkforward.py, which reads the TERMINAL's own history at run time
-#: (mt5_data.load_m5, i.e. the venue corpus) — measured 2026-09-21, its data block reports the
-#: venue's span, so the walk-forward verdict never depended on this archive. So they live in an archive that no default path, no window
-#: spec and no `load_bars(...)` call site reaches: `frozen_bars()` is the only reader, it
-#: names its own path, and it refuses any file whose SHA-256 is not the pinned one.
+#: regression law that used to pin the same numbers). That reason was outweighed on
+#: 2026-09-21 by its cost — central evidence that nobody without a copy can re-check — so the
+#: bytes are now DELETED and the law re-pointed at the venue's own series
+#: (tests/test_midas_minlot_veto.py: n=53 / +14.256R over 2026-01-12..03-31, measured today).
+#: NOT `artifacts/gold_wfo.json`: that one is written by scripts/gold_walkforward.py, which
+#: reads the TERMINAL's own history at run time (mt5_data.load_m5, i.e. the venue corpus) —
+#: measured, its data block reports the venue's span, so the walk-forward verdict never
+#: depended on this series.
+#: No default path, no window spec and no `load_bars(...)` call site reaches it:
+#: `frozen_bars()` is the only reader, it names its own path, and it refuses any file whose
+#: SHA-256 is not the pinned one — which is what makes a restore from git verifiable.
 FROZEN_DIR = os.path.join("archive", "frozen_corpus")
 FROZEN_MANIFEST = os.path.join("configs", "frozen_corpus.json")
 
@@ -222,13 +228,24 @@ def server_offset_for_month(month: str, manifest: dict | None = None) -> int | N
 
 
 def frozen_bars(stem: str) -> list[dict]:
-    """The RETIRED research series, hash-verified. Never reachable by default.
+    """The DELETED research series, hash-verified on restore. Never reachable by default.
 
     `stem` is 'XAUUSD_M15' / 'XAUUSD_H1' / 'XAUUSD_D1' — the names they had as the data of
-    record, kept so the manifest and the archive stay diffable against history. The hash pin
-    is the point: a frozen series that can be edited is not a frozen series, and every figure
-    cited from it (`gold_wfo.json`, the sweep anchors, the 151-trade regression law) is only
-    reproducible while these bytes are exactly the ones it was computed from.
+    record, kept so a restored archive stays diffable against history.
+
+    DELETED 2026-09-21, deliberately, in `git rm` — not misplaced. Until then it was kept in
+    an archive for one reason: the certified arithmetic (the sweep artifact `midas_parity`
+    reads as SWEEP_ANCHOR, the 151-trade / +1.474R regression law) was computed on these bytes
+    and could only be re-derived from them. That reason was bought at a price: a repository
+    whose central evidence depends on bytes that cannot be fetched, cannot be re-checked by
+    anyone who does not already have them. The operator's call was to delete the copy and
+    re-point the law at a series that still exists (see `docs/FROZEN_CORPUS_20260921.md` §4,
+    which lists exactly which citations stopped being checkable).
+
+    What survives is the PIN: `configs/frozen_corpus.json` still carries every file's SHA-256,
+    size, bar count and span, and this loader still verifies them. So a restore is not a leap
+    of faith — restore the bytes from git and the hashes either match or this refuses. The
+    loader is kept for exactly that, and it is the only reader.
     """
     path = os.path.join(FROZEN_DIR, f"{stem}.csv")
     try:
@@ -238,13 +255,18 @@ def frozen_bars(stem: str) -> list[dict]:
         raise SystemExit(f"cannot read the frozen-corpus manifest {FROZEN_MANIFEST}: {exc}")
     if not os.path.isfile(path):
         raise SystemExit(
-            f"the frozen corpus is not present: {path} is missing.\n"
-            f"      -> it is the RETIRED research series, and the only input that can reproduce\n"
-            f"         the sweep anchor (artifacts/midas_sweep_20260917.json: REVERSE_DIRECTION/wf\n"
-            f"         = n 151 / +1.474R) and the certified regression law. It is NOT the\n"
-            f"         data of record: no window spec and no default may use it. Name it\n"
-            f"         explicitly (corpus='frozen') when reproducing the frozen numbers, and see\n"
-            f"         docs/FROZEN_CORPUS_20260921.md for where it came from and what it is not.")
+            f"the research series is NOT PRESENT: {path} is missing.\n"
+            f"      -> it was DELETED on 2026-09-21 (commit 248db66 is where it last existed),\n"
+            f"         because the certified arithmetic that depended on it could not be\n"
+            f"         re-checked by anyone without a copy. This is the intended state, not a\n"
+            f"         fault: see docs/FROZEN_CORPUS_20260921.md §4 for the citations that stopped\n"
+            f"         being checkable, and §5 to restore it.\n"
+            f"      -> to restore (then this loader verifies every SHA-256 against the pins in\n"
+            f"         {FROZEN_MANIFEST}):\n"
+            f"           git checkout 248db66 -- {FROZEN_DIR}\n"
+            f"      -> it is NOT the data of record in any case. The venue's own series\n"
+            f"         (data/forex/xauusd/*_upcomers.csv, fetched by\n"
+            f"         scripts/midas_fetch_history.py --suffix _upcomers) is what every pass reads.")
     with open(path, "rb") as fh:
         got = hashlib.sha256(fh.read()).hexdigest()
     if got != pinned:

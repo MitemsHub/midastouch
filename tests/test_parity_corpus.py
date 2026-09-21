@@ -58,11 +58,16 @@ def _needs_data() -> None:
 
 
 def _needs_frozen() -> None:
-    """The RETIRED research series, which now lives in the archive and is optional here."""
+    """The research series, which was DELETED on 2026-09-21 and is optional on a checkout.
+
+    Tests that still compare against the actual bytes skip here rather than failing, because
+    their absence is the intended state and not a fault of the machine running them — but they
+    say how to restore it, so a skip can be turned into a real check in one command.
+    """
     try:
         M.frozen_bars("XAUUSD_M15")
     except SystemExit as exc:
-        pytest.skip(f"the frozen corpus is not restored on this checkout: {exc}")
+        pytest.skip(f"the research series is deleted (this is intended): {exc}")
 
 
 def _bar_times(bars) -> set[int]:
@@ -419,68 +424,93 @@ def test_the_archive_lives_where_nothing_reads_it_by_default():
         "of record finds it again")
 
 
-def test_the_frozen_reader_verifies_the_pinned_hash_and_refuses_anything_else(tmp_path, monkeypatch):
-    """A hash pin, exercised by really tampering with the bytes rather than asserted about.
+def _fake_series(tmp_path, monkeypatch, body: bytes = None):
+    """A miniature archive + manifest of our own, so the hash pin is tested without the bytes.
 
-    The bytes are kept so the frozen certification stays reproducible; a series that can be
-    edited is not frozen, and a citation from an edited file describes something else. So the
-    reader compares SHA-256 against `configs/frozen_corpus.json` and refuses on mismatch —
-    which is what makes the manifest a pin instead of a comment.
+    The mechanism (verify SHA-256 against the manifest, refuse on mismatch, refuse on absence)
+    is the thing that has to keep working now that the real series is deleted — and it is the
+    same mechanism a restore depends on. Building the fixture here means these tests never skip.
     """
-    _needs_data()
-    _needs_frozen()
-    src = os.path.join(M.FROZEN_DIR, "XAUUSD_M15.csv")
-    with open(src, "rb") as fh:
-        raw = fh.read()
-    # one traded byte in the middle of the series: the smallest edit that is still an edit
-    cut = len(raw) // 2
-    tampered = raw[:cut] + bytes([raw[cut] ^ 0x01]) + raw[cut + 1:]
-    assert tampered != raw
-    os.makedirs(tmp_path / "frozen_corpus", exist_ok=True)
-    (tmp_path / "frozen_corpus" / "XAUUSD_M15.csv").write_bytes(tampered)
-    monkeypatch.setattr(M, "FROZEN_DIR", str(tmp_path / "frozen_corpus"))
+    body = body if body is not None else (b"time,iso,open,high,low,close,tick_volume,spread\n"
+                                         b"1,1970-01-01T00:00:01+00:00,1,1,1,1,1,1\n")
+    d = tmp_path / "frozen_corpus"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "XAUUSD_M15.csv").write_bytes(body)
+    manifest = {"status": "deleted", "files": {"XAUUSD_M15.csv": {
+        "sha256": hashlib.sha256(body).hexdigest(), "bars": 1, "first_utc": "x",
+        "last_utc": "x", "fetched_from": "test fixture"}}}
+    mp = tmp_path / "manifest.json"
+    mp.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(M, "FROZEN_DIR", str(d))
+    monkeypatch.setattr(M, "FROZEN_MANIFEST", str(mp))
+    return d / "XAUUSD_M15.csv"
+
+
+def test_the_hash_pin_refuses_an_edited_restore_and_accepts_an_exact_one(tmp_path, monkeypatch):
+    """A hash pin, exercised by really tampering with bytes rather than asserted about.
+
+    This is what makes a restore from git trustworthy: the bytes either are the ones the
+    numbers were computed on or the loader refuses them. A series that can be edited silently
+    is not a pinned series, and a citation from an edited file describes something else.
+    """
+    src = _fake_series(tmp_path, monkeypatch)
+    raw = src.read_bytes()
+    cut = len(raw) - 3                      # one traded byte: the smallest edit that is an edit
+    src.write_bytes(raw[:cut] + bytes([raw[cut] ^ 0x01]) + raw[cut + 1:])
     with pytest.raises(SystemExit) as exc:
         M.frozen_bars("XAUUSD_M15")
     msg = str(exc.value)
     assert "pinned hash" in msg and "pinned" in msg and "found" in msg
-    # and the untouched bytes still load, so the refusal is about the edit and not the copy
-    (tmp_path / "frozen_corpus" / "XAUUSD_M15.csv").write_bytes(raw)
-    assert M.frozen_bars("XAUUSD_M15")[0]["time"] == M.load_bars(src)[0]["time"]
+    src.write_bytes(raw)                     # the exact bytes load again
+    assert M.frozen_bars("XAUUSD_M15")[0]["spread"] == 0.01
 
 
-def test_the_frozen_reader_names_what_is_missing_and_where_the_story_is(tmp_path, monkeypatch, capsys):
-    """Absent must refuse with a pointer that exists — the failure message is the operator's
-    only map, and it names a document, so the document has to be there."""
+def test_the_reader_says_the_series_was_deleted_and_how_to_restore_it(tmp_path, monkeypatch):
+    """Absent must refuse with a map that exists: the deletion, a commit to restore from, the
+    restore command itself, and the document that lists what stopped being checkable."""
     monkeypatch.setattr(M, "FROZEN_DIR", str(tmp_path / "nope"))
     with pytest.raises(SystemExit) as exc:
         M.frozen_bars("XAUUSD_M15")
     msg = str(exc.value)
-    assert "not present" in msg and M.FROZEN_DIR in msg
-    assert "frozen_bars" not in msg, "it should say what it is, not how it is implemented"
+    assert "NOT PRESENT" in msg and M.FROZEN_DIR in msg
+    assert "DELETED" in msg and "intended state" in msg, (
+        "a missing archive must read as a decision, not as a fault to be fixed by fetching")
+    assert "git checkout 248db66" in msg, "the restore is one command and it must be in the message"
     doc = "docs/FROZEN_CORPUS_20260921.md"
-    assert doc in msg, "the refusal must point at the document that explains the corpus"
-    assert os.path.exists(os.path.join(REPO, doc)), (
-        f"the frozen-corpus refusal points at {doc}, which does not exist")
+    assert doc in msg and os.path.exists(os.path.join(REPO, doc)), (
+        f"the refusal points at {doc}, which must exist")
+    assert "is NOT the data of record" in msg, "and it must say what IS"
 
 
-def test_every_archived_file_is_pinned_with_provenance():
-    """Manifest and archive must agree in both directions: an unpinned file in the archive
-    would be readable-looking but unverifiable, and a pin without a file is a promise."""
+def test_the_deletion_is_recorded_and_verifiable_without_the_bytes():
+    """The bytes are gone on purpose; the RECORD of them is not. A deletion that cannot be
+    checked against anything is just an absence, so the manifest keeps every file's hash,
+    size, span and provenance, names the commit it last existed in, lists what stopped being
+    checkable, and the working tree really is empty."""
     with open(os.path.join(REPO, M.FROZEN_MANIFEST)) as fh:
         manifest = json.load(fh)
-    on_disk = {n for n in os.listdir(M.FROZEN_DIR) if n.endswith(".csv")}
-    pinned = set(manifest["files"])
-    assert pinned == on_disk, f"manifest {sorted(pinned)} vs archive {sorted(on_disk)}"
+    assert manifest["status"] == "deleted", "the manifest still claims the series is kept"
+    assert manifest["deleted_on"] == "2026-09-21"
+    assert manifest["last_existed_in_commit"], "a restore needs a commit to restore from"
+    assert manifest["why_deleted"], "a deletion without its reason is an accident"
+    assert manifest["citations_that_stop_being_checkable"], (
+        "the whole point of recording this: name what can no longer be re-checked")
     for name, rec in manifest["files"].items():
-        for key in ("sha256", "bars", "first_utc", "last_utc", "fetched_from"):
-            assert rec.get(key), f"{name} has no {key}"
-        with open(os.path.join(M.FROZEN_DIR, name), "rb") as fh:
-            assert hashlib.sha256(fh.read()).hexdigest() == rec["sha256"], name
-        assert len(M.load_bars(os.path.join(M.FROZEN_DIR, name))) == rec["bars"], name
-    # the manifest must say what the corpus is NOT, because every reader will want to trade it
-    assert manifest["status"] == "retired"
+        for key in ("sha256", "bytes", "bars", "first_utc", "last_utc", "fetched_from"):
+            assert rec.get(key), f"{name} has no {key} — a restore could not be verified"
+        assert len(rec["sha256"]) == 64
+    # the reason this retirement happened at all, kept as a number rather than as a story
+    assert manifest["measured_disagreement"]["only_research_series"] == 3
+    assert manifest["measured_disagreement"]["only_venue"] == 18
+    for name in manifest["files"]:
+        assert not os.path.exists(os.path.join(M.FROZEN_DIR, name)), (
+            f"{name} is back in {M.FROZEN_DIR} — if that was a restore, say so in the manifest "
+            f"(status must go back to a kept state and the hashes must verify)")
+    on_disk = {n for n in os.listdir(M.FROZEN_DIR) if n.endswith(".csv")} if os.path.isdir(M.FROZEN_DIR) else set()
+    assert on_disk == set(), f"the archive directory still holds {sorted(on_disk)}"
+    # and the venue series — the one that must still be here — is described as the replacement
     assert manifest["superseded_by"].startswith("data/")
-    assert manifest["what_it_is_not"], "the manifest must carry the disqualifiers, not just the hashes"
+    assert manifest["what_it_is_not"], "the disqualifiers stay: a reader will still want to trade it"
 
 
 def test_no_window_runs_on_the_archive_unless_it_declares_it(monkeypatch):
@@ -519,19 +549,19 @@ def test_the_walk_forward_verdict_never_depended_on_the_archive():
     """
     src = (REPO / "scripts" / "gold_walkforward.py").read_text(encoding="utf-8")
     assert "frozen_bars" not in src and "FROZEN_DIR" not in src, (
-        "gold_walkforward.py started reading the retired archive — the walk-forward verdict "
+        "gold_walkforward.py started reading the research series — the walk-forward verdict "
         "is a venue-corpus number and every citation of it assumes that")
     assert "load_m5" in src, "it must be reading the terminal's own history"
     with open(os.path.join(REPO, M.FROZEN_MANIFEST)) as fh:
         manifest = json.load(fh)
-    why = json.dumps(manifest["why_kept"])
-    assert "gold_wfo.json" not in why, (
-        "the manifest claims the walk-forward artifact was computed on the archive; it was "
-        "computed from the terminal")
-    assert "gold_wfo.json" in manifest["why_kept_note"], (
-        "the manifest must NAME the non-consumer explicitly, or the next reader re-makes the "
-        "same inference")
-    assert "midas_sweep" in why, "and it must name the artifacts that really do come from it"
+    cited = json.dumps(manifest["citations_that_stop_being_checkable"])
+    assert "gold_wfo" not in cited and "GOLD_WFO_VERDICT" not in cited, (
+        "the manifest lists the walk-forward verdict as depending on the deleted series; it "
+        "does not — it reads the terminal")
+    assert "gold_wfo" in manifest["not_affected_note"], (
+        "the manifest must NAME the non-dependency explicitly, or the next reader re-makes "
+        "the same inference")
+    assert "midas_sweep" in cited, "and it must name what really did come from the series"
 
 
 def test_the_sweep_says_which_series_it_is_defined_on():

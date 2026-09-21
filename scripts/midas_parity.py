@@ -165,9 +165,11 @@ WINDOW_SPECS = {
     # `corpus: frozen` — the only two windows that cannot be walked on the venue's own bars:
     # `wf` opens 119 days before the venue's history (measured: first M15 bar 2026-01-12), and
     # `oos` is a certification-intent declaration whose `Model=4` cannot run anywhere before
-    # 2026-09-04. Both are therefore stated against the retired archive rather than left
-    # undeclared, so running one without the archive restored refuses instead of quietly
-    # picking a market. Their runnable replacements are `wfv` and `oosc`.
+    # 2026-09-04. Both are therefore stated against the retired research series rather than left
+    # undeclared, so running one refuses instead of quietly picking a market. That series was
+    # DELETED on 2026-09-21 (docs/FROZEN_CORPUS_20260921.md §4), so these two windows are now
+    # unrunnable without restoring it — which is the intended state, not a fault. Their
+    # runnable replacements are `wfv` and `oosc`, both on the venue's own bars.
     "wf":  {"tag": "midas_wf_rd",  "mode": "REVERSE_DIRECTION",
             "dates": ("2025.09.15", "2026.04.03"),
             "server_offset_min": 60, "corpus": "frozen"},
@@ -294,8 +296,9 @@ def _window_spec(name: str) -> dict:
 def _audit_line(audit: dict) -> str:
     """How the cross-market audit reads, including when there is nothing to audit against."""
     if not audit.get("frozen_available"):
-        return ("frozen research series not present — no cross-market audit available "
-                "(it is archived, not a market: see configs/frozen_corpus.json)")
+        return ("research series not present (deleted 2026-09-21) — no cross-market audit "
+                "available; it is not a market, and no default may use it: see "
+                "docs/FROZEN_CORPUS_20260921.md and configs/frozen_corpus.json")
     return (f"{audit['only_python']} bar(s) only in the frozen research series, "
             f"{audit['only_venue']} only in the venue's own")
 
@@ -1271,7 +1274,8 @@ def main() -> int:
                          "actually trades, and the data of record; 'frozen' is the RETIRED "
                          "research series, which this program no longer treats as a market "
                          "and which exists only to reproduce the frozen certification "
-                         "(archive/frozen_corpus/, hash-pinned). Defaults to the window's "
+                         "(deleted 2026-09-21; restore from commit 248db66). Defaults to "
+                         "the window's "
                          "own declaration, and there is NO fallback: a window that declares "
                          "none and is given none refuses rather than picking a market.")
     args = ap.parse_args()

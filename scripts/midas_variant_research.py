@@ -27,7 +27,7 @@ RSI_BANDS = [(70, 30), (75, 25), (80, 20), (65, 35)]
 
 
 def build_data() -> dict:
-    # The RETIRED corpus, hash-verified (ms.frozen_bars): this study's grid is a frozen
+    # The DELETED research series, hash-verified on restore (ms.frozen_bars): its grid is a frozen
     # artifact's arithmetic, so it is defined on the frozen series and on nothing else.
     h1 = ms.frozen_bars("XAUUSD_H1")
     m15 = ms.frozen_bars("XAUUSD_M15")

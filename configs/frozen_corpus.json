@@ -1,29 +1,58 @@
 {
-  "what": "The RETIRED research series for XAUUSD — the 50,000-bar corpus this program was researched and certified on. It is NOT the market the funded EA trades.",
-  "status": "retired",
+  "what": "The research series for XAUUSD — the 50,000-bar corpus this program was originally researched and certified on. It is NOT the market the funded EA trades.",
+  "status": "deleted",
   "retired_on": "2026-09-21",
-  "was": "data/forex/xauusd/XAUUSD_{M15,H1,D1}.csv (the data of record until 2026-09-21)",
-  "now": "archive/frozen_corpus/XAUUSD_{M15,H1,D1}.csv — read ONLY by scripts/midas_sweep.py:frozen_bars(), which verifies the sha256 below and refuses anything else",
-  "superseded_by": "data/forex/xauusd/XAUUSD_{M15,H1}_upcomers.csv — the terminal's own history, i.e. the bars the EA actually trades (see scripts/midas_parity.py:venue_bars_utc)",
-  "superseded_by_note": "Fetched from the Upcomers terminal that resolves account 1428765. Its own XAUUSD history BEGINS 2026-01-12 13:15 UTC, which is why 7,752 bars of the frozen `wf` window exist only in this archive and no EA side can be compared there.",
-  "why_kept": [
-    "artifacts/midas_sweep_20260917.json — the sweep artifact scripts/midas_parity.py reads as SWEEP_ANCHOR. Its REVERSE_DIRECTION/wf anchor (n=151, net_r +1.474) is a number on these bytes.",
-    "tests/test_midas_minlot_veto.py pins that regression law as a literal (n=151, +1.474R); reproducing it requires this exact series.",
-    "The certificate's python leg: `python_build_data(corpus='frozen')` reproduces the 151 frozen trades the certified artifact is stated in.",
-    "scripts/midas_variant_research.py, whose grid is frozen on this series.",
-    "A retirement that deletes the evidence is not a retirement — it is an unfalsifiable claim."
+  "deleted_on": "2026-09-21",
+  "last_existed_in_commit": "248db66",
+  "was": "data/forex/xauusd/XAUUSD_{M15,H1,D1}.csv (the data of record until 2026-09-21), then archive/frozen_corpus/ for one commit",
+  "now": "deleted from the working tree. `midas_sweep.frozen_bars()` is the only reader; it verifies these pins and refuses anything that does not match, which is what makes a restore checkable rather than hopeful.",
+  "superseded_by": "data/forex/xauusd/XAUUSD_{M15,H1,D1}_upcomers.csv — the terminal's own history for account 1428765, i.e. the bars the EA actually trades",
+  "superseded_by_note": "Fetched with `scripts/midas_fetch_history.py --suffix _upcomers`. Its own XAUUSD history BEGINS 2026-01-12 11:15 UTC, which is why 7,752 bars of the frozen `wf` window exist only in the deleted series and no EA side can be compared there.",
+  "why_retired": [
+    "Two series both answered to \"the gold bars\". Inside the tick-covered window they disagreed about 21 bars, and about the units of their spread column (this one's raw `spread` is DOLLARS, the venue's is POINTS).",
+    "That ambiguity is not cosmetic: a staged spread file from the wrong series handed the EA a flat $0.15 half-spread where the engine of record charged $0.42 — a constant $0.135 per fill that moved a long's stop $0.136 further out, so the market ground through the two levels 105 minutes apart.",
+    "One divergence was misread as a +120-minute clock fault for a day, because the first divergent trade closed exactly 7,200 s apart on a trade whose entry agreed to the second."
   ],
-  "why_kept_note": "NOT KEPT FOR artifacts/gold_wfo.json OR docs/GOLD_WFO_VERDICT_20260919.md. Those come from scripts/gold_walkforward.py, which reads the terminal's own history at run time (mt5_data.load_m5 -> the venue's bars), so the walk-forward verdict is a VENUE-corpus number and is unaffected by this retirement. Verified 2026-09-21 by re-running it: its data block reports the venue's span (2026-01-12 13:15 onward), not this archive's 2024-08 start.",
+  "why_deleted": [
+    "The only reason to keep the bytes was that the certified arithmetic was computed on them. That reason was real — but its price was central evidence that nobody without a copy can re-check, on a series no fetch can reproduce.",
+    "The operator's call on 2026-09-21: delete the copy, re-point the regression law at the series that still exists, and record exactly what stops being checkable (below) rather than leaving an unfalsifiable citation in place.",
+    "The pins stay. A restore from `248db66` is verified by SHA-256 against this manifest, so 'the numbers moved' and 'the bytes moved' cannot be confused."
+  ],
   "what_it_is_not": [
-    "Not a market. Read against the venue's own series inside the tick-covered window, the two disagree about 21 bars — 3 only here, 18 only at the venue — and the divergence is at the venue's daily break, which is where the first mis-traced parity trade closed.",
-    "Not the same units. This series' spread column is DOLLARS; the venue's is POINTS (42 -> $0.42). Two silently interchangeable costs is what let a stale staged spread file charge the EA $0.135 less per fill than the engine of record.",
-    "Not true UTC in the same sense as the venue's. This one is stamped in true UTC; the venue's is server wall clock, so a server->UTC conversion is required for it and must not be for this."
+    "Not a market. See the measured disagreement below.",
+    "Not the same units as the venue's series — dollars vs points.",
+    "Not true UTC in the same sense: this one was stamped in true UTC, the venue's is server wall clock and needs the pinned offset in configs/mt5/server_offsets.json.",
+    "Not something any default may reach — the loader names its own path and there is no fallback."
   ],
-  "rules": [
-    "No default may reach this corpus. There is no default: parity windows declare `corpus` explicitly, and scripts/midas_parity.py refuses a pass whose declaration names neither `frozen` nor `venue`.",
-    "The python engine's sweep arithmetic (scripts/midas_sweep.py:main) is DEFINED on this series and still runs on it. That is a deliberate exception: it is the reproduction path, not a forward-looking one.",
-    "Any new research must read the venue series. Adding a reader of this corpus is a change to the certified path and needs to be argued as one."
+  "measured_disagreement": {
+    "window": "tick-covered 2026-09-04 .. 2026-09-16, at the venue's asserted +120 min",
+    "research_bars": 800,
+    "venue_bars": 815,
+    "only_research_series": 3,
+    "only_venue": 18,
+    "note": "The 3 are 2026-09-07 17:45/18:00/18:15; the 18 include 2026-09-07 22:00-23:45 and 2026-09-16 22:00-23:45. Measured while both series existed; re-runnable only after a restore."
+  },
+  "citations_that_stop_being_checkable": [
+    "tests/test_midas_minlot_veto.py — the n=151 / +1.474R regression law (the veto never fires on the certified corpus). RE-POINTED: the same claim is now pinned on the venue's own bars, n=53 / +14.256R over 2026-01-12..03-31, vetoed=0 (measured 2026-09-21).",
+    "artifacts/midas_sweep_20260917.json — the sweep artifact scripts/midas_parity.py reads as SWEEP_ANCHOR (its REVERSE_DIRECTION/wf entry is n=151 / net_r +1.474). It cannot be regenerated: scripts/midas_sweep.py:main reads the deleted series and now refuses. `anchor_match()` therefore can never be satisfied again; it already reports NO-ANCHOR on every venue-corpus window.",
+    "scripts/midas_sweep.py:main and scripts/midas_variant_research.py — their outputs are no longer producible on this checkout at all. Both refuse with the restore instructions instead of silently running on the venue's bars.",
+    "scripts/midas_parity.py --window wf --corpus frozen and --window oos --corpus frozen — the two windows that declared this corpus. They were already unrunnable (the venue cannot serve their spans); with the series deleted they are unrunnable without a restore by construction. The refusal is the intended behaviour, not a fault.",
+    "docs/MIDASTOUCH_PROTOCOL.md §1 (the original data of record), §10 (amendment 2: 151 trades / +1.47R), §15 (n=151 / +1.474R, vetoed=0) — the certified arithmetic. As history these citations remain true and their corpus is named; they can no longer be re-derived.",
+    "docs/MIDASTOUCH_V2_REGISTER.md — 'python 151 tr / +1.474R vs EA 151 tr / +1.478R, max|dR| 0.0005' and the n=151 line in the certificate summary.",
+    "docs/MIDASTOUCH_CLOSEOUT_20260917.md and docs/MIDASTOUCH_CLOSEOUT_20260919.md — Certificate 1 (WF) 'PASS, 151 vs 151 keyed trades' and 'the sweep anchor reproduced exactly'.",
+    "docs/DATA_SCOPE_AND_CLOCK_20260920.md — the parity comparison table's python leg '151tr +1.474R'.",
+    "docs/PARITY_VETO_AND_CORPUS_20260921.md — the 21-bar disagreement between the two series is the measurement that justified the retirement, and it is now a record rather than a reproducible check (its counts are pinned above).",
+    "docs/PARITY_ENTRY_SIGNALS_20260921.md §5c — '32 of 32 sweep anchors reproduce exactly ... REVERSE_DIRECTION/wf = 151 trades, +1.474R'. That reproduction was measured while the bytes existed; it cannot be repeated without a restore.",
+    "docs/GOLD_ARMING_DECISION_20260921.md — the certified-window row of the power table (n=151, +0.0098R/trade, sd 1.082). Its conclusion stands as a recorded measurement, but the sample can no longer be re-derived from a checkout.",
+    "docs/FROZEN_CORPUS_20260921.md — the retirement record itself; §5 now carries the restore path.",
+    "tests/test_parity_corpus.py — the byte-level corpus-disagreement tests skip unless the series is restored (with the restore command in the skip message). The hash-pin and deletion-record tests do NOT skip: they build their own fixture, so the mechanism stays tested with the bytes gone."
   ],
+  "not_affected_note": "NOT gold_wfo / GOLD_WFO_VERDICT. artifacts/gold_wfo.json and docs/GOLD_WFO_VERDICT_20260919.md are produced by scripts/gold_walkforward.py, which loads bars from the terminal at run time (mt5_data.load_m5), so the walk-forward verdict (fold-mean t = +0.52 over the venue's span, 16,278 bars from 2026-01-12) is a VENUE-corpus number and never depended on this series. The same is true of the news stand-down measurements (docs/GOLD_NEWS_SENSITIVITY_20260921.md, docs/GOLD_NEWS_WIDTH_20260921.md): their harness imports gold_walkforward/mt5_data, not this corpus. Naming a non-dependency explicitly is the point — the first draft of the retirement doc inferred the opposite and had to be corrected.",
+  "restore": {
+    "command": "git checkout 248db66 -- archive/frozen_corpus",
+    "then": "set status back to 'kept' here, and run `python -m pytest tests/test_parity_corpus.py -q`: the hash of every file is verified against the pins below, so a partial or edited restore fails loudly.",
+    "caveat": "Restoring makes the old numbers re-checkable again; it does not make them current. The data of record stays the venue's own series."
+  },
   "files": {
     "XAUUSD_M15.csv": {
       "sha256": "8a9a42b8b866f0f299a9b8cb3f4060fb51b4346fe22572a7f8be4d4ab5fa869d",
@@ -55,11 +84,5 @@
       "fetched": "2026-09-17",
       "fetched_from": "the DERIV terminal install on this machine (via scripts/midas_fetch_history.py)"
     }
-  },
-  "reproduce_the_frozen_numbers": [
-    "python scripts/midas_sweep.py  -> writes artifacts/midas_sweep_<date>.json; compare REVERSE_DIRECTION/wf against the anchor n=151, net_r +1.474",
-    "python scripts/midas_parity.py --window wf|oos --corpus frozen",
-    "python -m pytest tests/test_midas_minlot_veto.py -q  -> the 151-trade regression law",
-    "NOT scripts/gold_walkforward.py: it reads the terminal (the venue corpus), not this archive"
-  ]
+  }
 }
