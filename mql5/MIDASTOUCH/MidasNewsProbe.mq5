@@ -96,12 +96,19 @@ string IsoUtc(datetime t)
 //+------------------------------------------------------------------+
 int WriteCalendar()
 {
-   datetime now_server = TimeCurrent();
+   datetime now_server = TimeCurrent();      // last TICK's time: stale for minutes after a launch
    datetime now_gmt    = TimeGMT();
-   long     off_min    = (long)(now_server - now_gmt) / 60;
+   // MEASURED 2026-09-21. Deriving the offset from `now_server` produced `server_offset_min=-318`
+   // for a UTC+2 venue, and every `time_server` / `window_*` header in the file inherited the
+   // error (the `epoch_utc` column did not — it was, and still is, correct). `TimeTradeServer()`
+   // is the terminal's own calculated server time, available before the first tick, so the
+   // headers are now written from it and the stale tick clock is recorded beside it.
+   datetime trade_server = TimeTradeServer();
+   long     off_min      = (long)((trade_server - now_gmt) / 60);
+   long     off_tick_min = (long)((now_server - now_gmt) / 60);
 
-   datetime from = now_server - (datetime)(InpDaysBack * 86400);
-   datetime to   = now_server + (datetime)(InpDaysAhead * 86400);
+   datetime from = trade_server - (datetime)(InpDaysBack * 86400);
+   datetime to   = trade_server + (datetime)(InpDaysAhead * 86400);
 
    MqlCalendarValue values[];
    ResetLastError();
@@ -134,8 +141,12 @@ int WriteCalendar()
    FileWriteString(fh, StringFormat("# generated_at_utc=%s\r\n", IsoUtc(now_gmt)));
    FileWriteString(fh, StringFormat("# epoch_generated_utc=%I64d\r\n", (long)now_gmt));
    FileWriteString(fh, StringFormat("# generated_at_server=%s\r\n",
+                                    TimeToString(trade_server, TIME_DATE | TIME_SECONDS)));
+   FileWriteString(fh, StringFormat("# generated_at_server_last_tick=%s\r\n",
                                     TimeToString(now_server, TIME_DATE | TIME_SECONDS)));
    FileWriteString(fh, StringFormat("# server_offset_min=%I64d\r\n", off_min));
+   FileWriteString(fh, "# server_offset_source=TimeTradeServer (terminal-calculated)\r\n");
+   FileWriteString(fh, StringFormat("# server_offset_min_from_last_tick=%I64d\r\n", off_tick_min));
    FileWriteString(fh, StringFormat("# window_from_utc=%s\r\n",
                                     IsoUtc(from - (datetime)(off_min * 60))));
    FileWriteString(fh, StringFormat("# window_to_utc=%s\r\n",

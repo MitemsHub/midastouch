@@ -118,6 +118,12 @@ eyeball on any boot banner:**
 
 A healthy boot also prints `FLOOR TABLE XAUUSD:` (the min-lot floor and the
 equity it implies) and, on v1.12+, a `CLOCK:` line giving the broker/GMT offset.
+On v1.19d that line can also read **`CLOCK: UNVERIFIED OFFSET`**, naming two
+readings that disagree — and that is correct, not a fault: the old line derived
+the offset from `TimeCurrent()`, which is the time of the **last tick**, so for
+minutes after a launch it announced `offset=-5 h 19 min` for a venue that is
+UTC+2 (measured twice on 2026-09-21). Wait for a live tick, then read it again;
+the trade-server clock in the same line (`+2 h 00 min`) is the trustworthy one.
 **Unhealthy signatures:** `INIT FAILED`, `execution=LIVE` with no arming record,
 `ORDER REJECT` / `LIVE FILL`, or a banner whose pins disagree with the table.
 

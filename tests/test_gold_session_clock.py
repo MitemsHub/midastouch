@@ -124,3 +124,34 @@ def test_the_tick_age_is_converted_with_the_measured_offset():
                   - timedelta(minutes=off))).total_seconds()
     assert off == 120
     assert abs(age) <= 60, f"a live tick must read as fresh, got {age:.0f}s"
+
+
+# --- and the offset the EA ANNOUNCES ---------------------------------------------------
+
+def test_the_ea_refuses_to_announce_an_offset_it_cannot_vouch_for():
+    """MEASURED 2026-09-21, twice in one morning, and pinned here because the health guide
+    tells an operator to VERIFY this number before the live gate.
+
+    The banner derived the offset from `TimeCurrent()` — the time of the LAST TICK — so for
+    minutes after a launch it read a band that had nothing to do with the venue: two
+    separate launches announced `offset=-5 h 19 min` and `-5 h 36 min` for a venue that is
+    UTC+2, while the terminal's own trade-server clock said `+2 h 00 min`. A confidently
+    wrong number is worse than no number, so the banner now cross-checks the two clocks and
+    says UNVERIFIED OFFSET rather than pick one.
+    """
+    src = open(os.path.join(REPO, "mql5", "MIDASTOUCH", "MidastouchAI.mq5"),
+               encoding="utf-8", errors="replace").read()
+    assert "TimeTradeServer()" in src, \
+        "the banner must cross-check against the terminal's own server clock"
+    assert "UNVERIFIED OFFSET" in src, "and refuse to state an offset the two clocks dispute"
+    assert "the time of the last TICK" in src, "the reason is recorded, not just the guard"
+    # The guard must be a comparison, not a constant: a hardcoded offset would hide a
+    # venue clock change instead of reporting it.
+    assert "off_tick" in src and "off_trd" in src and "off_delta" in src
+    # The probe writes the same thing into the calendar's headers, for the same reason.
+    probe = open(os.path.join(REPO, "mql5", "MIDASTOUCH", "MidasNewsProbe.mq5"),
+                 encoding="utf-8", errors="replace").read()
+    assert "datetime trade_server = TimeTradeServer();" in probe, \
+        "the calendar's window and offset headers must not come from the last tick"
+    assert "server_offset_min_from_last_tick" in probe, \
+        "the stale reading is kept beside it, not thrown away"

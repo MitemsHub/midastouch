@@ -689,11 +689,27 @@ int OnInit()
                InpRiskPercent,               InpLiveExecution ? "LIVE" : "PAPER",
                InpBarModel ? "BAR" : "PERTICK",
                InpUseNewsFilter ? "ON" : "OFF");
-   PrintFormat(VersionTag() + "CLOCK: server=%s | GMT=%s | offset=%+d h %02d min — session gates classify BAR EPOCHS (parity); "
-               "live-path wall-clock gates use TimeGMT; VERIFY this offset before the live gate (health guide §4)",
-               TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES),
-               TimeToString(TimeGMT(), TIME_DATE|TIME_MINUTES),
-               OffsetHours(), OffsetRemMin());
+   // v1.19d: the offset line refuses to state a number it cannot vouch for.
+   int off_tick  = OffsetMinutes();                                   // from the last TICK
+   int off_trd   = (int)((TimeTradeServer() - TimeGMT()) / 60);       // terminal-calculated
+   int off_delta = off_tick - off_trd;
+   if(off_delta < 0) off_delta = -off_delta;
+   bool off_ok = (off_delta <= 1) && (off_tick >= -14 * 60) && (off_tick <= 14 * 60);
+   if(off_ok)
+      PrintFormat(VersionTag() + "CLOCK: server=%s | GMT=%s | offset=%+d h %02d min — session gates classify BAR EPOCHS (parity); "
+                  "live-path wall-clock gates use TimeGMT; VERIFY this offset before the live gate (health guide §4)",
+                  TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES),
+                  TimeToString(TimeGMT(), TIME_DATE|TIME_MINUTES),
+                  OffsetHours(), OffsetRemMin());
+   else
+      PrintFormat(VersionTag() + "CLOCK: UNVERIFIED OFFSET — last-known-tick clock says %+d h %02d min from UTC, "
+                  "the terminal's own trade-server clock says %+d h %02d min (server=%s | GMT=%s). TimeCurrent() is "
+                  "the time of the last TICK, so for minutes after a launch it is stale and the difference is not an "
+                  "offset. Wait for a live tick before using either number (health guide §4).",
+                  off_tick / 60, (off_tick < 0 ? -off_tick : off_tick) % 60,
+                  off_trd / 60, (off_trd < 0 ? -off_trd : off_trd) % 60,
+                  TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES),
+                  TimeToString(TimeGMT(), TIME_DATE|TIME_MINUTES));
 
    // ledger era stamp (idempotent provenance, mirrors the house contract).
    // v1.09: the era_name field is now an HONEST model note — BAR parity
@@ -1132,7 +1148,19 @@ datetime TimeUTCNow()
    return TimeGMT();                      // broker-independent; no offset inputs to get wrong
 }
 
-int OffsetMinutes()                      // broker-vs-UTC offset (minutes; may exceed ±60 on odd servers)
+//| Broker-vs-UTC offset in minutes, from the LAST KNOWN TICK.
+//|
+//| MEASURED 2026-09-21, twice in one morning, and the reason the banner no longer trusts
+//| it blindly: `TimeCurrent()` is the time of the last tick received, so for minutes
+//| after a launch — before the new session's first tick — it is hours stale. Two separate
+//| launches reported "offset=-5 h 19 min" for a venue that is UTC+2, and the health guide
+//| tells the operator to VERIFY this number before the live gate. A confidently wrong
+//| number is worse than none: it is the exact class of sign this program keeps paying for.
+//| `TimeTradeServer()` is the terminal's own calculated server time (local clock plus the
+//| known offset) and is available immediately, so the banner cross-checks the two and
+//| refuses to name an offset when they disagree. This function's value is still what the
+//| banner SHOWS when they agree — it is the tick clock, deliberately, not a redefinition.
+int OffsetMinutes()
 {
    return (int)((TimeCurrent() - TimeGMT()) / 60);
 }
