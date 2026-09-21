@@ -81,15 +81,41 @@ class TestInputContract:
         assert P.T0 == P.M.iso_to_ts(P.M.WINDOWS["wf"][0])
         assert P.T1 == P.M.iso_to_ts(P.M.WINDOWS["wf"][1])
 
-    def test_expert_points_at_deployed_binary(self):
-        # 49E0's tester install keeps the gold EA under the legacy folder;
-        # "MIDASTOUCH\\..." fails as ex5-not-found (found live 2026-09-17).
-        assert P.EXPERT == r"MITEMSHUB_AI\MidastouchAI"
+    def test_expert_points_at_the_upcomers_layout(self):
+        """The deploy path must describe the install being tested.
+
+        It was `MITEMSHUB_AI\\MidastouchAI` — the Deriv-era 49E0 tester's legacy folder,
+        correct for that install and meaningless for this one, which resolves by account
+        identity. The harness now preflights the path it will launch into, so a stale
+        value refuses instead of dying as ex5-not-found after stopping the terminal.
+        """
+        assert P.EXPERT == r"MIDASTOUCH\MidastouchAI"
+        problems, notes = P.preflight(P.EXPERT)
+        assert isinstance(problems, list) and isinstance(notes, list)
+        # A missing tester root is a note, never a blocker: the first pass creates it,
+        # so blocking on it would make the first run on an install impossible.
+        assert not any("tester root" in p for p in problems)
+        # the tester root follows the resolved install, not the house runner's default
+        assert str(P.T.TERMINAL_DATA) == str(P.R.data_folder_for_terminal())
         assert P.MODE == "REVERSE_DIRECTION"
         assert P.INPUTS["InpMode"] == "1"
 
     def test_paper_equity_matches_python_book(self):
-        assert float(P.INPUTS["InpPaperEquity"]) == P.M.START_EQUITY
+        """The EA's paper-sizing input must equal the basis the python pass is run at.
+
+        This used to assert equality with `M.START_EQUITY` — the research engine's own
+        $5,000 corpus basis. That was the bug written down as an invariant: it made the
+        sandbox agree with a research convention instead of with the account being
+        traded, and it disagreed with the tester's own $1,000 deposit at the same time.
+        The invariant is now "both sides use the account's declared basis", asserted
+        through the registry rather than through either engine's default.
+        """
+        import mt5_terminals as _t
+
+        basis = _t.active_account_size()
+        assert float(P.INPUTS["InpPaperEquity"]) == basis
+        assert P.T._BASE_TESTER_INI["Deposit"] == f"{basis:.0f}"
+        assert P.ACCOUNT_BASIS_USD == basis
 
 
 class TestRegistryMatrix:

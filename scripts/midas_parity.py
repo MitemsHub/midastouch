@@ -35,6 +35,7 @@ import glob
 import json
 import os
 import re
+import statistics
 import sys
 import time
 from datetime import datetime, timezone
@@ -43,18 +44,42 @@ from pathlib import Path
 sys.path.insert(0, "scripts")
 sys.path.insert(0, "tests")
 
-import v75_tester_runner as T                       # noqa: E402
+import mt5_tester_driver as T                       # noqa: E402
 import mt5_ops as R                                 # noqa: E402  (terminal ops;
 # was v28_sweep_runner, the closed indices sweep runner, kept alive only for these
 # four primitives — they now resolve the LIVE install by account identity)
 import midas_sweep as M                             # noqa: E402
 
-# --- point the house runner at the default install (49E0 data folder) -------
+# --- the account basis, declared once, on BOTH sides -----------------------
+# A parity run claims the EA and the python engine agree on ONE account. They used to
+# be funded differently and nothing said so: the tester ran at $1,000, the EA's
+# paper-sizing input was pinned at $5,000 to match the research engine's own
+# START_EQUITY, and the EA's prop governor defaulted to sizing off whatever balance
+# the tester handed it. Lots are not lot-invariant where the min-lot floor binds, so
+# those are three different trade sets wearing one result.
+#
+# So the basis is read from the account registry and applied to the tester deposit,
+# the EA's sizing input and the python engine, and a missing declaration REFUSES
+# rather than picking a number.
+import mt5_terminals as _terms                          # noqa: E402
+
+ACCOUNT_BASIS_USD = _terms.active_account_size()
 T.TERMINAL_EXE = Path(R.terminal_exe())
+# The tester's data root must be the SAME install the exe came from. It used to keep
+# the house runner's hardcoded 49E0 folder (the Deriv-era tester), so "do the tester
+# roots exist?" was answered by a directory belonging to a program that closed — the
+# same wrong-install mistake the account-identity resolver exists to prevent.
+_live_data = R.data_folder_for_terminal()
+if _live_data:
+    T.TERMINAL_DATA = Path(_live_data)
 T._BASE_TESTER_INI["Symbol"] = "XAUUSD"
 T._BASE_TESTER_INI["Period"] = "M15"
+# Leverage affects MARGIN only, never size: sizing is risk-percent, so at 1% risk on
+# this basis no lot this engine emits comes near the margin wall at 1:1000. Left as
+# a pinned constant rather than guessed from the venue, whose leverage we have not
+# verified (the registry records the account, not its contract terms).
 T._BASE_TESTER_INI["Leverage"] = "1000"
-T._BASE_TESTER_INI["Deposit"] = "1000"
+T._BASE_TESTER_INI["Deposit"] = f"{ACCOUNT_BASIS_USD:.0f}"
 
 # R6 preconditions, mirrored python-side (one commit with the EA's
 # INIT_FAILED guards): the engine of record runs gold-only and treats the
@@ -64,9 +89,15 @@ T._BASE_TESTER_INI["Deposit"] = "1000"
 R6_GOLD_ONLY = True
 R6_NEWS_FILTER_OFF = True
 
-EXPERT = r"MITEMSHUB_AI\MidastouchAI"  # v1.09 deploy layout (49E0 tester keeps
-                                       # the gold EA under the legacy folder;
-                                       # "MIDASTOUCH\\..." fails as ex5-not-found)
+EXPERT = r"MIDASTOUCH\MidastouchAI"    # the Upcomers install's layout, named for the
+                                       # repo's own folder. It WAS
+                                       # MITEMSHUB_AI\MidastouchAI -- the Deriv-era
+                                       # 49E0 tester's legacy folder -- and the value
+                                       # was an era assumption, not a fact: the
+                                       # terminal is now resolved by account identity,
+                                       # that install is gone, and this path has to
+                                       # describe the install the harness will
+                                       # actually launch into.
 
 # The shadow certification path — the one at which un-deployed builds are
 # certified (V2-register §2 baseline). It MUST stay distinct from EXPERT: the
@@ -88,12 +119,60 @@ MODE_CODE = {"ORIGINAL": "0", "REVERSE_DIRECTION": "1", "REVERSE_TRIGGER": "2",
 # and the EA's tail flush drops an un-closed tail position exactly like the
 # python engine (both engines are bounded by the same bar series).
 WINDOW_SPECS = {
+    # `server_offset_min` is the venue server's offset from UTC, PINNED here and
+    # ASSERTED against the venue's own bars before any pass runs (see
+    # `assert_server_offset`). `None` means "this window cannot be put on one clock",
+    # which is a measured fact about it (below), not an omission.
     "wf":  {"tag": "midas_wf_rd",  "mode": "REVERSE_DIRECTION",
-            "dates": ("2025.09.15", "2026.04.03")},
+            "dates": ("2025.09.15", "2026.04.03"),
+            "server_offset_min": 60},
     "oos": {"tag": "midas_oos_rd", "mode": "REVERSE_DIRECTION",
-            "dates": ("2026.04.01", "2026.09.18")},
+            "dates": ("2026.04.01", "2026.09.18"),
+            "server_offset_min": 120},
+    # THE TICK-COVERED WINDOW (added 2026-09-20), and the answer to "what does parity
+    # certify on this venue?". A `Model=4` pass is only honest where the venue actually
+    # serves real ticks, and measured on this venue that begins 2026-09-04: every pass
+    # that reaches further back is refused by mt5_tester_driver.assert_declared_tick_model
+    # (which reads MT5's partial-coverage statement against the pass's own FromDate).
+    # So certification is RESTRICTED to windows the venue can serve per-tick — not
+    # re-declared as a bar-replay model, because a bar replay decides intrabar order
+    # (SL vs TP first) by a rule neither engine shares today, and "solving" that by
+    # declaration would move the disagreement into a constant instead of removing it.
+    # Short by construction: the venue's tick depth sets the length, not preference.
+    "tickcov": {"tag": "midas_tickcov_rd", "mode": "REVERSE_DIRECTION",
+                "dates": ("2026.09.04", "2026.09.18"),
+                "server_offset_min": 120},
 }
 DEFAULT_WINDOW = "wf"
+
+# --- the server clock: declared in UTC, translated at the EA boundary --------
+#
+# The EA evaluates its gates against BAR EPOCHS, and those epochs are the VENUE's
+# server time. The python engine's are UTC. `wf` compared the two directly for its
+# whole life, so every key in the comparison was off by the server's offset — a step
+# that MOVES: measured from this venue's own bars, the server runs **+60 min** ahead
+# of UTC in Jan–Mar 2026 and **+120 min** from April, because it follows EU DST.
+#
+# Both pinned windows sit wholly on one side of that step (`wf` ends 2026-03-31 → +60,
+# `oos` starts 2026-04-01 → +120), which is what makes them normalisable at all. A
+# window that SPANS the step has no single correct offset and is refused rather than
+# mis-aligned on one side of April.
+#
+# Two consequences, and the second is why the pin is asserted rather than trusted:
+#
+#   * a window that crosses the step cannot be normalised by one number, and says so;
+#   * the offset is a property of the venue, not of this file. It is re-derived from
+#     the bars on every run and compared to the pin, so a restored clock changes the
+#     answer instead of quietly invalidating every certificate.
+#
+# Direction of translation. The contract is declared ONCE, in UTC. On the way in,
+# gates the EA reads as epochs (session, Friday cutoff, window pins) are shifted into
+# server time. On the way out, the EA's ledger epochs are shifted back to UTC. Both
+# halves are needed: fixing only the output would leave the EA trading a session two
+# hours away from the one python models.
+SERVER_OFFSET_CANDIDATES_MIN = (0, 60, 120, 180, -60, -120)
+#: The venue's own corpus, fetched through the terminal (bar epochs in SERVER time).
+VENUE_M15_SUFFIX = "_upcomers"
 
 
 def _window_spec(name: str) -> dict:
@@ -105,8 +184,127 @@ def _window_spec(name: str) -> dict:
     return {**spec, "window_name": name, "t0": M.iso_to_ts(a), "t1": M.iso_to_ts(b)}
 
 
-def build_inputs(mode: str, t0: int, t1: int) -> dict:
-    """The BAR-parity input contract, per window (mode + window pins vary)."""
+def _corpus_closes(path: str) -> dict[int, float]:
+    """epoch -> close for one M15 corpus, or {} when the file is not there."""
+    try:
+        return {int(b["time"]): float(b["close"]) for b in M.load_bars(path)}
+    except (OSError, KeyError, ValueError):
+        return {}
+
+
+def measure_server_offset_min(t0: int, t1: int) -> tuple[int | None, dict[str, int | None]]:
+    """The venue server's offset from UTC over [t0, t1], MEASURED from bar closes.
+
+    Two corpora, one market. `XAUUSD_M15.csv` is stamped in true UTC;
+    `XAUUSD_M15_upcomers.csv` is the same instrument as the venue's terminal served
+    it, in the venue's own clock. At the correct offset the two agree to cents; at
+    the wrong one they disagree by dollars. So the offset is not read from a config
+    — it is the alignment that minimises the median close disagreement, computed
+    month by month because the answer is allowed to change at a DST boundary.
+
+    Returns ``(offset_min, per_month)`` where `offset_min` is ``server − UTC``, the
+    single constant offset across the window, or **None** when the window crosses a
+    step. Measured on this venue: +60 in Jan–Mar 2026, +120 from April (EU DST).
+    """
+    utc = _corpus_closes(os.path.join(M.DATA_DIR, "XAUUSD_M15.csv"))
+    venue = _corpus_closes(os.path.join(M.DATA_DIR, f"XAUUSD_M15{VENUE_M15_SUFFIX}.csv"))
+    if not utc or not venue:
+        raise SystemExit(
+            f"cannot assert the server clock: the corpora are missing "
+            f"({M.DATA_DIR}/XAUUSD_M15.csv and ...{VENUE_M15_SUFFIX}.csv). Fetch both "
+            f"(scripts/midas_fetch_history.py) — a parity pass that cannot state which "
+            f"clock each side is on cannot compare them.")
+
+    acc: dict[str, dict[int, list[float]]] = {}
+    for epoch, close in utc.items():
+        if not (t0 <= epoch <= t1):
+            continue
+        month = datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m")
+        for off in SERVER_OFFSET_CANDIDATES_MIN:
+            other = venue.get(epoch + off * 60)   # offset is server − UTC
+            if other is not None:
+                acc.setdefault(month, {}).setdefault(off, []).append(abs(other - close))
+
+    per_month: dict[str, int | None] = {}
+    for month, by_off in sorted(acc.items()):
+        usable = {o: d for o, d in by_off.items() if len(d) >= 50}
+        per_month[month] = (min(usable, key=lambda o: statistics.median(usable[o]))
+                            if usable else None)
+    distinct = sorted({v for v in per_month.values() if v is not None})
+    if per_month and None not in per_month.values() and len(distinct) == 1:
+        return distinct[0], per_month
+    return None, per_month
+
+
+def _fmt_offsets(per_month: dict[str, int | None]) -> str:
+    return ", ".join(f"{m}:{v:+d}m" if v is not None else f"{m}:?"
+                     for m, v in per_month.items())
+
+
+def assert_server_offset(spec: dict) -> int:
+    """The offset every epoch in this window must be normalised by, or a refusal.
+
+    Refuses rather than guesses, in both directions: a window whose offset is not
+    constant (it crosses the DST step) has no single correct answer, and a pin that
+    no longer matches the venue means the venue's clock moved.
+    """
+    measured, per_month = measure_server_offset_min(spec["t0"], spec["t1"])
+    shown = _fmt_offsets(per_month)
+    if measured is None:
+        raise SystemExit(
+            f"window '{spec['window_name']}' cannot be put on one clock: the venue "
+            f"server's offset from UTC is NOT constant across it (per month — {shown}). "
+            f"It steps at the EU DST boundary (+60 before, +120 after), so normalising "
+            f"the EA's epochs by one number would mis-align every key on one side of "
+            f"the step while looking like a fix. Re-scope the window to one side of the "
+            f"step — both certified windows already sit wholly on one side.")
+    pin = spec.get("server_offset_min")
+    if pin is not None and measured != pin:
+        raise SystemExit(
+            f"window '{spec['window_name']}' pins the server offset at {pin:+d} min, but "
+            f"the venue's own bars measure {measured:+d} min (per month — {shown}). The "
+            f"venue's clock moved or was restored: re-derive the pin deliberately rather "
+            f"than letting a stale one re-align every key.")
+    return measured
+
+
+def to_utc(trades: list[dict], offset_min: int) -> list[dict]:
+    """EA ledger epochs (venue SERVER time) → UTC, so both sides share one frame.
+
+    Only the epochs move. The R, side and reason are the EA's own measurements and
+    are frame-independent. A keyless trade (the degraded journal fallback) keeps its
+    ``None`` timestamps: re-stamping those would invent keys that were never read.
+    """
+    if not offset_min:
+        return trades
+    delta = offset_min * 60
+    out: list[dict] = []
+    for t in trades:
+        row = dict(t)
+        for key in ("open_ct", "close_ct"):
+            if row.get(key) is not None:
+                row[key] = int(row[key]) - delta
+        out.append(row)
+    return out
+
+
+def build_inputs(mode: str, t0: int, t1: int, offset_min: int = 0) -> dict:
+    """The BAR-parity input contract, per window (mode + window pins vary).
+
+    `offset_min` is the venue server's offset from UTC. The contract is DECLARED in
+    UTC — the python engine's frame — and every gate the EA evaluates against a bar
+    epoch is translated into the EA's own (server) frame here:
+
+      * the session window and the Friday cutoff move by the offset, so `06:00-20:00`
+        means 06:00-20:00 **UTC** on both sides instead of running as 04:00-18:00 on
+        the EA's side;
+      * the window pins move by the offset for the same reason.
+
+    The default of 0 reproduces the pre-normalisation contract exactly, which is what
+    the module-level `INPUTS` (the contract of record, pinned by tests) still is. The
+    runner passes the asserted offset; nothing defaults to a guess.
+    """
+    shift_h = offset_min // 60
     return {
         "InpMagic": "7801001",
         "InpArmTag": "M1",
@@ -121,20 +319,35 @@ def build_inputs(mode: str, t0: int, t1: int) -> dict:
         "InpSlAtrMult": "2.0",
         "InpTpMult": "2.0",
         "InpTimeoutMinutes": "720",
-        "InpSessionStartHour": "6",
-        "InpSessionEndHour": "20",
+        "InpSessionStartHour": str(6 + shift_h),         # UTC 06-20, in server time
+        "InpSessionEndHour": str(20 + shift_h),
         "InpSpreadCapPctStop": "1.5",
-        "InpFridayCutoffHour": "20",
+        "InpFridayCutoffHour": str(20 + shift_h),          # UTC 20:00, in server time
         "InpUseNewsFilter": "false",
         "InpStaleMinutes": "30",
         "InpRiskPercent": "1.0",
         "InpLiveExecution": "false",
-        "InpPaperEquity": "5000.0",      # = python START_EQUITY: identical sizing path
+        "InpPaperEquity": f"{ACCOUNT_BASIS_USD:.1f}",  # = the python run's basis and the
+                                                      # tester deposit: ONE sizing path
+        # The venue gate is pinned OFF, and explicitly. This harness certifies the
+        # STRATEGY engine against the research engine on the same window; the prop
+        # governor is an account-level layer the python engine does not model, so
+        # leaving it on compares two different rule sets and any mismatch it produced
+        # would be a rule difference dressed as an engine difference. It was not
+        # pinned at all before, and the EA's default is true — meaning every parity
+        # run since the governor landed (2026-09-20) would have been gated by a 3%
+        # daily cap on a $1,000 sandbox and could not have passed for a reason that
+        # had nothing to do with parity.
+        "InpPropGuard": "false",
+        "InpDailyLossCapPct": "0",
+        # Declared anyway, so the run records the account it was sized for even
+        # though the gate is off for this pass.
+        "InpPropAccountSize": f"{ACCOUNT_BASIS_USD:.1f}",
         # --- v1.04+ BAR-parity contract (the run3 harness predates these) -------
         "InpBarModel": "true",           # bar replay, recorded spreads — python's model
         "InpSpreadFile": "MIDASTOUCH_spread_M15.csv",  # bundled via tester_file
-        "InpWindowStart": str(t0),       # EA fail-closed without these: window pins
-        "InpWindowEnd": str(t1),
+        "InpWindowStart": str(t0 + offset_min * 60),   # EA fail-closed without these:
+        "InpWindowEnd": str(t1 + offset_min * 60),     # window pins, in server time
     }
 
 
@@ -266,7 +479,14 @@ def python_build_data() -> dict:
 
 def python_regen(mode: str, t0: int, t1: int,
                  data: dict | None = None) -> list[dict]:
-    """Run scripts/midas_sweep.py run_mode on the requested window (SMA ATR)."""
+    """Run scripts/midas_sweep.py run_mode on the requested window (SMA ATR).
+
+    Sized on the ACCOUNT basis, set here rather than at import: the research engine's
+    certified default is its own $5,000 corpus basis, and a harness that mutated that
+    global merely by being imported would silently re-basis every other consumer in
+    the process.
+    """
+    M.use_basis(ACCOUNT_BASIS_USD)
     data = data or python_build_data()
     rr = M.run_mode(mode, t0, t1, data)
     return [{"open_ct": t["open_ct"], "close_ct": t["close_ct"], "side": t["side"],
@@ -336,6 +556,32 @@ def keyed_compare(ea: list[dict], py: list[dict], tol: float = TOLERANCE) -> dic
     }
 
 
+# --- the recorded verdict (pure; unit-tested) ---------------------------------
+
+def recorded_verdict(cmp: dict, tick_model: dict | None = None) -> tuple[str, str]:
+    """The verdict that may be RECORDED, once the tick model has had its say.
+
+    A PASS is only recordable on the ticks the pass declared. The driver already
+    refuses a downgraded pass outright (mt5_tester_driver.assert_declared_tick_model,
+    which now reads MT5's partial-coverage statement against the pass's own FromDate),
+    so this is the belt to that braces: if that refusal is ever refactored away, the
+    artifact still cannot carry a PASS measured on generated ticks. The comparison's
+    verdict is demoted, never promoted — keys agreeing is not a licence to record a
+    pass whose intrabar path nobody traded.
+
+    Returns (verdict, refusal_reason); the reason is "" unless a PASS was demoted.
+    """
+    if cmp["verdict"] != "PASS":
+        return cmp["verdict"], ""
+    ticks = dict(tick_model or {})
+    if ticks.get("used") == "real":
+        return "PASS", ""
+    return "REFUSED", (
+        f"keys and R agreed, but the pass declared Model={ticks.get('declared', '?')} and "
+        f"ran on {ticks.get('used') or 'unstated'} ticks "
+        f"({ticks.get('evidence') or 'no tick-model statement'})")
+
+
 # --- main --------------------------------------------------------------------
 
 def _should_relaunch_terminal(stopped: bool, ran_passes: bool) -> bool:
@@ -374,18 +620,32 @@ def run_one_mode(mode: str, spec: dict, window_name: str, data: dict,
     (TestVersionAwareness).
     """
     t0, t1, dates = spec["t0"], spec["t1"], spec["dates"]
+    # One clock — asserted BEFORE anything is stopped or run, so an un-normalisable
+    # window costs a refusal instead of a stopped terminal and a mis-aligned result.
+    offset_min = assert_server_offset(spec)
     tag = f"{spec['tag']}_{TAG_MODE_CODE[mode]}"
-    inputs = build_inputs(mode, t0, t1)
+    inputs = build_inputs(mode, t0, t1, offset_min=offset_min)
     rotated = rotate_sandbox_ledgers()
     if rotated:
         print(f"  rotated stale sandbox ledgers: {rotated}")
     snaps = T.journal_snapshots()
-    print(f"  pass tag={tag} mode={mode} (real ticks; be patient)", flush=True)
+    print(f"  pass tag={tag} mode={mode} — server clock {offset_min:+d} min, contract "
+          f"declared in UTC (real ticks required; be patient)", flush=True)
     res = T.run_pass(tag, inputs, timeout_s=3600, dates=dates, expert=expert)
+    # Which ticks the pass ACTUALLY ran on, carried into the comparison and the
+    # artifact: a parity number is only evidence next to the tick model that produced
+    # it (2026-09-20: the oos pass declared real ticks and ran five months generated).
+    ticks = dict(res.get("tick_model") or {})
+    print(f"    tick model: {str(ticks.get('used', 'unknown')).upper()} — "
+          f"{ticks.get('evidence', 'no tick-model statement in this pass')}", flush=True)
     time.sleep(10)                   # agent flushes journal + ledger after report
     ea, source = collect_ea_evidence(snaps)
+    ea = to_utc(ea, offset_min)      # EA ledger epochs are venue server time
     py = python_regen(mode, t0, t1, data)
     cmp = keyed_compare(ea, py)
+    verdict, refused_for = recorded_verdict(cmp, ticks)
+    if refused_for:
+        cmp = {**cmp, "verdict": verdict, "refused_for": refused_for}
     anchor = sweep_anchor(mode, window_name)
     anchor_match = (anchor is not None and anchor["n"] == len(py)
                     and abs((anchor["net_r"] or 0) - sum(t["r"] for t in py)) < 5e-4)
@@ -396,6 +656,8 @@ def run_one_mode(mode: str, spec: dict, window_name: str, data: dict,
           f"{'OK' if not (cmp['open_ct_mismatches'] or cmp['close_ct_mismatches'] or cmp['side_mismatches']) else 'MISMATCH'} | "
           f"anchor {'reproduced' if anchor_match else ('NO-ANCHOR' if anchor is None else 'MISMATCH')} | "
           f"{cmp['verdict']}")
+    if cmp.get("refused_for"):
+        print(f"    REFUSED: {cmp['refused_for']}")
     if cmp["verdict"] != "PASS":
         for i in cmp["trades_over_tol"][:10]:
             a, b = ea[i], py[i]
@@ -405,9 +667,68 @@ def run_one_mode(mode: str, spec: dict, window_name: str, data: dict,
             if cmp[name]:
                 print(f"    {name}: {cmp[name]}")
     return {"mode": mode, "tag": tag, "evidence_source": source,
+            "server_offset_min": offset_min, "tick_model": ticks,
             "anchor": anchor, "anchor_match": anchor_match, "cmp": cmp,
             "python": {"n": len(py), "sum_r": round(sum(t["r"] for t in py), 4), "trades": py},
             "ea": {"n": len(ea), "sum_r": round(sum(t["r"] for t in ea), 4), "trades": ea}}
+
+
+def preflight(expert: str) -> tuple[list[str], list[str]]:
+    """Everything a parity pass needs on disk, checked BEFORE the terminal is touched.
+
+    Why this exists: the harness stops the live terminal, runs a tester pass that can
+    take the better part of an hour, and only then discovers the EA is not there — the
+    failure mode its own comment documents as ex5-not-found. On the Upcomers install
+    nothing is deployed at all, so every one of these checks would fail and the run
+    could not have produced a single number while looking like it tried.
+
+    Returns (blockers, notes). Blockers stop the pass; notes are things the pass itself
+    creates (the tester root does not exist until the first pass runs, so treating it as
+    a blocker would make the first run permanently impossible — which is the mistake the
+    first version of this function made).
+    """
+    problems: list[str] = []
+    notes: list[str] = []
+    reg_basis = _terms.active_account_size()
+    if reg_basis != ACCOUNT_BASIS_USD:
+        problems.append(f"basis disagreement: registry {reg_basis:.0f} vs harness "
+                        f"{ACCOUNT_BASIS_USD:.0f} — one account, one number")
+    data_folder = R.data_folder_for_terminal()
+    if not data_folder:
+        problems.append("no terminal resolves for the active account, so the deployed "
+                        "EA and the tester tree cannot be inspected")
+        return problems, notes
+    mql5 = Path(data_folder) / "MQL5"
+    ex5 = mql5 / "Experts" / f"{expert}.ex5"
+    if not ex5.exists():
+        problems.append(
+            f"no EA binary at {ex5}\n"
+            f"      -> parity certifies a BUILD, so the build must be deployed to the "
+            f"install being tested. Compile with scripts/compile_midas.py, then copy "
+            f"the .ex5 into MQL5/Experts/{Path(expert).parent}/ of that install. "
+            f"Deploying the binary is not arming: no chart is attached and no order "
+            f"path is opened by it.")
+    spread = mql5 / "Files" / "MIDASTOUCH_spread_M15.csv"
+    if not spread.exists():
+        problems.append(f"no recorded spread file at {spread} — the BAR-parity pass "
+                        f"reads its spreads from there, and without it the EA would "
+                        f"be certified on a different cost model than python's")
+    # Can the pass write its /config INI at all? Asked HERE because the harness stops
+    # the live terminal before running a pass, so discovering mid-session that the
+    # install folder is read-only (C:\Program Files\MetaTrader 5 — what the first live
+    # attempt hit, 2026-09-20) costs a stopped terminal and up to a 3600 s wait for
+    # something knowable in advance. Same reason the ex5 check above exists.
+    try:
+        probe = T.write_config_ini("midas_parity_write_probe.ini", "[Tester]\n")
+        probe.unlink(missing_ok=True)
+    except (OSError, RuntimeError) as exc:
+        problems.append(f"no writable /config INI location for the tester pass: {exc}")
+    roots = [p for p in T._tester_roots() if Path(p).is_dir()]
+    if not roots:
+        notes.append(
+            "no tester root under %APPDATA%/MetaQuotes/Tester/<install> yet — no tester "
+            "pass has run on this install; this pass creates it")
+    return problems, notes
 
 
 def main() -> int:
@@ -427,6 +748,17 @@ def main() -> int:
         print(f"SHADOW-PATH certification: expert={expert} — the live charts' "
               f"load path ({EXPERT}) is NOT touched by this run")
     spec = _window_spec(args.window)
+    problems, notes = preflight(expert)
+    for n in notes:
+        print(f"note: {n}")
+    if problems:
+        print(f"ABORT: the parity pass cannot start ({len(problems)} precondition(s) "
+              f"unmet). Nothing was stopped and nothing was run:\n")
+        for p in problems:
+            print(f"  - {p}")
+        return 5
+    print(f"preflight OK — basis ${ACCOUNT_BASIS_USD:,.0f}, expert {expert}, "
+          f"window {spec['window_name']}")
     modes = args.modes or [spec["mode"]]
     for m in modes:
         if m not in MODE_CODE:
@@ -525,6 +857,10 @@ def main() -> int:
             print(f"side agreement:     {not cmp['side_mismatches']}")
             print(f"max |dR|:           {cmp['max_abs_dR']}")
             print(f"over tolerance:     {cmp['n_over_tol']}")
+            print(f"tick model used:    {rec.get('tick_model', {}).get('used')} "
+                  f"({rec.get('tick_model', {}).get('evidence')})")
+            if cmp.get("refused_for"):
+                print(f"refused for:        {cmp['refused_for']}")
             print(f"PARITY:             {cmp['verdict']}")
             out = {
                 "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -532,8 +868,11 @@ def main() -> int:
                 "expert": expert, "tag": rec["tag"], "mode": rec["mode"],
                 "window": {"t0": t0, "t1": t1, "name": args.window},
                 "tester_dates": dates, "symbol": "XAUUSD",
-                "inputs": build_inputs(rec["mode"], t0, t1),
+                "server_offset_min": rec["server_offset_min"],
+                "inputs": build_inputs(rec["mode"], t0, t1,
+                                       offset_min=rec["server_offset_min"]),
                 "evidence_source": rec["evidence_source"],
+                "tick_model": rec.get("tick_model", {}),
                 "python": rec["python"], "ea": rec["ea"],
                 **cmp,
             }

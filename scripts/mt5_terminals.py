@@ -370,6 +370,11 @@ class AccountRegistry:
     retired: tuple[str, ...] = ()
     path: str = ""
     error: str = ""
+    #: The sizing basis of the active account, in USD. 0.0 means NOT DECLARED, and
+    #: every reader must refuse on it: the basis used to live in three places at once
+    #: ($1,000 tester deposit, $5,000 python START_EQUITY, $5,000 EA paper equity) and
+    #: a default here would silently pick a fourth.
+    account_size_usd: float = 0.0
 
     @property
     def loaded(self) -> bool:
@@ -377,7 +382,9 @@ class AccountRegistry:
 
     def status(self) -> str:
         if self.loaded:
-            return (f"active acct {', '.join(self.active)}"
+            basis = (f"basis ${self.account_size_usd:,.0f}" if self.account_size_usd
+                     else "basis NOT DECLARED")
+            return (f"active acct {', '.join(self.active)} ({basis})"
                     + (f"; retired {', '.join(self.retired)}" if self.retired else ""))
         return self.error or "no active account declared"
 
@@ -409,9 +416,35 @@ def load_account_registry(path: str | os.PathLike | None = None) -> AccountRegis
     if env:
         active = [env]
     retired = [str(r.get("account", "")).strip() for r in (raw.get("retired") or [])]
+    try:
+        basis = float(act.get("account_size_usd") or 0.0)
+    except (TypeError, ValueError):
+        basis = 0.0
     return AccountRegistry(active=tuple(a for a in active if a),
                            retired=tuple(n for n in retired if n),
-                           path=str(p))
+                           path=str(p),
+                           account_size_usd=basis)
+
+
+def active_account_size() -> float:
+    """The active account's sizing basis in USD, or raise.
+
+    REFUSES rather than defaulting. Every caller that sizes anything — the parity
+    tester's deposit, the python engine's starting equity, the EA's paper mirror —
+    asks this one question, and a wrong answer here is a whole book of results about
+    an account that does not exist. There is no sensible fallback, so there is none.
+    """
+    reg = load_account_registry()
+    if not reg.loaded:
+        raise TerminalNotFound(
+            f"no active account declares a sizing basis: {reg.status()} "
+            f"(registry {reg.path or 'not found'})")
+    if reg.account_size_usd <= 0:
+        raise TerminalNotFound(
+            f"the registry declares active account {', '.join(reg.active)} with no "
+            f"account_size_usd, so no engine can be told what it is sizing for "
+            f"(registry {reg.path}). Add the field; do not default it.")
+    return reg.account_size_usd
 
 
 def classify_identity(ident: TerminalIdentity,

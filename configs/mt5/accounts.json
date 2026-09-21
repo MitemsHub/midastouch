@@ -41,7 +41,25 @@
     "company": "Upcomers Ltd.",
     "venue": "Upcomers Thunderbolt Classic ($25,000, MT5)",
     "since": "2026-09-19",
-    "note": "Funded evaluation account. The only install that may be resolved as live."
+    "note": "Funded evaluation account. The only install that may be resolved as live.",
+    "account_size_usd": 25000.0,
+    "account_size_note": [
+      "THE SIZING BASIS FOR EVERY ENGINE, IN ONE PLACE.",
+      "",
+      "It was in three places before this field existed, all disagreeing: the parity",
+      "harness ran the EA in a tester funded at $1,000, pinned the EA's paper-sizing",
+      "input at $5,000 to match the python research engine's own START_EQUITY, and the",
+      "EA's prop governor defaulted to sizing off whatever balance the tester gave it.",
+      "A trade set produced under a $1,000 basis is not evidence about this account,",
+      "and nothing said so out loud.",
+      "",
+      "Readers must REFUSE rather than default when this is absent (see",
+      "mt5_terminals.active_account_size): a missing basis is an unanswerable question,",
+      "not a reason to use 5,000.",
+      "",
+      "Update it whenever the evaluation size changes, in the same commit as the",
+      "preset's InpPropAccountSize."
+    ]
   },
   "retired": [
     {
@@ -51,7 +69,8 @@
       "venue": "Deriv",
       "program": "MIDASTOUCH (XAUUSD gold)",
       "retired": "2026-09-19",
-      "reason": "Program closed and the account defunded; the Deriv terminal was uninstalled. Its data directories remain on disk and must never be resolved as live. See docs/MIDASTOUCH_CLOSEOUT_20260919.md and docs/GOLD_SURFACE_RETIREMENT_20260919.md."
+      "reason": "Program closed and the account defunded; the Deriv terminal was uninstalled. Its data directories remain on disk and must never be resolved as live. See docs/MIDASTOUCH_CLOSEOUT_20260919.md and docs/GOLD_SURFACE_RETIREMENT_20260919.md.",
+      "account_size_usd": 1000.0
     }
   ]
 }

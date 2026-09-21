@@ -52,6 +52,40 @@ def test_calibration_zero_broker_value_overrides() -> None:
     assert sd.calibrated_tick_value == pytest.approx(0.01)
 
 
+def test_the_settled_value_outranks_the_venue_raw_tick_value() -> None:
+    """Upcomers XAUUSD, measured live 2026-09-20.
+
+    contract 100.0 x tick 0.01 says $1.00 per tick; SYMBOL_TRADE_TICK_VALUE says
+    0.10; order_calc_profit(1 lot, +$1.00) settles $100.00, i.e. $1.00 per tick.
+    The venue contradicts itself and the raw field is the odd one out, so a rule
+    that "trusts the broker value" sizes 10x the intended risk: on the $25,000
+    evaluation an intended $250 (1%) stop becomes $2,500 — two thirds of the 6%
+    trailing budget in a single trade.
+    """
+    sd = fz.SymbolData(symbol="XAUUSD", volume_min=0.01, tick_size=0.01,
+                       tick_value_raw=0.10, contract_size=100.0,
+                       settled_unit_value=100.0, atr={"H1": 17.22})
+    assert sd.settled_tick_value == pytest.approx(1.00)
+    assert sd.calibrated_tick_value == pytest.approx(1.00)
+    # the raw route, which the EA used before this change
+    raw_route = sd.tick_value_raw / sd.tick_size
+    assert raw_route == pytest.approx(10.0)
+    # the raw route UNDERSTATES the per-unit value, so sizing off it oversizes 10x
+    assert raw_route / sd.calibrated_tick_value == pytest.approx(10.0)
+    # and the disagreement is reported rather than swallowed
+    assert sd.tick_value_disagreement == pytest.approx(0.90)
+    # a $34.44 (2 x ATR) stop on 1 lot is $3,444, not $344
+    assert (34.44 / sd.tick_size) * sd.calibrated_tick_value == pytest.approx(3444.0)
+
+
+def test_no_settled_value_and_a_disagreeing_raw_falls_back_to_geometry() -> None:
+    """The V75 case: raw 0.0001 vs geometric 0.01 — nothing settled is known, and
+    the raw value is the one not to trust."""
+    assert fz.SymbolData(symbol="X", volume_min=0.01, tick_size=0.01,
+                         tick_value_raw=0.0001, contract_size=1.0,
+                         settled_unit_value=0.0).calibrated_tick_value == 0.01
+
+
 # --- Wilder ATR parity --------------------------------------------------------------
 
 def test_wilder_atr_matches_iatr_semantics() -> None:

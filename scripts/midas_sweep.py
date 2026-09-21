@@ -32,8 +32,34 @@ ART = "artifacts"
 POINT = 0.01
 TICK_VALUE_PER_LOT = 100.0        # $ per 1.0 price unit per 1.0 lot (100 oz)
 MIN_LOT = 0.01
-START_EQUITY = 5000.0
+START_EQUITY = 5000.0            # the CERTIFIED research basis: the §13 corpus was
+                                 # fitted at $5,000 and its artifacts are stated in
+                                 # R, which is lot-invariant except where the
+                                 # min-lot floor binds. Do not change it to make a
+                                 # number look better — see _BASIS below for how a
+                                 # run on another account is stated instead.
 RISK_FRACTION = 0.01
+
+#: Run-scoped sizing basis. `None` means "the certified research basis" (ab
+#: START_EQUITY); a parity run sets it to the LIVE account's basis, because parity
+#: claims the EA and this engine agree on ONE account, not on two arbitrarily
+#: different books. Where the min-lot floor binds, the basis changes the trade set —
+#: which is exactly what a basis change has to be measured against, not assumed away.
+_BASIS: float | None = None
+
+
+def use_basis(basis_usd: float) -> None:
+    """Size this run's simulated account at `basis_usd`."""
+    global _BASIS
+    val = float(basis_usd)
+    if val <= 0:
+        raise ValueError(f"sizing basis must be positive, got {basis_usd!r}")
+    _BASIS = val
+
+
+def equity_basis() -> float:
+    """The equity every simulated run starts from (override, else certified)."""
+    return START_EQUITY if _BASIS is None else _BASIS
 # Amendment 6 (2026-09-17, register R5): a min-lot floor that would push the
 # real risk past this fraction of the sizing basis VETOES the trade in BOTH
 # engines (python here; EA InpMaxRiskPct — same formula against each engine's
@@ -57,6 +83,11 @@ WINDOWS = {
     "is2": ("2025-04-01T00:00", "2026-03-31T23:59"),
     "wf":  ("2025-09-15T00:00", "2026-03-31T23:59"),
     "oos": ("2026-04-01T00:00", "2026-09-16T23:59"),
+    # The TICK-COVERED window: this venue serves real gold ticks only from 2026-09-04,
+    # so this is the one window where a `Model=4` pass is genuinely the per-tick model
+    # the parity contract claims. Short by construction — the venue's depth decides it,
+    # not taste. See docs/DATA_SCOPE_AND_CLOCK_20260920.md §9-10.
+    "tickcov": ("2026-09-04T00:00", "2026-09-16T23:59"),
 }
 MODES = ["ORIGINAL", "REVERSE_DIRECTION", "REVERSE_TRIGGER", "REVERSE_BOTH",
          "LONG_ONLY", "SHORT_ONLY", "MACRO_ONLY", "TRIGGER_ONLY"]
@@ -190,7 +221,7 @@ def macro_state(h1_close: float, h1_ema: float,
 class RunResult:
     def __init__(self):
         self.trades: list[dict] = []
-        self.final_equity = START_EQUITY
+        self.final_equity = equity_basis()
         self.vetoed = 0
 
 
@@ -210,7 +241,7 @@ def run_mode(mode: str, t0: int, t1: int, data: dict) -> RunResult:
     m15_rsi, m15_bb = data["m15_rsi"], data["m15_bb"]
 
     res = RunResult()
-    equity = START_EQUITY
+    equity = equity_basis()
     pos = None
     pending = None
     floored = 0

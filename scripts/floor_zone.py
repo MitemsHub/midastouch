@@ -9,11 +9,20 @@ The boundary chain (all in dollars of virtual equity, per arm engine x symbol):
   strangulation  = min_lot_risk / budget_pct         (below this, EVERY entry vetoes)
   halt floor     = window_start_equity * (1 - floor_mode_max_dd_pct)
 
-The calibrated tick value mirrors the EA's CalibratedTickValue(): the broker's
-SYMBOL_TRADE_TICK_VALUE is only trusted within TICK_VALUE_TOLERANCE of the
-geometric value (tick_size * contract_size); otherwise the geometric value
-overrides (2026-09-16 live check: broker 0.0001 vs geometric 0.01 on V75 —
-the override is load-bearing; using the raw API value understates risk 100x).
+The calibrated tick value mirrors the EA's DollarPerUnitPerLot(), and the AUTHORITY
+ORDER is the whole point of it (2026-09-20):
+
+  1. what the broker SETTLES — order_calc_profit over one price unit per lot;
+  2. contract_size x tick_size (geometric);
+  3. the raw SYMBOL_TRADE_TICK_VALUE.
+
+Both earlier rules failed on a real venue, in opposite directions. On V75 the raw
+value (0.0001) understated the geometric (0.01) by 100x, so the geometric override
+was load-bearing. On Upcomers XAUUSD the raw value (0.10) *is* the odd one out — the
+contract (100 x 0.01 = 1.00) and order_calc_profit ($100 per 1.0 price unit) agree
+with each other and the raw value is 10x low — and a rule that trusted the broker
+would have sized 10x the intended risk on a $25,000 prop account. Neither number is
+reliable by kind; only the settled one is authoritative.
 
 ATR mirrors the EA's iATR (Wilder smoothing) at the last CLOSED bar of the
 engine's anchor timeframe: v28 family and V75MacroEngine = 2.0 x ATR(H1, 14);
@@ -63,15 +72,57 @@ class SymbolData:
     tick_value_raw: float
     contract_size: float
     atr: dict = field(default_factory=dict)   # tf -> ATR at last closed bar
+    #: $ per 1.0 price-unit move per lot, from order_calc_profit. 0.0 = unknown,
+    #: which is a real answer and falls through to the geometric value.
+    settled_unit_value: float = 0.0
+
+    @property
+    def settled_tick_value(self) -> float:
+        """The broker's own settled value, expressed per TICK.
+
+        `settled_unit_value` is dollars per 1.0 price unit per lot and a tick is a
+        FRACTION of a price unit, so this multiplies: $100 per unit at a 0.01 tick
+        is $1.00 per tick. (Upcomers XAUUSD: contract 100 x 0.01 = $1.00, settled
+        $1.00, raw SYMBOL_TRADE_TICK_VALUE 0.10 — the raw field is the odd one.)
+        """
+        if self.settled_unit_value <= 0.0 or self.tick_size <= 0.0:
+            return 0.0
+        return self.settled_unit_value * self.tick_size
 
     @property
     def calibrated_tick_value(self) -> float:
-        """Mirror of CalibratedTickValue(): geometric override outside 5%."""
+        """$ per tick per lot, from the most authoritative source that exists.
+
+        Authority order: settled > geometric > raw (see the module docstring).
+        Returns 0.0 when nothing is usable, so `compute_boundary` fail-closes
+        instead of sizing on a guess.
+        """
+        settled = self.settled_tick_value
+        if settled > 0.0:
+            return settled
         geo = self.tick_size * self.contract_size
-        if (self.tick_value_raw <= 0.0 or self.tick_size <= 0.0
-                or abs(self.tick_value_raw - geo) > TICK_VALUE_TOLERANCE * geo):
+        raw = self.tick_value_raw
+        # Below the settled value, the older rules stand: a raw value that agrees
+        # with geometry inside TICK_VALUE_TOLERANCE is the venue's real number and
+        # is used as-is; a raw value that disagrees is the one not to trust.
+        if raw > 0.0 and geo > 0.0 and abs(raw - geo) <= TICK_VALUE_TOLERANCE * geo:
+            return raw
+        if geo > 0.0:
             return geo
-        return self.tick_value_raw
+        return raw if raw > 0.0 else 0.0
+
+    @property
+    def tick_value_disagreement(self) -> float | None:
+        """How far the raw API value sits from the calibrated one, as a ratio.
+
+        Returned rather than acted on: a venue whose own two answers disagree is
+        worth reporting (Upcomers XAUUSD reports 0.10 where every other route says
+        1.00), but the sizing decision is already made by the authority order.
+        """
+        cal = self.calibrated_tick_value
+        if cal <= 0.0 or self.tick_value_raw <= 0.0 or cal == self.tick_value_raw:
+            return None
+        return abs(self.tick_value_raw - cal) / cal
 
 
 @dataclass
@@ -161,10 +212,20 @@ def fetch_symbol_data(symbol: str, terminal_path: str | None = None) -> SymbolDa
         si = mt5.symbol_info(symbol)
         if si is None:
             return None
+        # The settled value, measured rather than inferred: what the broker says a
+        # 1-lot position earns over a one-price-unit move.
+        settled = 0.0
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is not None and tick.ask > 0:
+            profit = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, symbol, 1.0,
+                                           tick.ask, tick.ask + 1.0)
+            if profit is not None and profit > 0:
+                settled = float(profit)
         sd = SymbolData(symbol=symbol, volume_min=float(si.volume_min),
                         tick_size=float(si.trade_tick_size),
                         tick_value_raw=float(si.trade_tick_value),
-                        contract_size=float(si.trade_contract_size))
+                        contract_size=float(si.trade_contract_size),
+                        settled_unit_value=settled)
         for tf_name, tf in (("H1", mt5.TIMEFRAME_H1), ("M15", mt5.TIMEFRAME_M15)):
             rates = mt5.copy_rates_from_pos(symbol, tf, 1, 140)
             if rates is None or len(rates) < 16:

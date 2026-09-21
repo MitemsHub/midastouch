@@ -10,7 +10,14 @@ ANCIENT_WINDOW validation pattern:
   V4  day-of-week calendar — trades Mon..Fri only (Sat should be ~absent)
 Validation failures are reported loudly; the artifact records every check.
 
-Output: data/forex/xauusd/<SYMBOL>_<TF>.csv + artifacts/midas_history_<date>.json
+PROVENANCE IS PART OF THE OUTPUT. The artifact records which terminal, data folder and
+account the bars came from, because the corpus in data/forex/xauusd/ was fetched (from
+the DERIV install, 2026-09-17) for an account that now trades Upcomers — whose own
+XAUUSD history begins 2026-01-12 13:15, i.e. 60% of the walk-forward window does not
+exist at the venue the strategy is certified for. An unlabelled corpus is how that
+stays invisible.
+
+Output: data/forex/xauusd/<SYMBOL>_<TF><suffix>.csv + artifacts/midas_history_<date>.json
 """
 from __future__ import annotations
 
@@ -21,10 +28,18 @@ import sys
 import time
 from datetime import datetime, timezone
 
-TERMINAL_EXE = r"C:\Program Files\MetaTrader 5 Terminal\terminal64.exe"
+#: The install is resolved at run time from the account registry (mt5_ops), NEVER
+#: hardcoded. It used to be `C:\Program Files\MetaTrader 5 Terminal\terminal64.exe` —
+#: the DERIV install, which no longer exists on this machine. That is how the corpus in
+#: data/forex/xauusd/ came to be another venue's gold series while the funded account
+#: trades Upcomers, whose own XAUUSD history begins 2026-01-12 13:15. Every run now
+#: records the terminal, data folder and account it actually read, so a corpus can never
+#: again be mistaken for the venue it did not come from.
+TERMINAL_EXE = ""          # set in main() from mt5_ops.terminal_exe()
 OUT_DIR = os.path.join("data", "forex", "xauusd")
 ART = "artifacts"
-SYMBOLS = ["XAUUSD", "XAUUSD"]
+SYMBOLS = ["XAUUSD"]       # was ["XAUUSD", "XAUUSD"]: the same symbol twice, so the
+#                            second pass rewrote the first's CSVs for no reason.
 TFS = {"H1": 16385, "M15": 15, "D1": 16408}
 # (MetaTrader5.TIMEFRAME_* constants inlined to keep the module import-free
 # of a hard dependency at module import time; values are stable ABI constants.)
@@ -126,19 +141,68 @@ def validate(bars: list[dict], tf_name: str) -> dict:
     return res
 
 
-def main() -> int:
+def _resolve_install() -> str:
+    """The live install's executable, by account identity, or refuse.
+
+    Refusing is the point: a fetch that cannot identify the install must not fall back
+    to a path, because the fallback is what produced a Deriv-sourced corpus for an
+    Upcomers account. `mt5_ops.terminal_exe()` reads `origin.txt` of the data folder
+    whose journals name the active account.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import mt5_ops                                   # noqa: PLC0415
+    try:
+        return mt5_ops.terminal_exe()
+    except mt5_ops.MT5OpsUnavailable as exc:
+        print(f"FAIL: no live install to fetch from — {exc}")
+        raise SystemExit(2)
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description="MIDASTOUCH XAUUSD history download")
+    ap.add_argument("--suffix", default="",
+                    help="appended to each CSV name, so a differently-sourced corpus can "
+                         "be written alongside the existing one instead of over it "
+                         "(e.g. --suffix _upcomers)")
+    ap.add_argument("--terminal", default=None,
+                    help="explicit terminal64.exe (default: resolve the live install)")
+    args = ap.parse_args(argv)
+
+    global TERMINAL_EXE
+    TERMINAL_EXE = args.terminal or _resolve_install()
+    if not os.path.isfile(TERMINAL_EXE):
+        print(f"FAIL: terminal not found at {TERMINAL_EXE}")
+        return 2
     try:
         import MetaTrader5 as mt5
     except ImportError:
         print("FAIL: MetaTrader5 package unavailable")
         return 2
-    if not mt5.initialize(path=TERMINAL_EXE, timeout=30000):
+    if not mt5.initialize(path=TERMINAL_EXE, timeout=60000):
         print(f"FAIL: mt5.initialize: {mt5.last_error()}")
         return 2
     try:
         os.makedirs(OUT_DIR, exist_ok=True)
         os.makedirs(ART, exist_ok=True)
+        ti, ai = mt5.terminal_info(), mt5.account_info()
+        provenance = {
+            "terminal_exe": TERMINAL_EXE,
+            "terminal_path": getattr(ti, "path", None),
+            "terminal_data_path": getattr(ti, "data_path", None),
+            "terminal_build": getattr(ti, "build", None),
+            "account": getattr(ai, "login", None),
+            "server": getattr(ai, "server", None),
+            "currency": getattr(ai, "currency", None),
+            "balance": getattr(ai, "balance", None),
+            "suffix": args.suffix,
+            "resolution": "mt5_ops.terminal_exe() by account identity",
+        }
+        print(f"install   : {provenance['terminal_path']}  (build {provenance['terminal_build']})")
+        print(f"account   : {provenance['account']} @ {provenance['server']}  "
+              f"{provenance['balance']} {provenance['currency']}")
         report: dict = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "provenance": provenance,
                         "symbols": {}}
         # D1 on this broker is reference-only: Deriv's D1 backfill carries a
         # disclosed hole (2023-12-20 -> 2024-04-10 on XAUUSD) that H1 does not
@@ -175,8 +239,8 @@ def main() -> int:
                         for b in bars]
                 checks = validate(rows, tf_name)
                 # Research-span definition: if the feed carries a coverage
-                # hole (Deriv's gold backfill has a 112-day hole Dec-2023 ->
-                # Apr-2024), everything after the LAST broken gap is the
+                # hole (the retired Deriv gold backfill had a 112-day hole
+                # Dec-2023 -> Apr-2024), everything after the LAST broken gap is the
                 # continuous, research-grade span. Gate on that span; record
                 # the discarded prefix loudly. D1 stays reference-only.
                 research_note = None
@@ -196,7 +260,8 @@ def main() -> int:
                             + datetime.fromtimestamp(cut, tz=timezone.utc).isoformat()
                             + f"; dropped {dropped}-bar prefix before the broker feed hole")
                         checks = validate(rows, tf_name)
-                fn = os.path.join(OUT_DIR, f"{sym.replace('/', '')}_{tf_name}.csv")
+                fn = os.path.join(OUT_DIR,
+                                  f"{sym.replace('/', '')}_{tf_name}{args.suffix}.csv")
                 with open(fn, "w", newline="") as fh:
                     w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
                     w.writeheader()
@@ -218,7 +283,9 @@ def main() -> int:
                 for k, v in checks.items():
                     if not v[0]:
                         print(f"    {k}: {v[1]}")
-        out = os.path.join(ART, f"midas_history_{datetime.now():%Y%m%d}.json")
+        out = os.path.join(ART,
+                           f"midas_history_{datetime.now():%Y%m%d}"
+                           f"{args.suffix.replace('_', '-')}.json")
         with open(out, "w") as fh:
             json.dump(report, fh, indent=1)
         print(f"\nartifact: {out}")
