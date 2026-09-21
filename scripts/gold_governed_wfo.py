@@ -36,6 +36,7 @@ WHAT IS EXPLORATION AND WHAT IS A TEST, kept apart on purpose:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import math
 import sys
@@ -114,6 +115,124 @@ def govern(trades: list[dict], epoch: np.ndarray, *, rules,
         equity += t["net_r"] * risk_usd
         peak = max(peak, equity)
     return kept, vetoes
+
+
+#: The soft-stop ladder: (band_lo, band_hi, risk_scale) in drawdown-from-peak terms.
+#: Risk is RE-DERIVED from the band, so a worsening account gets smaller before it gets
+#: near the shield floor instead of arriving there at full size.
+LADDER = ((0.00, 0.02, 1.00), (0.02, 0.04, 0.50), (0.04, 0.06, 0.25), (0.06, 9.99, 0.00))
+
+
+def ladder_scale(dd_frac: float) -> float:
+    for lo, hi, scale in LADDER:
+        if lo <= dd_frac < hi:
+            return scale
+    return 0.0
+
+
+def govern_path(trades: list[dict], epoch: np.ndarray, *, rules, bars: dict | None = None,
+                risk_usd: float = RISK_USD) -> tuple[list[dict], dict]:
+    """A governor that protects the EQUITY PATH, not just the entry.
+
+    The measured problem with the EA's `PropGovernorBlock()` is not that it is wrong, it
+    is that it is one-sided: it can refuse to open a position and nothing else, so the
+    equity that breached the daily floor or the shield floor was breached by a trade it
+    had already allowed (`docs/GOLD_GOVERNED_WFO_20260921.md` section 3 — five daily and
+    five shield breaches on the governed sequence). This models the other half:
+
+      1. **Day-loss kill switch.** An entry is refused when one more full loss would reach
+         the 3% line (`day_pnl - risk <= -daily_limit`), i.e. pre-empted rather than
+         reacted to; and a position already OPEN when the day's loss touches the line is
+         closed at that bar, with the remainder of its move charged to the day.
+      2. **Soft-stop ladder.** The risk for each new entry is scaled by the drawdown band
+         (`LADDER`), so the sequence de-risks as the account worsens instead of arriving at
+         the shield at full size. Scaled risk is applied to the trade's R, which is exact
+         for position sizing (R is size-independent) — no price path is needed for it.
+      3. The trailing-shield floor and Best Day cap still apply, and the floor now also
+         **exits** an open position that touches it rather than only blocking the next one.
+
+    DECLARED APPROXIMATION: marks are bar CLOSES, so an intra-bar touch of the day line or
+    the floor is detected one bar late. That makes this governor look slightly WORSE than
+    an EA that checks every tick, which is the direction a risk study should err.
+    """
+    if bars is None:
+        return govern(trades, epoch, rules=rules, risk_usd=risk_usd)
+    close = bars["close"]
+    cap_usd = rules.account_size * rules.profit_target_pct / 100.0 * rules.best_day_pct / 100.0
+    daily_limit = rules.daily_loss_limit_usd
+    equity = rules.account_size
+    peak = rules.account_size
+    day = None
+    day_pnl = 0.0
+    day_anchor = equity
+    kept: list[dict] = []
+    vetoes: dict[str, int] = {}
+    path_exits = 0
+
+    def veto(reason: str) -> None:
+        vetoes[reason] = vetoes.get(reason, 0) + 1
+
+    for t in sorted(trades, key=lambda x: x["entry_i"]):
+        d = datetime.fromtimestamp(float(epoch[t["entry_i"]]), timezone.utc).date()
+        if d != day:
+            day = d
+            day_pnl = 0.0
+            day_anchor = equity
+        scale = ladder_scale((peak - equity) / rules.account_size)
+        if scale <= 0.0:
+            veto("ladder: flat at >= 6% drawdown")
+            continue
+        if equity <= rules.drawdown_floor_usd(peak):
+            veto("trailing shield (6%)")
+            continue
+        # UNITS: `day_pnl` is in R and `daily_limit` is in USD, so the comparison has to
+        # pass through `risk_usd`. Comparing R to dollars silently disables the switch (-2
+        # against -750 is never true), which is how a risk rule ends up measuring nothing.
+        if (day_pnl - scale) * risk_usd <= -daily_limit:
+            veto("day kill switch (3%, pre-empted)")
+            continue
+        if (equity - day_anchor) >= cap_usd:
+            veto("Best Day cap (1R/day)")
+            continue
+
+        # Walk the bars this position was open for, marking it to each CLOSE, so the day
+        # line and the shield floor can be enforced INSIDE the trade.
+        risk_price = _risk_price(t)
+        r = t["net_r"] * scale
+        if risk_price is not None and bars is not None:
+            for j in range(t["entry_i"] + 1, int(t["exit_i"]) + 1):
+                floating = t["dir"] * (float(close[j]) - t["entry"]) / risk_price
+                # `equity` already carries the day's realised P&L, so marking the open
+                # position to this close is one addition, not a re-derivation of the day.
+                marked = equity + floating * scale * risk_usd
+                if day_pnl + floating * scale < -daily_limit / risk_usd:
+                    r = floating * scale
+                    path_exits += 1
+                    break
+                if marked <= rules.drawdown_floor_usd(peak):
+                    r = floating * scale
+                    path_exits += 1
+                    break
+        kept.append(dict(t, net_r=r, risk_scale=scale))
+        day_pnl += r
+        equity += r * risk_usd
+        peak = max(peak, equity)
+    return kept, dict(vetoes, **({"path exits": path_exits} if path_exits else {}))
+
+
+def _risk_price(t: dict) -> float | None:
+    """The trade's risk in price units, recovered from its own R bookkeeping.
+
+    `gross_r = dir * (exit - entry) / risk`, so `risk = dir * (exit - entry) / gross_r`.
+    Returns None for the degenerate case (gross_r == 0), where no mark can be recovered and
+    the trade is scored by its own net_r instead of by a path.
+    """
+    gross = t.get("gross_r")
+    if not gross:
+        return None
+    span = t["dir"] * (t["exit"] - t["entry"])
+    risk = span / gross
+    return risk if risk > 0 else None
 
 
 def trade_stats(trades: list[dict]) -> dict:
@@ -247,7 +366,8 @@ def sweep(args, B, epoch, n, atr, hours, ok, rules) -> dict:
 # Mode B: the governed walk-forward (a test, pre-registered by this file)
 # --------------------------------------------------------------------------- #
 
-def walk_forward(args, B, epoch, n, atr, hours, ok, rules) -> dict:
+def walk_forward(args, B, epoch, n, atr, hours, ok, rules,
+                 governor=govern, label: str = "entry-only governor") -> dict:
     folds = gw.build_folds(epoch)
     all_cfgs = gw.configs()
     # Governor applied INSIDE each fold: a fold is a stand-alone run of the strategy, so
@@ -261,7 +381,7 @@ def walk_forward(args, B, epoch, n, atr, hours, ok, rules) -> dict:
         trades_by_cfg.append(raw)
         for fi, (_nm, lo, hi) in enumerate(folds):
             inside = [t for t in raw if lo <= t["entry_i"] < hi]
-            kept, _v = govern(inside, epoch, rules=rules)
+            kept, _v = governor(inside, epoch, rules=rules)
             governed[k][fi] = sum(t["net_r"] for t in kept)
             kept_counts[k][fi] = len(kept)
 
@@ -290,7 +410,7 @@ def walk_forward(args, B, epoch, n, atr, hours, ok, rules) -> dict:
         _nm, nlo, nhi = folds[fi]
         k = gw._pick_index(all_cfgs, picks[fi - 1]["config"])
         inside = [t for t in trades_by_cfg[k] if nlo <= t["entry_i"] < nhi]
-        kept, _v = govern(inside, epoch, rules=rules)
+        kept, _v = governor(inside, epoch, rules=rules)
         for t in kept:
             oos_detail.append({"fold": folds[fi][0], "entry_i": t["entry_i"],
                                "dir": t["dir"], "net_r": t["net_r"]})
@@ -313,7 +433,8 @@ def walk_forward(args, B, epoch, n, atr, hours, ok, rules) -> dict:
     ok_all = all(v for kk, v in checks.items() if kk.startswith("V"))
     prop = gw.prop_compat(oos_detail, epoch, rules, RISK_USD)
 
-    print(f"\n== governed walk-forward: {len(oos_rs)} OOS folds, governor inside ==")
+    print(f"\n== governed walk-forward: {len(oos_rs)} OOS folds, governor inside "
+          f"({label}) ==")
     for p in picks:
         print(f"  {p['fold']} (picked on {p['selected_on']}): "
               f"stop={p['config']['stop_mult']} tp={p['config']['tp_mult']} "
@@ -358,6 +479,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--bars", type=int, default=60000)
     ap.add_argument("--mode", choices=("governed", "sweep", "both"), default="both")
     ap.add_argument("--control-reps", type=int, default=200)
+    ap.add_argument("--governor", choices=("entry", "path"), default="entry",
+                    help="entry = mirror PropGovernorBlock() exactly (gates ENTRIES); "
+                         "path = the same rules PLUS a day-loss kill switch and a "
+                         "soft-stop ladder that act INSIDE the trade")
     ap.add_argument("--slice", type=int, nargs=2, metavar=("K", "N"),
                     help="run only slice K of N of the sweep grid (the sweep is the "
                          "expensive half; slices are stride-based so each spans the grid)")
@@ -390,7 +515,17 @@ def main(argv: list[str]) -> int:
         sw["slice"] = a.slice
         out["sweep"] = sw
     if a.mode in ("governed", "both"):
-        out["governed_wfo"] = walk_forward(a, B, epoch, n, atr, hours, ok, rules)
+        if a.governor == "path":
+            # `bars` is bound here so the governor callable keeps the same shape as the
+            # entry-only one — one selection/scoring path, two risk policies.
+            gov = functools.partial(govern_path, bars=B)
+            label = ("PATH governor: day kill switch (pre-empted) + soft-stop ladder "
+                     "+ shield-floor exit")
+        else:
+            gov, label = govern, "entry-only: mirror of PropGovernorBlock()"
+        out["spec"]["governor_mode"] = a.governor
+        out["governed_wfo"] = walk_forward(a, B, epoch, n, atr, hours, ok, rules,
+                                           governor=gov, label=label)
 
     dest = Path(a.out)
     if not dest.is_absolute():

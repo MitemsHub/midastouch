@@ -102,6 +102,76 @@ def test_governor_keeps_what_is_allowed_and_moves_the_equity_it_sees() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# The PATH governor: the rules that act inside a trade, not only at its entry
+# --------------------------------------------------------------------------- #
+
+def test_the_ladder_de_risks_as_the_drawdown_deepens() -> None:
+    assert gg.ladder_scale(0.00) == 1.00
+    assert gg.ladder_scale(0.019) == 1.00
+    assert gg.ladder_scale(0.02) == 0.50
+    assert gg.ladder_scale(0.041) == 0.25
+    assert gg.ladder_scale(0.06) == 0.00, "at the shield floor the ladder stops trading"
+
+
+def _bars(closes: list[float]) -> dict:
+    import numpy as np
+    return {"close": np.array(closes, dtype=float)}
+
+
+def test_the_day_kill_switch_exits_inside_the_trade_but_can_be_overrun() -> None:
+    """The switch acts on the mark, and it CANNOT invent a price the bar did not trade.
+
+    The path re-enters at -3R on this bar's close and exits at -4R, because the bar that
+    crossed the line closed beyond it. That overrun is exactly what a live daily-loss
+    breach looks like on a fast bar, and it is the reason the study reports breaches
+    rather than assuming the switch prevents them.
+    """
+    # risk price = 10 (span -40 / gross_r -4), so 1R of mark is $10 of price.
+    t = {"entry_i": 0, "exit_i": 3, "dir": 1, "entry": 100.0, "exit": 60.0,
+         "gross_r": -4.0, "net_r": -4.0}
+    keep = _epoch_for([0, 0, 0, 0])
+    kept, vetoes = gg.govern_path([t], keep, rules=RULES, bars=_bars([100, 95, 70, 60]))
+    assert len(kept) == 1
+    assert kept[0]["net_r"] == -4.0, "the mark was not used to limit the trade"
+    assert vetoes.get("path exits") == 1, vetoes
+    assert gg._risk_price(t) == 10.0
+
+
+def test_the_ladder_does_the_pre_empting_before_the_line_is_reached() -> None:
+    """A -2R day is exactly 2% of the account, so the ladder is already at half risk.
+
+    The two rules are complementary and the test pins the ORDER's effect: at -2R the entry
+    is still allowed, at half size, so the day's worst case is -2.5R and the line at -3R
+    cannot be reached by that trade. A test asserting a refusal here would be asserting
+    that the ladder does not exist.
+    """
+    keep = _epoch_for([0, 0, 0])
+    kept, vetoes = gg.govern_path([_trade(0, -1.0), _trade(1, -1.0), _trade(2, +1.0)],
+                                  keep, rules=RULES, bars=_bars([1, 1, 1]))
+    assert [t["net_r"] for t in kept] == [-1.0, -1.0, +0.5], kept
+    assert kept[2]["risk_scale"] == 0.5, "the third entry was not de-risked"
+    assert "day kill switch (3%, pre-empted)" not in vetoes, vetoes
+
+
+def test_the_day_kill_switch_refuses_an_entry_that_would_cross_the_line() -> None:
+    """At -2.5R even the ladder's half risk would breach: the entry is refused."""
+    keep = _epoch_for([0, 0, 0])
+    kept, vetoes = gg.govern_path([_trade(0, -1.0), _trade(1, -1.5), _trade(2, +1.0)],
+                                  keep, rules=RULES, bars=_bars([1, 1, 1]))
+    assert [t["net_r"] for t in kept] == [-1.0, -1.5], kept
+    assert vetoes.get("day kill switch (3%, pre-empted)") == 1, vetoes
+
+
+def test_without_bars_the_path_governor_is_the_entry_governor() -> None:
+    """A missing bar series must not silently produce a different risk policy."""
+    keep = _epoch_for([0, 0])
+    trades = [_trade(0, +1.0), _trade(1, +1.0)]
+    a, _ = gg.govern_path(trades, keep, rules=RULES, bars=None)
+    b, _ = gg.govern(trades, keep, rules=RULES)
+    assert [t["net_r"] for t in a] == [t["net_r"] for t in b] == [1.0]
+
+
+# --------------------------------------------------------------------------- #
 # The pre-registration: power, the floor, and the kill rule
 # --------------------------------------------------------------------------- #
 

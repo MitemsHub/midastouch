@@ -1449,6 +1449,20 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
                 print(f"  (prior live closes counted in the closed line below)")
         else:
             print("  live: flat (armed; signals in-session 06-20 UTC only)")
+        # The venue holds the second copy of what this arm did. A flat ledger is NOT a
+        # health claim: it is either "nothing traded yet" or "the EA is not running", and
+        # only the account's own deal history can tell those apart
+        # (see midas_watchdog.live_fill_reconciliation).
+        try:
+            from midas_watchdog import live_fill_reconciliation
+            mm = re.search(r"(?m)^InpMagic\s*=\s*(\d+)", txt)
+            rec = live_fill_reconciliation(ledger_path,
+                                          magic=int(mm.group(1)) if mm else 0)
+            print(f"  fills: {rec['detail']}")
+            if not rec["healthy"]:
+                problems.append("live fills: " + rec["detail"])
+        except Exception as exc:      # noqa: BLE001 — never let this mask the block
+            problems.append(f"live fills: reconciliation unavailable ({exc})")
     elif live:
         print(f"  live: {live[0]} @ {live[1]} | open {live[2]:.1f}h")
         if positions:

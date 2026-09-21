@@ -67,7 +67,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "scripts"))
@@ -76,6 +76,130 @@ import mt5_ops as R  # noqa: E402  (the LIVE install, by account identity)
 from mt5_ops import (  # noqa: E402
     MT5OpsUnavailable, data_folder_for_terminal, relaunch_terminal, stop_terminal,
     terminal_exe_or_unknown, terminal_pids_exact)
+
+
+#: Settlement states for the live ledger vs the account's own deal history.
+LIVE_FILLS_NO_LEDGER = "no-ledger"
+LIVE_FILLS_SILENT = "silent-both"
+LIVE_FILLS_MATCHED = "matched"
+LIVE_FILLS_LEDGER_SHORT = "ledger-short"
+LIVE_FILLS_UNREADABLE = "account-unreadable"
+
+
+def live_fill_reconciliation(ledger_path: str, *, magic: int,
+                             since: float | None = None) -> dict:
+    """The live ledger against the ACCOUNT's own deal history — two sources, one answer.
+
+    WHY A LEDGER IS NOT ENOUGH. On a live arm the paper ledger stops being the record of
+    what happened and becomes the EA's *claim* about it; the venue holds the other copy.
+    A silent ledger therefore has two readings, and they are not the same: the strategy
+    has not traded yet, or the EA is not running. `morning_status` used to print a flat
+    ledger and call the arm healthy, which is the reading that cannot tell those apart.
+
+    States, and what each one authorises:
+
+      * `silent-both` — no fills in the ledger AND no deals on the account for this magic.
+        That is "alive, nothing traded YET": reportable, never healthy on its own.
+      * `matched` — the same number of fills in both, keyed by ticket.
+      * `ledger-short` — the account has deals the ledger does not. THE ALARM STATE: the
+        audit trail is missing entries, so every R this program derives from the ledger is
+        unverified from that moment on.
+      * `account-unreadable` — the terminal cannot be queried. Unknown is not healthy.
+    """
+    # Row grammar (MidastouchAI.mq5, the LOPEN writer):
+    #   LOPEN,<epoch>,<posid>,<order>,<deal>,<dir>,...
+    # Both identifiers are kept: `posid` is authoritative on a hedging account and the
+    # deal ticket is what `history_deals_get` returns directly, so keying only one of them
+    # is how a real fill gets reported as missing. A ledger row matches a deal if EITHER
+    # identifier agrees.
+    ledger: dict[str, str] = {}
+    rows = 0
+    try:
+        with open(ledger_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                parts = line.strip().split(",")
+                if parts and parts[0] == "LOPEN" and len(parts) > 4:
+                    rows += 1
+                    for ident in (parts[2], parts[4]):
+                        ledger[ident] = parts[1]
+    except OSError as exc:
+        return {"state": LIVE_FILLS_NO_LEDGER, "healthy": False, "ledger": 0, "account": 0,
+                "detail": f"live ledger unreadable ({exc}) — nothing verifies the arm"}
+
+    try:
+        import MetaTrader5 as mt5  # type: ignore
+        # `history_deals_get` takes datetimes (the integer overload raises inside the
+        # extension) and the terminal must be attached first — same idiom as
+        # scripts/midas_lv_broker_monitor.py, which is the one that runs this live.
+        if not mt5.initialize():
+            raise RuntimeError(f"initialize() failed: {mt5.last_error()}")
+        frm = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        if since is not None:
+            frm = datetime.fromtimestamp(since, timezone.utc)
+        until = datetime.now(timezone.utc) + timedelta(days=1)
+        deals = mt5.history_deals_get(frm, until) or []
+        acct: dict[str, float] = {}
+        for d in deals:
+            if getattr(d, "magic", 0) != magic:
+                continue
+            if since is not None and float(getattr(d, "time", 0)) < since:
+                continue
+            for ident in (getattr(d, "ticket", None), getattr(d, "position_id", None)):
+                if ident:
+                    acct[str(ident)] = float(getattr(d, "time", 0) or 0)
+    except Exception as exc:      # noqa: BLE001 — any failure means "cannot verify"
+        return {"state": LIVE_FILLS_UNREADABLE, "healthy": False, "ledger": rows,
+                "account": 0,
+                "detail": f"account history unreadable ({exc}) — the arm cannot be "
+                          f"verified against the venue, only against its own ledger"}
+
+    if rows == 0 and not acct:
+        return {"state": LIVE_FILLS_SILENT, "healthy": True, "ledger": 0, "account": 0,
+                "detail": ("no fills yet in either the ledger or the account's own history "
+                           "for this magic — alive and unproven, NOT a health claim")}
+    missing = sorted(set(acct) - set(ledger))
+    if missing:
+        return {"state": LIVE_FILLS_LEDGER_SHORT, "healthy": False, "ledger": rows,
+                "account": len(acct), "missing": missing[:5],
+                "detail": (f"the account holds {len(acct)} identifier(s) for magic {magic} "
+                           f"but the ledger records {rows} fill(s) — missing {missing[:5]}; "
+                           f"every R derived from this ledger is unverified")}
+    return {"state": LIVE_FILLS_MATCHED, "healthy": True, "ledger": rows,
+            "account": len(acct),
+            "detail": (f"{rows} ledger fill(s) reconciled against {len(acct)} account "
+                       f"identifier(s) for magic {magic}")}
+
+
+def live_fill_problems(arms: list[dict]) -> list[dict]:
+    """Reconcile every LIVE-enabled arm's ledger against the account's own deal history.
+
+    Which arms are live comes from the PIN the arm is meant to run — `preset_for_tag`
+    resolved through the arming record — not from the ledger, because the ledger is the
+    thing being verified. A paper arm is skipped: its ledger is the record by design and
+    the account has (and should have) no deals for it.
+    """
+    out: list[dict] = []
+    try:
+        armed = bool(R.arming_state(REPO)["armed"])
+    except Exception:      # noqa: BLE001 — an unreadable record means "not armed"
+        armed = False
+    for a in arms:
+        tag = str(a.get("tag", ""))
+        try:
+            pin = preset_for_tag(tag, armed=armed)
+            with open(pin, encoding="utf-8-sig", errors="replace") as fh:
+                txt = fh.read()
+        except OSError:
+            continue
+        m = re.search(r"(?m)^InpLiveExecution\s*=\s*(\S+)", txt)
+        if not m or m.group(1).strip().lower() not in ("true", "1"):
+            continue
+        mg = re.search(r"(?m)^InpMagic\s*=\s*(\d+)", txt)
+        rec = live_fill_reconciliation(str(a.get("ledger", "")),
+                                       magic=int(mg.group(1)) if mg else 0)
+        rec["tag"] = tag
+        out.append(rec)
+    return out
 
 
 def _live_pids() -> list[int] | None:
@@ -632,6 +756,17 @@ def check(now_s: float | None = None, dry_run: bool = False,
         ledgers.append({**lh, "tag": a["tag"]})
         if lh["problems"]:
             record.setdefault("ledger_problems", {})[a["tag"]] = lh["problems"]
+    # --- live arms: the venue's copy of the record (2026-09-21) -----------------
+    # A silent ledger on a LIVE arm has two readings — nothing traded yet, or the EA is
+    # not running — and the watchdog may not assume the friendly one. The account's own
+    # deal history is the second source; an arm whose ledger is MISSING deals the account
+    # holds is a problem, and "silent in both" is recorded as a state, never as health.
+    for rec in live_fill_problems(arms):
+        record.setdefault("live_fills", {})[rec["tag"]] = rec
+        if not rec["healthy"]:
+            record.setdefault("problems", []).append(
+                f"live fills [{rec['tag']}]: {rec['detail']}")
+
     worst = max((l["mtime_age_min"] or 0.0) for l in ledgers)
     record["ledgers"] = [{k: l[k] for k in ("tag", "exists", "mtime_age_min", "flat")}
                          for l in ledgers]
