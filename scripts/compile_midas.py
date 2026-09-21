@@ -35,10 +35,12 @@ mql5/MIDASTOUCH/MidasOffsetProbe.mq5. Prints the produced .ex5 paths.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -58,6 +60,12 @@ RESULT_RE = re.compile(
     r"Result:\s*(\d+)\s*errors?,\s*(\d+)\s*warnings?", re.I)
 
 SCRATCH_ROOT = "MIDASTOUCH_compile"   # under <data folder>\MQL5\Experts
+
+#: Where `--deploy` records the pair it just produced. Read by
+#: `scripts/live_readiness.py`, which must be able to say whether the binary a chart
+#: would load belongs to the source in the tree — on a machine that may not have
+#: compiled anything today, and without re-deriving a hash the compiler cannot reproduce.
+BUILD_RECORD = REPO / "artifacts" / "midas_build.json"
 
 
 def find_metaeditor(explicit: str | None = None) -> Path:
@@ -167,7 +175,9 @@ def compile_one(editor: Path, mq5: Path, mql5_dir: Path,
     """Compile `mq5` from an in-tree scratch folder; verify 0/0 + .ex5, then deploy."""
     if not mq5.exists():
         return {"target": str(mq5), "ok": False, "errors": None,
-                "warnings": None, "ex5": None, "deployed": [], "fingerprint": "",
+                "warnings": None, "source": "", "source_sha256": "",
+                "ex5_sha256": "",
+                "ex5": None, "deployed": [], "fingerprint": "",
                 "detail": "source file missing"}
     scratch = mql5_dir / "Experts" / SCRATCH_ROOT / mq5.stem
     scratch.mkdir(parents=True, exist_ok=True)
@@ -180,14 +190,18 @@ def compile_one(editor: Path, mq5: Path, mql5_dir: Path,
     try:
         if not log.exists():
             return {"target": mq5.name, "ok": False, "errors": None,
-                    "warnings": None, "ex5": None, "deployed": [], "fingerprint": "",
+                    "warnings": None, "source": "", "source_sha256": "",
+                "ex5_sha256": "",
+                "ex5": None, "deployed": [], "fingerprint": "",
                     "detail": "no compile log — editor silently skipped "
                               "(source must live under the terminal MQL5 tree)"}
         text = log.read_text(encoding="utf-16-le", errors="replace")
         m = RESULT_RE.search(text)
         if not m:
             return {"target": mq5.name, "ok": False, "errors": None,
-                    "warnings": None, "ex5": None, "deployed": [], "fingerprint": "",
+                    "warnings": None, "source": "", "source_sha256": "",
+                "ex5_sha256": "",
+                "ex5": None, "deployed": [], "fingerprint": "",
                     "detail": "log lacks a Result line — failure"}
         errors, warnings = int(m.group(1)), int(m.group(2))
         ok = errors == 0 and warnings == 0 and ex5.exists()
@@ -196,8 +210,15 @@ def compile_one(editor: Path, mq5: Path, mql5_dir: Path,
         # Deploy and fingerprint INSIDE the try: the scratch folder (and the only copy
         # of the binary) is removed in the finally block below unless --keep was passed.
         deployed = deploy_ex5(ex5, mq5, mql5_dir) if ok and deploy else []
+        # The FULL pair is returned as well as the printed short fingerprint: the record
+        # has to be written from the moment of the build, because this scratch artifact is
+        # deleted in the `finally` below and the compiler cannot reproduce it. A later
+        # reader can only compare against this, never re-derive it.
         return {"target": mq5.name, "ok": ok, "errors": errors,
                 "warnings": warnings,
+                "source": str(mq5) if ok else "",
+                "source_sha256": sha256_of(mq5) if ok else "",
+                "ex5_sha256": sha256_of(ex5) if ok and ex5.exists() else "",
                 "ex5": str(ex5) if ex5.exists() else None,
                 "deployed": deployed,
                 "fingerprint": build_fingerprint(mq5, ex5) if ok else "",
@@ -205,6 +226,39 @@ def compile_one(editor: Path, mq5: Path, mql5_dir: Path,
     finally:
         if not keep:
             shutil.rmtree(scratch.parent / mq5.stem, ignore_errors=True)
+
+
+def write_build_record(results: list[dict],
+                       when: str | None = None) -> Path | None:
+    """Persist `source -> binary` for every VERIFIED, DEPLOYED target.
+
+    WHY A RECORD AND NOT JUST THE PRINTED LINE. `scripts/live_readiness.py` has to answer
+    "is the binary a chart would load the one this source produces?" on a machine that may
+    have compiled nothing today — and the answer cannot be re-derived, because MetaEditor
+    is not bit-reproducible, so recompiling and comparing hashes proves nothing. The only
+    honest provenance is the pair read back at the moment of the deploy. A printed line
+    scrolls away; without this file the readiness check can compare timestamps only, which
+    catches a binary older than its source but not one REPLACED after the fact.
+
+    Returns None when nothing was deployed: an empty record would read as "up to date".
+    """
+    entries: dict[str, dict] = {}
+    for r in results:
+        if not (r.get("ok") and r.get("deployed") and r.get("source")):
+            continue
+        entries[Path(r["target"]).stem] = {
+            "source": r["source"],
+            "source_sha256": r.get("source_sha256", ""),
+            "ex5_sha256": r.get("ex5_sha256", ""),
+            "deployed": list(r["deployed"]),
+        }
+    if not entries:
+        return None
+    BUILD_RECORD.parent.mkdir(parents=True, exist_ok=True)
+    BUILD_RECORD.write_text(json.dumps(
+        {"utc": when or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+         "targets": entries}, indent=2) + "\n", encoding="utf-8")
+    return BUILD_RECORD
 
 
 def main() -> int:
@@ -224,8 +278,10 @@ def main() -> int:
     targets = [Path(t) if Path(t).is_absolute() else REPO / t
                for t in args.target] or DEFAULT_TARGETS
     failed = 0
+    results: list[dict] = []
     for t in targets:
         r = compile_one(editor, t, mql5_dir, keep=args.keep, deploy=args.deploy)
+        results.append(r)
         tag = "OK" if r["ok"] else "FAIL"
         print(f"  {tag} {r['target']}: errors={r['errors']} "
               f"warnings={r['warnings']} ({r['detail']})")
@@ -238,6 +294,10 @@ def main() -> int:
             print(f"      NOT deployed — a chart still loads whatever is at {dest}; "
                   f"re-run with --deploy to copy this build there")
         failed += 0 if r["ok"] else 1
+    if args.deploy:
+        record = write_build_record(results)
+        print(f"  build record -> {record}" if record else
+              "  build record: NOT written (nothing was deployed)")
     return 1 if failed else 0
 
 

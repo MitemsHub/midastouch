@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from datetime import datetime, timedelta, timezone
@@ -43,6 +44,74 @@ SYMBOL = "XAUUSD"
 ARM_PATH = ROOT / "artifacts" / "live" / "armed.json"
 VALIDATION_PATH = ROOT / "artifacts" / "live" / "validation_record.json"
 ACCOUNTS_JSON = ROOT / "configs" / "mt5" / "accounts.json"
+
+#: The EA whose binary a chart loads, and the record `scripts/compile_midas.py --deploy`
+#: writes at the moment it produces it (see the leg below for why a record and not a
+#: re-computation).
+EA_SOURCE = ROOT / "mql5" / "MIDASTOUCH" / "MidastouchAI.mq5"
+EA_EX5_NAME = "MidastouchAI.ex5"
+BUILD_RECORD = ROOT / "artifacts" / "midas_build.json"
+
+
+def _sha256(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def deployed_build_state(source: Path, deployed: list[Path],
+                         record: Path | None = None) -> tuple[str, str]:
+    """Is the binary a chart would load the one this SOURCE produces?
+
+    Returns `("ok" | "stale" | "unconfirmed", detail)`. Three states, not two, and the
+    third is the point: a build whose provenance cannot be checked must not render green,
+    which is the same four-state discipline `add()` uses everywhere else here.
+
+    WHY THIS LEG EXISTS. A chart loads whatever `.ex5` sits in the Experts tree. On
+    2026-09-20 the terminal held a 20:17 build while the 23:02 source compiled clean at a
+    different size, and the only symptom was a byte count in a log line — so every pin in
+    this repo could describe a build that was not the one running. Timestamps alone catch
+    an OLD binary; they cannot catch one REPLACED after the fact, and MetaEditor is not
+    bit-reproducible, so the recorded pair is the only available provenance.
+    """
+    if not source.is_file():
+        return "stale", f"the EA source is missing from the tree ({source})"
+    missing = [str(p) for p in deployed if not p.is_file()]
+    if missing:
+        return "stale", (f"no binary where a chart loads it: {', '.join(missing)} — "
+                          f"attach would load nothing, or a build from another tree")
+    if record is not None and record.is_file():
+        try:
+            entry = json.loads(record.read_text(encoding="utf-8"))["targets"].get(
+                source.stem)
+        except (OSError, ValueError, KeyError, TypeError):
+            return "unconfirmed", (f"the build record at {record} cannot be read, so the "
+                                   f"deployed build's provenance is UNKNOWN")
+        if not entry:
+            return "stale", (f"the build record at {record} has no entry for "
+                             f"{source.stem}")
+        now_src = _sha256(source)
+        if entry.get("source_sha256") and now_src != entry["source_sha256"]:
+            return "stale", (f"the deployed build belongs to a DIFFERENT source: source "
+                             f"{now_src[:8]} vs deployed-from "
+                             f"{entry['source_sha256'][:8]} — re-run "
+                             f"scripts/compile_midas.py --deploy")
+        want = entry.get("ex5_sha256", "")
+        for p in deployed:
+            if want and _sha256(p) != want:
+                return "stale", (f"{p.name} is not the binary that was compiled: ex5 "
+                                 f"{_sha256(p)[:8]} vs recorded {want[:8]}")
+        return "ok", (f"{source.stem}: source {now_src[:8]} == the source the deployed "
+                       f"binary was built from ({len(deployed)} copy(s) hash-checked)")
+    # No record: timestamps are all we have, and they only prove the ORDER of writes.
+    newest_bin = max(p.stat().st_mtime for p in deployed)
+    if source.stat().st_mtime > newest_bin:
+        return "stale", (f"the deployed binary predates its source (source newer by "
+                         f"{(source.stat().st_mtime - newest_bin) / 60:.0f} min) and "
+                         f"there is no build record — re-run "
+                         f"scripts/compile_midas.py --deploy")
+    return "unconfirmed", (f"no build record at {record or '-'}: the binary is NEWER than "
+                           f"the source, but that is not proof it was built from it"
+                           f" (the compiler is not bit-reproducible) — run "
+                           f"scripts/compile_midas.py --deploy")
 
 
 #: The gold week as this venue trades it, in UTC. MEASURED, not assumed: the daily
@@ -172,6 +241,7 @@ def main() -> int:
         return 3
 
     now = datetime.now(timezone.utc)
+    term_data: Path | None = None
     checks: list[tuple[str, bool, str]] = []
     report: dict = {"utc": now.isoformat(timespec="seconds"),
                     "weekday": now.strftime("%A")}
@@ -208,6 +278,10 @@ def main() -> int:
             ai = mt5.account_info()
             add("terminal connection", ti is not None,
                 f"build {getattr(ti, 'build', '?')} @ {getattr(ti, 'path', '?')}")
+            if ti is not None and getattr(ti, "data_path", ""):
+                # The running terminal's OWN data folder, so the binary checked below is
+                # the one a chart here would load — not the one a sibling install holds.
+                term_data = Path(str(ti.data_path))
             if ti is not None:
                 add("AutoTrading enabled", bool(ti.trade_allowed),
                     "Tools > Options > Expert Advisors > Allow Algo Trading"
@@ -313,6 +387,27 @@ def main() -> int:
             (f"STALE: the task points at {task_path}, which is outside {ROOT} "
              f"or no longer exists. Re-run scripts/install_paper_task.ps1 -Apply."
              if not inside else f"target missing: {task_path}"))
+
+    # ---- 1c. the deployed EA build ---------------------------------------- #
+    #
+    # Everything else here can be true while a chart runs an engine nobody pinned: the
+    # source is the description, the .ex5 is what executes, and nothing in between is
+    # automatic. So the binary's provenance is a readiness leg, not a footnote.
+    deployed_bins = [ROOT / "mql5" / "MIDASTOUCH" / EA_EX5_NAME]
+    if term_data is not None:
+        deployed_bins.append(term_data / "MQL5" / "Experts" / "MIDASTOUCH" / EA_EX5_NAME)
+    build_state, build_detail = deployed_build_state(EA_SOURCE, deployed_bins, BUILD_RECORD)
+    if term_data is None:
+        # The repo copy is the record; the TERMINAL copy is what a chart loads. Checking
+        # one and calling it confirmed would be exactly the kind of green this repo audits
+        # out, so an unchecked terminal downgrades an otherwise clean build to WARN.
+        build_state = "ok" if build_state == "stale" else "unconfirmed"
+        build_detail += (" | the terminal's Experts tree could NOT be checked (no running "
+                         "terminal): the repo copy is not what a chart loads")
+    report["build"] = {"state": build_state, "detail": build_detail,
+                       "checked": [str(p) for p in deployed_bins]}
+    add("deployed EA build matches its source", build_state == "ok", build_detail,
+        blocking=(build_state == "stale"))
 
     # ---- 2. authorisation ------------------------------------------------ #
     gate = ArmingGate(arm_path=ARM_PATH, validation_path=VALIDATION_PATH,

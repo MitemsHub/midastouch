@@ -158,9 +158,38 @@ def stop_terminal(pids: list[int]) -> bool:
     return not terminal_pids_exact()
 
 
+#: The start-up config that attaches this program's Expert Advisor on launch. Written by
+#: `scripts/attach_chart_ea.py --startup-ini`. Named here because the relaunch below is the
+#: step that decides whether an arm survives a restart.
+ATTACH_INI = "midas_attach.ini"
+
+
+def attach_ini_path(data_folder: str | None = None) -> str | None:
+    """The EA-attaching start-up config for this install, or None when it does not exist."""
+    data = data_folder or data_folder_for_terminal()
+    if not data:
+        return None
+    ini = os.path.join(data, "config", ATTACH_INI)
+    return ini if os.path.isfile(ini) else None
+
+
 def relaunch_terminal() -> None:
-    """Relaunch the live terminal detached; equity/state restore on EA init."""
-    subprocess.Popen([terminal_exe()], close_fds=True)
+    """Relaunch the live terminal detached — WITH the attach config when one exists.
+
+    MEASURED 2026-09-21, and the reason this is not just `Popen([terminal_exe()])`. An
+    Expert Advisor is attached to a chart, and MT5 does not save a start-up chart: its own
+    documentation says "during the next start of the platform without the configuration
+    file, this chart will not be opened". So a plain relaunch after a crash, a reboot or a
+    watchdog recovery brings up a terminal with **no arm on it** — the ledger stops
+    advancing, and every liveness signal (the heartbeat timer, the watchdog's own flat/age
+    checks) reads exactly like a quiet market. Attaching on every relaunch is what makes
+    the arm survive the thing it is most likely to meet.
+    """
+    ini = attach_ini_path()
+    if ini:
+        subprocess.Popen([terminal_exe(), f"/config:{ini}"], close_fds=True)
+    else:
+        subprocess.Popen([terminal_exe()], close_fds=True)
     time.sleep(RELAUNCH_SETTLE_S)
 
 

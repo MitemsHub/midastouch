@@ -1088,12 +1088,77 @@ def preset_identity(chart_txt: str, preset_path: str | None = None) -> dict:
             "deferred": deferred}
 
 
+def config_attached_arms() -> list[tuple[str, str, str]]:
+    """Arms a `/config` `[StartUp]` launch attached, which no profile will ever hold.
+
+    MEASURED 2026-09-21, and this was a report that lied: the gold arm was RUNNING — its
+    own start-up line in `MQL5\\Logs\\20260921.log`, its ledger written at 01:15 — while
+    `[3b]` printed `no MIDASTOUCH chart attached - gold arm not running`. The profile scan
+    above cannot see it because MT5 does NOT save a start-up chart. Its own documentation
+    is explicit: "during the next start of the platform without the configuration file,
+    this chart will not be opened". So the arm that survives an unattended relaunch — the
+    one a VPS would run — is exactly the one the profile scan is blind to, and a liveness
+    signal that reads like a quiet market is the failure mode this repository keeps
+    paying for.
+
+    The fallback therefore reads evidence that does exist: the attach config written by
+    `scripts/attach_chart_ea.py --startup-ini`, the staged preset `ExpertParameters`
+    resolves to (the file the EA actually loads), and the arm's own ledger name, which
+    carries the symbol and the tag. Returns `(terminal_data_folder, chart_like_text,
+    note)`; the text is shaped exactly like a `.chr` so the same arm body, preset-identity
+    and ledger checks apply unchanged.
+    """
+    out: list[tuple[str, str, str]] = []
+    for td in sorted(glob.glob(os.path.join(TERM_ROOT, "*"))):
+        if not os.path.isdir(td):
+            continue
+        try:
+            ini_txt = open(os.path.join(td, "config", "midas_attach.ini"),
+                           encoding="ascii", errors="replace").read()
+        except OSError:
+            continue
+        if "MidastouchAI" not in ini_txt:
+            continue
+        params = re.search(r"(?m)^\s*ExpertParameters\s*=\s*(\S+)", ini_txt)
+        sym_m = re.search(r"(?m)^\s*Symbol\s*=\s*(\S+)", ini_txt)
+        per_m = re.search(r"(?m)^\s*Period\s*=\s*(\S+)", ini_txt)
+        if not params:
+            continue
+        sym = sym_m.group(1) if sym_m else "XAUUSD"
+        period = per_m.group(1) if per_m else "?"
+        staged = os.path.join(td, "MQL5", "Presets", params.group(1))
+        try:
+            staged_txt = open(staged, encoding="utf-8-sig", errors="replace").read()
+            have_staged = True
+        except OSError:
+            # No staged preset means the EA came up on CODE DEFAULTS under a certified
+            # name — the silent-preset-loss signature. An empty body makes preset
+            # identity report every repo pin missing (DRIFT), which is the honest verdict.
+            staged_txt, have_staged = "", False
+        note = (f"{period} start-up chart (attach config, no saved profile"
+                + (", staged preset present)" if have_staged
+                   else ", NO STAGED PRESET - RUNNING CODE DEFAULTS)"))
+        # The tag is read from the LEDGER the EA writes, never assumed: an arm that lost
+        # its preset still has a ledger, and guessing a tag would look up the wrong one.
+        ledgers = glob.glob(os.path.join(td, "MQL5", "Files", f"MIDASTOUCH_paper_{sym}_*.csv"))
+        for lp in sorted(ledgers):
+            tag = os.path.basename(lp)[len("MIDASTOUCH_paper_"):-len(".csv")]
+            tag = tag[len(sym) + 1:] if tag.startswith(sym + "_") else tag
+            out.append((td, f"symbol={sym}\n{staged_txt}\nInpArmTag={tag}\n", note))
+    return out
+
+
 def print_midas_section() -> bool:
     """[3b] MIDASTOUCH gold paper portfolio (§14, read-only). The MIDAS EA
     writes no telemetry by design — the ledgers are the evidence — so health
     per arm = chart attached + gold symbol + chart inputs byte-identical to
     the arm's own repo .set + ledger parses + ledger not stale. Every
     MidastouchAI chart on the terminal is an arm of the §14 portfolio.
+
+    TWO WAYS AN ARM IS ATTACHED. A saved profile chart (below) and a `/config`
+    start-up launch (`config_attached_arms`) are both real arms, and only the first
+    leaves a `.chr` behind — so a chart-less terminal that is demonstrably trading is
+    reported from the config route instead of as "not running" (2026-09-21).
 
     Correlation view (2026-09-17): the portfolio's modes can agree — M1t and
     M1m opened the same-direction position on the same bar on day one — so
@@ -1113,6 +1178,11 @@ def print_midas_section() -> bool:
                 continue
             if "MidastouchAI" in txt:
                 charts.append((td, txt))
+    origin_note: dict[str, str] = {}
+    if not charts:
+        for td, txt, note in config_attached_arms():
+            charts.append((td, txt))
+            origin_note[td] = note
     if not charts:
         print("  no MIDASTOUCH chart attached - gold arm not running")
         return False
@@ -1133,7 +1203,8 @@ def print_midas_section() -> bool:
     unhealthy = False
     for i, (td, txt) in enumerate(charts, 1):
         unhealthy |= _print_midas_arm(td, txt, multi=len(charts) > 1,
-                                      ordinal=i, positions=clustered)
+                                      ordinal=i, positions=clustered,
+                                      origin=origin_note.get(td))
     if clustered:
         print(paint("  [3b] correlation: multiple arms hold same-direction "
                     "positions — aggregate exposure is the cluster's SUM, "
@@ -1244,8 +1315,14 @@ def nofill_summary(path: str, now_ts: float | None = None) -> dict | None:
 
 
 def _print_midas_arm(td: str, txt: str, multi: bool = False,
-                     ordinal: int = 1, positions: list[dict] | None = None) -> bool:
-    """One arm's health block (the §13-era single-arm body, per arm)."""
+                     ordinal: int = 1, positions: list[dict] | None = None,
+                     origin: str | None = None) -> bool:
+    """One arm's health block (the §13-era single-arm body, per arm).
+
+    `origin` is set only for a `/config`-attached arm, which has no `.chr` to read a
+    chart period from: it replaces the `chart:` line so the block never claims a period
+    it did not observe.
+    """
     sym_m = re.search(r"^symbol=(\S+)", txt, re.M)
     period_m = re.search(r"^period_size=(\d+)", txt, re.M)
     tag_m = re.search(r"^InpArmTag=(\S*)\s*$", txt, re.M)
@@ -1265,7 +1342,10 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
     if multi:
         hdr += f" #{ordinal}"
     print(paint(hdr, "b"))
-    print(f"  chart: {sym} M{period} | tag {tag} | terminal {os.path.basename(td)[:8]}")
+    if origin:
+        print(f"  chart: {sym} {origin} | tag {tag} | terminal {os.path.basename(td)[:8]}")
+    else:
+        print(f"  chart: {sym} M{period} | tag {tag} | terminal {os.path.basename(td)[:8]}")
     problems: list[str] = []
     if "XAU" not in sym.upper() and "GOLD" not in sym.upper():
         problems.append(f"chart symbol {sym} is not gold - charter violation")
