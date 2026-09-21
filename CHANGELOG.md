@@ -1,5 +1,122 @@
 # Changelog
 
+## 2026-09-21 (later still) — the size the arm really takes, and the first-fill packet
+
+- **`scripts/gold_minlot_sizing.py`**: the deployability leg re-run at the size this account
+  actually trades. At 0.25% the $62.50 budget sits ABOVE the venue's min-lot floor, so the EA
+  trades 0.01 lot — and at the minimum lot the dollars a trade risks is its OWN stop distance
+  in dollars, varying trade to trade (mean $11.99, range $5.96-$63.47 on the venue's bars).
+  Measured: **worst simulated day -$158.33, 0 of 30 days beyond the $750 line, $591.67 of
+  headroom** (0.633% of the account vs the venue's 3%) — against the flat-0.25% row's
+  -$466.60/$283.40, which charged every trade the same dollars. The script re-derives the
+  frozen artifact's four flat rows and asserts they reproduce EXACTLY, so the two tables are
+  provably the same machinery and the only difference is the sizing model. Enabled by a new
+  backward-compatible `risk_usd_for(trade)` hook on `gold_governed_wfo.govern` (a constant
+  hook reproduces the flat path bit-for-bit, pinned).
+- **The decidability answer, in the same artifact**: lot size does NOT enter it. `t =
+  mean_r / (sd_r / sqrt(n))` — both in R, and R is size-free, so the dollars cancel. Size moves
+  the dollars at stake and the governor's vetoes; it cannot move the required sample by one
+  trade. At the measured effect (+0.4230R, sd 3.3110) that is 236 trades for t>=1.96 and 481
+  for 80% power at the measured 2.61 entries/calendar-day (0.50 years) — **and those are
+  post-hoc numbers that would UPGRADE the verdict**: the binding requirement is the
+  declaration's 766 (fixed before the run from the DISCOVERY set's +0.3221R), which is what
+  returns `POSITIVE, UNDERPOWERED`. The artifact says so in those words, and a test fails if
+  the post-hoc note ever disappears.
+- **`scripts/midas_first_fill_packet.py`**: the arm's first real fill, three ways at once —
+  the venue's deal history, the EA's ledger row and the EA's state stamp — field by field with
+  a verdict per field and every disagreement NAMED with both values. Fires from
+  `midas_watchdog.record_first_fill` (lazy import, no cycle) and writes
+  `artifacts/live/first_fill_packet.json`. The server-vs-UTC frame case is DISCLOSED ("agree
+  only after conversion") rather than silently converted on one side. Defect found while
+  writing it: a CLOSE row the venue cannot confirm fell through as AGREEMENT, i.e. the one
+  case where the ledger claims an exit the account does not hold was the one case that passed
+  silently; now a named DISAGREE, pinned both ways. Suite **1237 passed / 10 skipped**;
+  surface audit 0 dangling.
+
+## 2026-09-21 (later) — the supervisor stops reverting the arming record; replays get a frozen calendar
+
+- **Watchdog: the DRIFT remedy re-spliced the WRONG pin.** `resplice_pins` resolved its
+  source with `preset_for_tag(tag)` — arming defaulted OFF — while `check()` detects drift
+  against `preset_for_tag(tag, armed=arming["armed"])`. Measured on this machine: 16:52:20Z
+  the watchdog reported `[U25] chart InpLiveExecution=false (repo pin true)`, rewrote the
+  armed arm's staged preset from the PAPER pin (4564 bytes, paper header), restarted the
+  terminal, the EA booted `execution=PAPER`, and twenty minutes later the same drift fired
+  again — 4 lifetime restups, 20 EA inits today, every operator authorisation reverted
+  within one watchdog cycle. The remedy now resolves the armed pin by the record
+  (`_armed()`, unreadable -> paper, the only one of the two mistakes that cannot place an
+  order) and `check()` hands it the very pin the drift was detected against. Pinned both
+  ways in `tests/test_midas_watchdog.py` (2 new; both fail against the old code).
+- **Two calendars, two clocks.** `MidastouchAI.mq5` refreshes the rolling
+  `MIDASTOUCH_news_calendar.csv` live from `CalendarValueHistory(now-N, now+M)`, so its
+  coverage moves with the clock. Measured 17:52Z: that refresh cut it to a
+  2026-09-09..2026-10-09 window and the coverage the day's measurements stood on
+  (2026-01-02..2026-09-24, 2719 events / 369 HIGH) was gone — every replay of the certified
+  window then ran a stand-down with no event in it at all, and `test_parity_corpus`'s veto
+  pin went red against a rule that had not changed. The snapshot is now tracked
+  (`configs/calendars/`, sha256-pinned, with its provenance in a README), staged by
+  `midas_parity.stage_frozen_calendar()` under `MIDASTOUCH_news_calendar_frozen.csv`, named
+  by the pass inputs and declared `#property tester_file` in the EA beside the rolling one.
+  With no snapshot a pass REFUSES; it never falls back to the rolling file. Pins:
+  `tests/test_frozen_calendar.py` (6), `test_news_engine_mirror`/`test_news_calendar` input
+  pins, `test_parity_corpus` veto window re-pointed at the frozen file.
+- **Deployed and verified live.** `compile_midas.py --deploy` (0 errors / 0 warnings,
+  source 89d8a5cf == deployed binary), staged preset re-spliced from the LIVE pin, terminal
+  relaunched through the attach config: the journal shows `execution=LIVE`, `STATE LABEL ON`,
+  and `morning_status [3b]` re-verifies the preset byte-identical to the repo (44 inputs).
+  Suite **1210 passed / 10 skipped**; surface audit 0 dangling.
+- **Risk re-sized to the measured survivable size: `InpRiskPercent` 1.00 -> 0.25** on both
+  Upcomers presets. `scripts/gold_preset_upcomers.py` now pins it as `RISK_PERCENT` with the
+  measurement beside it: `artifacts/gold_prereg_no_target.json: sizing_scan_post_hoc` (the
+  governor inside, the venue's own bars, the 3% UTC-day line at $750) is the only scanned
+  size that breaches the daily rule on NO day — worst day -$466.60, **$283.40 of headroom**,
+  0 of 30 days beyond. 1.00% breached on 13 of 30 (-$804.84), 0.75% on 7, 0.50% on 10.
+  Recorded as an AMENDMENT in `artifacts/live/armed.json` (scope, `risk_statement`, and what
+  it does NOT do — it changes no gate result). At 0.25% ($62.50/R) the venue min-lot floor
+  (~$33 at this stop width) binds, so the arm's actual per-trade risk is 0.13%.
+- **Two diagnostics that named the wrong quantity**, both found while verifying the above:
+  the HUD's TF field read `tf=PERIOD_M15` and was read as contradicting the H1 chart when it
+  renders `InpEntryTF` (the entry/trigger TF; the EA never calls `Period()`/`_Period`, and
+  every series call names its timeframe) — now `entryTF=`, with the no-chart-period-read
+  invariant pinned; and the journal's `FLOOR TABLE ... equity@1%=$N` printed a percentage
+  computed at `InpRiskPercent`, correct only while that was 1.00 — it printed
+  `equity@1%=$13234` at 0.25%, i.e. a right number under a wrong label, now
+  `equity@%.2f%%` from the input. Pins: `test_midas_hud` (2), `test_midas_golive_grammar`
+  (1, plus the preset risk value), and `test_midas_p6_build`'s PERIOD_M15 scan now runs over
+  comment-stripped source (a comment naming PERIOD_M15 to explain why it is not read there
+  is not a site). Suite **1213 passed / 10 skipped**; deployed source 71886ca3 == binary.
+
+## 2026-09-21 — the entry's state is stamped into the ledger (v1.19e, InpRecordStateLabel)
+
+- EA: `InpRecordStateLabel` (default false, so the frozen baseline and every parity
+  run stay byte-identical) makes both paper OPEN writers append the SIGNAL bar's own
+  state as five end-of-row fields: `sig_ct, hour_utc, vol_ratio, news, off_min`.
+  Nothing reads them back as a gate — the stand-down is still `InpUseNewsFilter`,
+  untouched — and the stamp is deliberately OFF in strategy-tester runs so certified
+  parity ledgers cannot move.
+- Why: the pre-registered forward cell
+  (`docs/GOLD_PREREG_FORWARD_CELL_20260921.md`) labelled the arm's rows by looking each
+  signal bar up in the venue's data of record, which fails for any row newer than the
+  last history refresh (`UNLABELLABLE`) and for a ledger that outlives the terminal's
+  data folder. The recording arm now states its own axes; the rebuild is kept as the
+  control and the two are reconciled row by row, with disagreements listed.
+- The axes are single-sourced: the EA writes the RAW ratio/hour/proximity, and python
+  bins them with `gold_persistence_state.label_of_values` — the function that found the
+  cell. The EA's constants are pinned to the python values by
+  `tests/test_state_label_contract.py`, and the reader's offset into the row is pinned
+  against the writers' own format strings.
+- Measured, on the venue's bars: the stamped ratio reproduces
+  `wilder_atr`+`trailing_percentile` to a worst relative deviation of **2.1e-08** over 34
+  sampled bars spanning all three volatility bins (16,299 bars available), and the
+  volatility bin agrees 34/34. The 200-bar recursion warm-up is what buys that bound and
+  a test pins that removing it loses the agreement.
+- Also: `NewsRefreshIfDue` now keeps the calendar alive for a recording-only arm (gate
+  OFF + stamp ON), because a stale source would stamp `na` forever and `na` is not
+  `out`; both Upcomers presets (paper + the armed LIVE variant) pin the new input.
+- Pins: `tests/test_state_label_contract.py` (20), `tests/test_forward_cell_prereg.py`
+  (+1 end-to-end on a stamped record); updated `test_midas_telemetry` OPEN-format pins,
+  `test_midas_hud` input registry and `test_news_calendar` refresh-condition pin.
+  Suite 1201 passed / 10 skipped; EA compiles 0 errors / 0 warnings.
+
 ## 2026-09-18 — P6 build block executed: v1.19 InpEntryTF + staged TP-1.5R presets
 
 - EA v1.19: InpEntryTF input (default M15 = certified; M5 = P6 winner);

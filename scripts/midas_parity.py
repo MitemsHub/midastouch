@@ -124,6 +124,29 @@ R6_NEWS_MIRRORED = True
 SPREAD_FILE = "MIDASTOUCH_spread_M15.csv"
 
 NEWS_FILE = "MIDASTOUCH_news_calendar.csv"
+
+#: The FROZEN calendar — the one a REPLAY is judged against.
+#:
+#: WHY A SECOND FILE. `MidastouchAI.mq5` refreshes the rolling file from
+#: `CalendarValueHistory(now - N days, now + M days)`, so its coverage moves with the clock.
+#: MEASURED 2026-09-21: at 17:52Z that live refresh rewrote
+#: `<data>\MQL5\Files\MIDASTOUCH_news_calendar.csv` down to a 2026-09-09..2026-10-09 window,
+#: and the coverage the day's measurements were taken on (2026-01-02..2026-09-24, 2719
+#: events / 369 HIGH) was gone. Every replay of the certified window then ran against a
+#: calendar holding NO event in it at all: the stand-down silently became a no-op, and
+#: `tests/test_parity_corpus.py`'s veto pin — still correct — went red. A pass that judges a
+#: past window against the arm's rolling file is judging it against a source that moved, and
+#: the failure is silent in the direction that matters: a rule that stops acting looks like a
+#: rule with nothing to veto.
+#:
+#: So: two files, two clocks, named. The LIVE arm keeps refreshing the ROLLING one; every
+#: replay reads the FROZEN snapshot under its own name, which the EA declares
+#: `#property tester_file` beside the rolling one so the tester mirrors both and both sides
+#: of a pass open the same bytes.
+FROZEN_NEWS_FILE = "MIDASTOUCH_news_calendar_frozen.csv"
+FROZEN_NEWS_SOURCE = (Path(__file__).resolve().parents[1] / "configs" / "calendars"
+                      / "MIDASTOUCH_news_calendar_frozen_20260102_20260924.csv")
+
 NEWS_WINDOW_MIN = 15      # MUST equal the EA's InpNewsWindowMin
 NEWS_MAX_AGE_HOURS = 24   # MUST equal the EA's InpNewsMaxAgeHours
 NEWS_COVER_HOURS = 24     # MUST equal the EA's InpNewsCoverHours
@@ -550,7 +573,10 @@ def build_inputs(mode: str, t0: int, t1: int, offset_min: int = 0,
         # EA's TimeGMT() returns when it evaluates that bar. `news=False` is the certified
         # contract; `news=True` is the parity run that used to be refused at init.
         "InpUseNewsFilter": "true" if news else "false",
-        "InpNewsFile": NEWS_FILE,
+        # The FROZEN name, not the rolling one: this pass is a replay, and the EA opens
+        # whatever this says. The EA's own default stays the rolling file — that default is
+        # for the attached arm, which is not this.
+        "InpNewsFile": FROZEN_NEWS_FILE,
         "InpNewsWindowMin": str(NEWS_WINDOW_MIN),
         "InpNewsMaxAgeHours": str(NEWS_MAX_AGE_HOURS),
         "InpNewsCoverHours": str(NEWS_COVER_HOURS),
@@ -904,17 +930,66 @@ def news_stance_consistent(inputs: dict, engine_armed: bool) -> bool:
     return declared == bool(engine_armed)
 
 
-def news_calendar_path() -> Path | None:
-    """The calendar both engines read, in the install the pass will run on.
+def frozen_news_source() -> Path:
+    """The tracked snapshot every replay's news rule is judged against.
 
-    `<data>\\MQL5\\Files` is where the EA's `FileOpen(InpNewsFile)` resolves in the tester
-    (the terminal mirrors that folder into the agent sandbox read-only), and it is where
-    `MidasNewsProbe.mq5` writes. One file, so the two sides cannot disagree about the news.
+    This is the calendar the corpus was measured on — the data of record for the window,
+    exactly as the venue's own bars are — and it is READ-ONLY by construction: nothing in
+    the live arm writes this path.
+    """
+    return FROZEN_NEWS_SOURCE
+
+
+def live_news_calendar_path() -> Path | None:
+    """The ROLLING file the attached EA refreshes. Never a replay's source.
+
+    It exists so that "the live arm's calendar" is nameable without borrowing the replay
+    route's path — the two are different objects and only one of them is a measurement.
     """
     data = R.data_folder_for_terminal()
     if not data:
         return None
     return Path(data) / "MQL5" / "Files" / NEWS_FILE
+
+
+def stage_frozen_calendar() -> Path | None:
+    """Put the frozen snapshot where the tester mirrors it, and return that path.
+
+    `<data>\\MQL5\\Files` is where the EA's `FileOpen(InpNewsFile)` resolves in the tester,
+    and the terminal mirrors the folder into the agent sandbox for the names the EA declares
+    `#property tester_file`. Staging from the tracked snapshot (rather than trusting whatever
+    is lying in that folder) is what makes a replay's two sides read the same bytes.
+
+    Refuses structurally: no terminal install -> None (the caller reports that), and a
+    missing snapshot -> SystemExit, because a missing data-of-record file is a repo defect,
+    not a machine state, and the alternative — falling back to the rolling file — is the
+    failure this function exists to make impossible.
+    """
+    data = R.data_folder_for_terminal()
+    if not data:
+        return None
+    if not FROZEN_NEWS_SOURCE.is_file():
+        raise SystemExit(
+            f"REFUSING: the frozen calendar is missing from the repo "
+            f"({FROZEN_NEWS_SOURCE}). It is the data of record for a replay window, so the "
+            f"pass cannot be judged without it — and the live arm's rolling calendar is "
+            f"NOT an acceptable substitute.")
+    dst = Path(data) / "MQL5" / "Files" / FROZEN_NEWS_FILE
+    want = FROZEN_NEWS_SOURCE.read_bytes()
+    if not dst.is_file() or dst.read_bytes() != want:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(want)
+    return dst
+
+
+def news_calendar_path() -> Path | None:
+    """The calendar both engines read for a pass: the staged FROZEN snapshot.
+
+    A pass here is always a replay of a declared window over the venue's own history, so its
+    news rule has to be the rule that window was measured under. Reading the live rolling
+    file instead is how a replay silently stops being a measurement (see FROZEN_NEWS_FILE).
+    """
+    return stage_frozen_calendar()
 
 
 def news_events_for_pass(spec: dict) -> tuple:

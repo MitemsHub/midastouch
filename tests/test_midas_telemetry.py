@@ -63,10 +63,12 @@ def _callsites(fmt: str) -> int:
 # --- the frozen grammar heads, pinned positionally ----------------------------
 
 def test_paper_open_prefix_frozen_with_two_appends() -> None:
-    # 12 frozen fields + arm tag, then the v1.13 appends: atr, spread-at-open
+    # 12 frozen fields + arm tag, then the v1.13 appends: atr, spread-at-open,
+    # then the v1.19e state stamp (%s: five more fields, or nothing at all when the stamp is
+    # off — which is why it rides as one specifier and not five conditionals).
     assert _callsites(
-        "OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s,%.5f,%.5f"
-    ) == 1, "BAR OPEN must keep the frozen 12-field head + atr,spread appends"
+        "OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s,%.5f,%.5f%s"
+    ) == 1, "BAR OPEN must keep the frozen 12-field head + atr,spread appends + state stamp"
 
 
 def test_paper_close_prefix_frozen_with_two_appends() -> None:
@@ -122,7 +124,7 @@ def test_p5_counter_is_monotone_no_reset_path() -> None:
 def test_appends_are_at_end_of_row_only() -> None:
     code = strip_comments(src())
     # every telemetry-bearing format ends in the append specifiers
-    assert '"OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s,%.5f,%.5f"' in code
+    assert '"OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s,%.5f,%.5f%s"' in code
     assert '"CLOSE,%I64d,%I64u,%s,%.5f,%.3f,%.2f,%.2f,%.5f,%.5f,%.2f,%I64d,%I64d"' in code
     # and no inserted-in-the-middle variant exists (telemetry specifiers only
     # ever appear at the tail of a format string)

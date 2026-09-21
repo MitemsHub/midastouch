@@ -185,6 +185,21 @@ unrecovered restups in a row = stop and investigate.** A stale
 checks, so it is created only for a deliberate tester session and removed by the
 same tooling.
 
+### The arm's first real fill
+
+When the armed arm places its first order, three sources describe the same event and only
+then: the venue's own deal history, the EA's ledger row, and the state stamp the EA wrote on
+that row. `python scripts\midas_first_fill_packet.py` prints them side by side, field by
+field, and names every disagreement with both values — a count of "1 fill" cannot say which
+of the three is wrong. It runs automatically when the watchdog's completeness alarm first
+sees a fill (`midas_watchdog.record_first_fill`), and its verdict and disagreements land in
+`artifacts\live\first_fill.json` beside the raw rows.
+
+One case it deliberately does NOT convert silently: the ledger is stamped in broker SERVER
+time and the venue's deal times are the terminal's, so if the two agree only after the pinned
+offset the packet says so in words. A reader that converts one side and compares the result
+to the other can never be shown to be wrong.
+
 ---
 
 ## 5. The paper supervisor

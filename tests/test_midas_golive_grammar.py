@@ -73,9 +73,13 @@ def test_lopen_writer_shape_is_14_fields_and_parsers_agree(tmp_path: Path) -> No
     15-field parser contract against a 14-field writer — the first live fill
     would have been invisible to [3b] AND the restart gate) cannot recur."""
     specs = _writer_specs("LOPEN")
-    assert len(specs) == 14, specs
+    # 14 specifiers before v1.19e, 15 now: the state stamp rides as ONE appended specifier
+    # that expands to five comma-separated fields at fill time, or to NOTHING when the stamp
+    # is off (a tester row) — which is why the row is 14 fields or 19, never 15. The head is
+    # unchanged, and `tests/test_state_label_contract.py` pins the stamp's own shape.
+    assert len(specs) == 15, specs
     # %s%s (tag + _FLOORED suffix) join into one field: 13 comma fields + prefix
-    assert specs[-2:] == ["%s", "%s"]
+    assert specs[-3:] == ["%s", "%s", "%s"]
     parts = LOPEN.split(",")
     assert len(parts) == 14 and parts[0] == "LOPEN"
     # parser indices: posid [2], dir [5] — the writer's deal id sits at [4]
@@ -193,6 +197,32 @@ def test_live_grammar_view_corrupt_row_fails_closed(tmp_path: Path) -> None:
     bad = _write(tmp_path, ["LOPEN,not-an-epoch,x,y,x,1,1,1,1,0.1,1,1,1,LV"])
     v = ms.live_grammar_view(bad)
     assert v["problems"] and "corrupt row" in v["problems"][0]
+
+
+def test_the_floor_table_prints_the_risk_it_was_computed_at() -> None:
+    """The journal's FLOOR TABLE line names the quantity it divides by.
+
+    MEASURED defect, 2026-09-21. The format read `equity@1%%` while the value was
+    `risk_min / InpRiskPercent` — correct only while the configured risk happened to BE
+    1.00%. When the arm was re-sized to the measured survivable 0.25%, the line printed
+    `equity@1%=$13234`, a label saying 1% beside a number computed at 0.25%: the number was
+    right and only the label was wrong, which is the worst kind of diagnostic — a reader
+    checks the arithmetic, finds it sound, and keeps the wrong mental model.
+    """
+    src = (Path(__file__).resolve().parents[1] / "mql5" / "MIDASTOUCH"
+           / "MidastouchAI.mq5").read_text(encoding="utf-8", errors="replace")
+    # the FLOOR TABLE statement that CARRIES the value (there is an "unavailable" early
+    # return with its own FLOOR TABLE literal), and the whole call rather than one literal:
+    # the format is split across adjacent literals, so a regex that saw only the first
+    # asserted on half the statement
+    # the LITERAL, not the word: the explanatory comment beside this code quotes the old
+    # label, so a bare `equity@` search lands in a comment and then finds the wrong call
+    i = src.index('"equity@')
+    call = src[src.rindex("PrintFormat(", 0, i):src.index(");", i) + 2]
+    assert "%.2f%%=" in call, f"the percentage must be a printed argument: {call!r}"
+    assert "equity@1%" not in call and "equity@1%%" not in call, call
+    assert "InpRiskPercent" in call, (
+        "the printed percentage must be the configured risk the value was computed at")
 
 
 # --- §14 banner attribution: exec-aware matching, no phantom drift ----------------
@@ -329,5 +359,12 @@ def test_live_preset_is_dedicated_and_certified_shape() -> None:
     # the paper mirror is sized for the account it mirrors: the Deriv-era $50 equity
     # understated every lot by ~500x and would have made the only forward record we
     # have unrepresentative of the account it represents
-    assert vals["InpPaperEquity"] == "25000.0" and vals["InpRiskPercent"] == "1.0"
+    assert vals["InpPaperEquity"] == "25000.0"
+    # ...and sized to a MEASURED survivable size, not to the EA's 1.00 default. 1.00%
+    # breaches the venue's 3% daily line on 13 of 30 simulated days (worst -$804.84
+    # against $750); 0.25% breaches on none (worst -$466.60, $283.40 of headroom). The
+    # table is in scripts/gold_preset_upcomers.py (RISK_PERCENT) and the scan is in
+    # artifacts/gold_prereg_no_target.json; this pin is what forces a future re-size to
+    # be a DECISION with a comment rather than an edit.
+    assert vals["InpRiskPercent"] == "0.25"
     assert vals["InpLiveExecution"] == "false"

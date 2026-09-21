@@ -69,14 +69,20 @@ def test_live_path_fully_tf_parameterized():
     assert "iTime(_Symbol, InpEntryTF, 1)" in s
     assert "iBarShift(_Symbol, InpEntryTF, t, true)" in s
     # every remaining PERIOD_M15 literal must live in the BAR engine region
-    # (after the OnBarReplay marker) or in the spread-file default comment
-    bar_marker = s.find("void OnBarReplay()")
+    # (after the OnBarReplay marker) or in the spread-file / entry-TF default.
+    # COMMENTS ARE NOT SITES. The scan runs over comment-stripped source: a comment that
+    # names PERIOD_M15 to explain why it is NOT read there (the HUD's `entryTF=` note is one)
+    # is documentation, and flagging it made this test fail on a comment while the code it
+    # guards was correct — the same layout-pinning mistake that reddened
+    # tests/test_midas_hud.py the day the label gained its explanation.
+    code = re.sub(r"//[^\n]*", "", s)
+    bar_marker = code.find("void OnBarReplay()")
     assert bar_marker > 0
-    for m in re.finditer(r'PERIOD_M15', s):
-        line_start = s.rfind("\n", 0, m.start()) + 1
-        line = s[line_start:s.find("\n", m.start())]
+    for m in re.finditer(r'PERIOD_M15', code):
+        line_start = code.rfind("\n", 0, m.start()) + 1
+        line = code[line_start:code.find("\n", m.start())]
         in_bar = m.start() > bar_marker
-        in_default = "InpSpreadFile" in line or "InpEntryTF" in line or "guard" in line.lower()
+        in_default = "InpSpreadFile" in line or "InpEntryTF" in line
         assert in_bar or in_default, f"stray PERIOD_M15 outside the BAR engine: {line.strip()}"
 
 

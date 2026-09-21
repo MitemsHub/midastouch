@@ -510,3 +510,77 @@ Changed, all of it on 2026-09-21:
 
 Full record and measurements: `docs/FROZEN_CORPUS_20260921.md` and
 `docs/PARITY_ENTRY_SIGNALS_20260921.md` §5c.
+
+---
+
+## 17. Amendment 8 — the gate counts the search (2026-09-21, registered BEFORE the next
+selection study)
+
+**The defect.** §6's `V6 t>=1.5` is a threshold for ONE hypothesis applied to the best of a
+search: each fold selects its configuration from the whole 24-config grid, and the sweep
+harness compares 168 geometries. The largest t a search of that size produces **under the
+null** is not zero — measured here by seeded Monte Carlo, the 95th percentile of max |z| is
+**3.07 at 24 trials and 3.61 at 168**. A gate at 1.5 is below the noise ceiling and is
+therefore incapable of failing a search. Harvey et al. (2016) reach the same place from the
+data-mining side (~3.0, not 2.0).
+
+**The amendment.** `gold_walkforward.criteria()` gains **V7 — `t > selection threshold`**,
+where the threshold is `selection_threshold(n_trials)` = the 95th percentile of max |z| over
+`n_trials` draws, and `n_trials` defaults to `len(configs())`. The search size used is
+recorded with the result (`trials_searched`, `stats._t_req`), so a reader can see how many
+alternatives the reported best was drawn from.
+
+**It can only tighten.** At N=1 the threshold is 1.96, so V7 contains V6 rather than
+replacing it with a different rule; V6 is retained unchanged as history. The frozen verdict
+was already NOT VALIDATED and stays so: applied to the record's own stored stats
+(t=+0.524, 30 folds) V7 returns FAIL.
+
+**The frozen artifact is NOT regenerated.** Re-running `gold_walkforward.py` on today's
+bars would move V1-V6 as well — that is a re-baseline, not an amendment — so the amended
+verdict is computed from `artifacts/gold_wfo.json`'s own stored numbers.
+
+**What this retires.** Every entry-side family this program has searched is now measurable
+against its own search cost, and all of them are below it: entry geometry governed t=+0.40
+and ungoverned t=+0.94 against 3.61; the trigger's best conditional cell t=+2.36 against
+3.07. The one measurement that clears its threshold is the exit-geometry comparison
+(`fixed stop 1.0, no target`, +0.3221R over 912 trades, t=+3.06 against 2.90 at 14
+policies) — and its deployability under walk-forward selection was already falsified. The
+findings, the required-sample arithmetic and the open gaps (PBO/CSCV unimplemented, DSR an
+upper bound, two headline samples unstored) are in
+`docs/GOLD_DECIDABILITY_AUDIT_20260921.md`.
+
+---
+
+## 18. Amendment 9 — a candidate that came off a table pays for the table (2026-09-21,
+registered BEFORE the tight-stop evaluation ran)
+
+**The rule.** When a candidate is selected by taking the best row of a list this program has
+already printed — a sensitivity table, a sweep, a cell study — its threshold is
+`selection_threshold(n)` where **n is the number of distinct candidates that list compared**, and
+`n` must be read from the record that performed the selection (`trials_from_parent` in
+`scripts/gold_prereg_tight_stop.py`) rather than asserted. Declaring such a candidate "N=1" because
+it was *written down* as a single rule is the post-hoc move Amendment 8 exists to price, and it is
+cheaper to detect here than in a drawdown.
+
+**The two hurdles, and the wording.** A candidate whose search is smaller than the program's whole
+history is reported against **both**: its own search size and the program-wide entry-geometry scale
+(168 → 3.612). The wording for the mixed case is fixed: *"clears its own search; does not clear the
+program-wide hurdle"*, and the weaker number is never quoted alone.
+
+**The criterion must be declared, because the criteria disagree.** Measured on the same 658 entries
+across 8 stop multiples, the **mean** is maximised by the tightest stop (0.694×ATR, +0.6031R) and
+the **t** by the widest (2.0×ATR, +4.39). A candidate may not be re-described later as having been
+selected on the criterion that now flatters it.
+
+**Applied 2026-09-21 (the tight stop).** Own search 8 stops → threshold 2.725; program-wide →
+3.612. Result t=+3.53 at n=658: clears its own search, **fails the 673-trade power requirement and
+the program-wide hurdle**, and its paired advantage over the conventional stop is **+0.1801R at
+t=+2.46 — below its own threshold**, so the geometry effect is real, positive, and not itself
+significant. Verdict recorded as `POSITIVE, UNDERPOWERED | does not clear the program-wide hurdle`.
+Full record: `docs/GOLD_PREREG_TIGHT_STOP_20260921.md` and
+`docs/GOLD_TIGHT_STOP_TEST_20260921.md`.
+
+**What it retired.** Chasing the stop. Across all eight multiples the t sits in a 3.17-4.39 band
+while the mean trades off against the dispersion — the stop is a constant factor, not the missing
+piece. The four exit studies now agree that the open question is the **persistence** of the edge,
+not its geometry.

@@ -29,7 +29,11 @@ Per closed trade, verified against the frozen rules:
                      plus reason sanity (TP >= +1.9, SL <= -0.95).
   D. veq continuity— CLOSE veq == previous veq + pnl (0.01); heartbeat EQ
                      rows must agree with the running virtual equity.
-  E. format        — OPEN12/CLOSE8 wire contract, ticket pairing, ERA row.
+  E. format        — OPEN12/CLOSE8 wire contract, ticket pairing, ERA row, and the
+                     v1.19e STATE TAIL (5 appended fields: sig_ct, hour_utc,
+                     vol_ratio, news, off_min) read but never required — a row
+                     written before the stamp existed carries none, and a tester row
+                     never will, while a HALF-WRITTEN tail is reported.
 
 Exit codes: 0 compliant (or nothing closed yet), 1 violations, 2 unreadable.
 Stdlib + the engine's own loaders only.
@@ -69,9 +73,67 @@ def utc_of_server(epoch: int) -> datetime | None:
 TOL_R = 0.01
 TOL_VEQ = 0.01
 TOL_STOP_PCT = 0.02              # live feed vs data-of-record tolerance
-DEFAULT_SESSION = (12, 16)       # Amendment 4/5 arm policy
+#: The arm's session is a property of its PRESET, not of this audit. This file used to carry
+#: `DEFAULT_SESSION = (12, 16)` -- Amendment 4/5 of the RETIRED micro arm -- as a flag default, so
+#: running the audit with no arguments against the $25,000 arm flagged every entry before 12:00 UTC
+#: as a session violation. Default to the preset the arm is deployed under; `--session` overrides,
+#: and a preset that cannot be read leaves the check UNVERIFIABLE rather than graded against a rule
+#: the arm does not run.
+ARM_PRESET = os.path.join("mql5", "MIDASTOUCH", "MidastouchAI_upcomers_gold_LIVE.set")
 FRIDAY_CUTOFF = 20               # protocol (entries)
+#: Kept only so a caller that explicitly wants the retired Amendment's gate can still name it.
+DEFAULT_SESSION = (12, 16)
 WIRE_OPEN_N, WIRE_CLOSE_N = 12, 8
+#: The frozen 12-field head + the v1.13 appends (atr_at_entry, spread_at_open): where the
+#: v1.19e state tail starts on an OPEN row. Appended, never inserted, so this is an index.
+WIRE_OPEN_TELEM_N = 14
+#: The EA's state stamp (`StateAppend()` in MidastouchAI.mq5), in order. This module is the
+#: wire-contract owner, so the list lives here and the research side imports it rather than
+#: re-typing it — `gold_persistence_state.STATE_FIELDS` is this tuple.
+STATE_FIELDS = ("sig_ct", "hour_utc", "vol_ratio", "news", "off_min")
+STATE_N = len(STATE_FIELDS)
+
+
+def read_state_tail(fields: list[str]) -> dict:
+    """The EA's own state stamp from an OPEN row, or {} when the row carries none.
+
+    ABSENCE IS NOT A DEFECT. Every row written before v1.19e has no tail, and a strategy-tester
+    row never will (the stamp is deliberately off there so parity ledgers stay byte-identical),
+    so a reader must treat "no tail" as "the label has to be rebuilt from the data of record".
+
+    A HALF-WRITTEN TAIL IS A DEFECT, and it is reported by the caller rather than half-read here:
+    a row carrying some of the five fields is a partial write, and silently labelling it would put
+    a guessed axis into a statistic.
+
+    The sentinels travel as they are. `news == "na"` means the EA could not assert the news axis
+    and `hour_utc == -1` means no server offset could be vouched for; a consumer that needs either
+    axis must REFUSE on those values rather than default them, because `na` is not `out`.
+    """
+    tail = fields[WIRE_OPEN_TELEM_N:]
+    if not tail:
+        return {}
+    if len(tail) < STATE_N:
+        return {"malformed": f"{len(tail)} state field(s), expected {STATE_N}"}
+    try:
+        return {"sig_ct": int(tail[0]), "hour_utc": int(tail[1]),
+                "vol_ratio": float(tail[2]), "news": tail[3].strip(), "off_min": int(tail[4])}
+    except (TypeError, ValueError) as exc:
+        return {"malformed": f"unreadable state field ({exc})"}
+
+
+def session_from_preset(path: str) -> tuple[int, int] | None:
+    """The session gate the preset actually declares, or None when it cannot be read.
+
+    Reading it from the preset is what keeps this audit grading the arm that is RUNNING: the literal
+    it replaces came from a different arm's amendment, and a stale rule inside the checker is how a
+    correct trade gets reported as a violation.
+    """
+    try:
+        import set_chart_preset as scp
+        vals = scp.parse_preset(path)
+        return (int(vals["InpSessionStartHour"]), int(vals["InpSessionEndHour"]))
+    except Exception:
+        return None
 
 
 def discover_ledger() -> str | None:
@@ -91,8 +153,9 @@ def read_ledger(path: str) -> dict:
     eras: list[str] = []
     problems: list[str] = []
     open_rows: dict[str, dict] = {}
-    veq = 50.0                    # virtual start (playbook floor-zone policy)
+    veq: float | None = None      # the running virtual equity, as the FILE states it
     veq_initialized = False
+    opening_eq: float | None = None   # the first EQ row seen BEFORE any close: the start
     try:
         with open(path, encoding="utf-8-sig", errors="replace") as fh:
             for ln, line in enumerate(fh, 1):
@@ -106,9 +169,11 @@ def read_ledger(path: str) -> dict:
                     continue
                 if p[0] == "EQ" and len(p) >= 2:
                     v = float(p[1])
-                    if veq_initialized and abs(v - veq) > TOL_VEQ:
+                    if veq_initialized and veq is not None and abs(v - veq) > TOL_VEQ:
                         problems.append(
                             f"line {ln}: EQ snapshot {v:.2f} != running veq {veq:.2f}")
+                    if not trades and opening_eq is None:
+                        opening_eq = v          # an EQ row before any close IS the opening equity
                     veq = v
                     veq_initialized = True
                     continue
@@ -121,7 +186,10 @@ def read_ledger(path: str) -> dict:
                         "side": int(p[3]), "entry": float(p[4]), "sl": float(p[5]),
                         "tp": float(p[6]), "vol": float(p[7]), "risk": float(p[8]),
                         "stop_d": float(p[9]), "hold": int(p[10]), "tag": p[11],
+                        "state": read_state_tail(p),
                     }
+                    if "malformed" in open_rows[p[2]]["state"]:
+                        problems.append(f"line {ln}: state stamp {open_rows[p[2]]['state']['malformed']}")
                 elif p[0] == "CLOSE":
                     if len(p) < WIRE_CLOSE_N:
                         problems.append(f"line {ln}: CLOSE row has {len(p)} fields (<{WIRE_CLOSE_N})")
@@ -134,6 +202,12 @@ def read_ledger(path: str) -> dict:
                               "exit": float(p[4]), "r": float(p[5]),
                               "pnl": float(p[6]), "close_veq": float(p[7]),
                               "close_line": ln})
+                    # The equity path ADVANCES at a close. Without this line `veq` stayed at the
+                    # pre-close snapshot, so every post-close heartbeat was compared against it and
+                    # a correct ledger reported one bogus "EQ snapshot != running veq" per trade --
+                    # noise printed exactly where an operator reads for real defects.
+                    veq = float(p[7])
+                    veq_initialized = True
                     trades.append(o)
                 elif p[0] in ("LOPEN", "LCLOSE"):
                     problems.append(
@@ -143,7 +217,27 @@ def read_ledger(path: str) -> dict:
         raise SystemExit(f"cannot read ledger {path}: {e}")
     if open_rows:
         problems.append(f"{len(open_rows)} OPEN row(s) without CLOSE (open position(s), not a violation — listed)")
-    return {"trades": trades, "eras": eras, "problems": problems, "veq_end": veq}
+    return {"trades": trades, "eras": eras, "problems": problems, "veq_end": veq,
+            "veq_start": _equity_start(trades, veq, opening_eq)}
+
+
+def _equity_start(trades: list[dict], veq_end: float | None,
+                  opening_eq: float | None = None) -> float | None:
+    """The equity the ledger STARTED from, for the per-trade continuity chain.
+
+    This used to be the literal 50.0 — the retired micro arm's virtual start — while the $25,000
+    arm's ledger says `EQ,25000.00`. The result was a VIOLATION on trade #1 of a perfect ledger
+    ("close veq 25020.00 != prev 50.00 + pnl +20.00"), which is precisely the first fill this
+    audit exists to grade. Take the start from the file: its first EQ snapshot, else (when the
+    ledger carries no EQ row at all) the first trade's own implied previous equity, and never a
+    constant belonging to an arm this ledger does not belong to.
+    """
+    if opening_eq is not None:
+        return opening_eq
+    if not trades:
+        return veq_end
+    first = trades[0]
+    return round(first["close_veq"] - first["pnl"], 2)
 
 
 def expected_stop(stop_mult: float, h1: list[dict], h1_atr: list[float],
@@ -168,7 +262,7 @@ def expected_stop(stop_mult: float, h1: list[dict], h1_atr: list[float],
         h1[ans]["time"], tz=timezone.utc).strftime("%m-%d %H:%M")
 
 
-def audit_trade(t: dict, session: tuple[int, int], stop_mult: float,
+def audit_trade(t: dict, session: tuple[int, int] | None, stop_mult: float,
                 h1: list[dict], h1_atr: list[float]) -> list[str]:
     """All checks for one closed trade; returns violation strings."""
     v: list[str] = []
@@ -181,7 +275,10 @@ def audit_trade(t: dict, session: tuple[int, int], stop_mult: float,
         t["frame_note"] = (f"session check UNVERIFIABLE: {month} contains a DST step, so the "
                            f"venue's offset is not a single number for it")
     else:
-        if not (session[0] <= dt.hour < session[1]):
+        if session is None:
+            t["frame_note"] = ("session check UNVERIFIABLE: no session gate resolved — pass "
+                               "--session, or make the arm's preset readable")
+        elif not (session[0] <= dt.hour < session[1]):
             v.append(f"SESSION: signal bar opens {dt:%H:%M} UTC outside {session[0]:02d}-{session[1]:02d}")
         if dt.weekday() == 4 and dt.hour >= FRIDAY_CUTOFF:
             v.append(f"FRIDAY CUTOFF: signal at {dt:%H:%M} UTC Friday >= {FRIDAY_CUTOFF}:00")
@@ -211,7 +308,7 @@ def audit_trade(t: dict, session: tuple[int, int], stop_mult: float,
     return v
 
 
-def run(ledger: str, session: tuple[int, int], stop_mult: float,
+def run(ledger: str, session: tuple[int, int] | None, stop_mult: float,
         data_dir: str, as_json: bool) -> int:
     led = read_ledger(ledger)
     # The VENUE's own H1 — the data of record, and the same SERVER frame the ledger is stamped
@@ -223,7 +320,7 @@ def run(ledger: str, session: tuple[int, int], stop_mult: float,
     h1_atr = S.sma_atr(h1) if h1 else []
     # veq continuity needs the running equity in trade order — ledger CLOSE
     # order is chronological by construction (append-only file)
-    prev = 50.0
+    prev = led["veq_start"]
     for t in led["trades"]:
         t["prev_veq"] = prev
         prev = t["close_veq"]
@@ -279,7 +376,11 @@ def run(ledger: str, session: tuple[int, int], stop_mult: float,
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ledger", default=None, help="ledger path (default: auto-discover)")
-    ap.add_argument("--session", default=f"{DEFAULT_SESSION[0]}-{DEFAULT_SESSION[1]}")
+    ap.add_argument("--session", default=None,
+                    help="UTC session as lo-hi (default: the gate the arm's preset declares; "
+                         "UNVERIFIABLE if that cannot be read)")
+    ap.add_argument("--preset", default=ARM_PRESET,
+                    help="the preset whose session gate this ledger is graded against")
     ap.add_argument("--stop-mult", type=float, default=2.0)
     ap.add_argument("--data-dir", default=S.DATA_DIR)
     ap.add_argument("--json", action="store_true")
@@ -288,7 +389,17 @@ def main() -> int:
     if not led or not os.path.exists(led):
         print("no MIDASTOUCH paper ledger found")
         return 2
-    s = tuple(int(x) for x in a.session.split("-"))
+    if a.session:
+        s = tuple(int(x) for x in a.session.split("-"))
+    else:
+        preset = a.preset if os.path.isabs(a.preset) else os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", a.preset)
+        s = session_from_preset(preset)
+        if s is None:
+            print(f"  note: no session gate resolvable from {a.preset} — the session check is "
+                  f"UNVERIFIABLE for this run (pass --session to grade one explicitly)")
+        else:
+            print(f"  session gate: {s[0]:02d}-{s[1]:02d} UTC, read from {a.preset}")
     return run(led, s, a.stop_mult, a.data_dir, a.json)
 
 

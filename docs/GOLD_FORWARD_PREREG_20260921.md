@@ -20,10 +20,16 @@ is unforgiving:
 | best geometry found in the 168-point sweep | +0.032 | 1.37 | 0.250 | a +0.50R/trade edge |
 
 At n = 30 the standard error is ~0.20R/trade, so what a 30-trade record can certify is an
-edge **five to six times larger than any this program has measured**. A positive 30-trade
-record is therefore consistent with the null at roughly the same rate a coin is, and
+edge **three to fifteen times larger than the effects this program has measured** — 3.4x the
+armed mode's +0.115R, 5.7x the window's +0.068R, 15x the sweep's best +0.032R. A positive
+30-trade record is therefore consistent with the null at roughly the same rate a coin is, and
 "closed 30/30, totalR positive" must never be read as a pass. That sentence is the reason
 this file exists.
+
+**Corrected 2026-09-21:** this paragraph previously said "five to six times larger than any
+this program has measured". That is true of the +0.068R row (5.7x) and false of the armed mode
+(3.4x), which is the row the live override actually runs; the multiples are now stated per row
+and pinned in `tests/test_gold_forward_prereg.py`.
 
 ## 2. The substitution rate, stated before the data arrives
 
@@ -70,7 +76,9 @@ Any one of these is sufficient, and each is checkable today:
 
 `tests/test_gold_forward_prereg.py` pins the arithmetic in §1–§3 against the harness's own
 `power_trades()`, so a future edit that quietly changes the declared effect size or the kill
-threshold fails the suite. The paper arm's own ledger line (`closed: N/30`) is explicitly
+threshold fails the suite. **Added 2026-09-21:** that file did not exist until then — this
+paragraph named an enforcing mechanism that was not there, and a tree-wide guard now fails any
+document that does it again (`tests/test_operator_docs.py`, the test-reference rule). The paper arm's own ledger line (`closed: N/30`) is explicitly
 **not** the test: it reports the sample floor, and the arm's status is reported from
 `artifacts/live/armed.json` by `scripts/morning_status.py` and `scripts/live_readiness.py`.
 

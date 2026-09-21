@@ -372,7 +372,12 @@ def test_the_veto_window_contains_entries_the_stand_down_removes():
     _needs_data()
     spec = P._window_spec("veto")
     data = P.python_build_data(offset_min=P.assert_server_offset(spec), corpus="venue")
-    cal = NC.read_calendar(P.news_calendar_path())
+    # The FROZEN snapshot, which is what the pass itself reads. It used to read
+    # `news_calendar_path()` — the LIVE rolling file the attached EA refreshes — so this
+    # pin was quietly testing whatever the arm's last refresh happened to cover. Measured
+    # 2026-09-21 17:52Z: that refresh narrowed the live file to 2026-09-09..2026-10-09 and
+    # this test (and every replay of the window) lost its news events entirely.
+    cal = NC.read_calendar(P.frozen_news_source())
     events = NC.top_tier_events(cal)
     prev_basis, prev_news = M._BASIS, M._NEWS
     M.use_basis(P.ACCOUNT_BASIS_USD)

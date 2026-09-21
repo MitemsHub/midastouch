@@ -50,7 +50,16 @@ terraform.exe
 terraform.zip
 terraform
 .agents/
-.claude/
+# `.claude/*` and not `.claude/`: an excluded DIRECTORY cannot be re-included further
+# down (git never descends into it), so `!.claude/skills/` under `.claude/` silently did
+# nothing -- measured 2026-09-21 with `git check-ignore -v`. Excluding the contents
+# instead leaves the directory traversable and the negation below actually applies.
+.claude/*
+# The skills themselves ship. `AGENTS.md` (tracked) points at `.claude/skills/`, and a
+# named skill git does not carry is the same trap as a document naming a script that
+# does not exist: the next clone gets the pointer and not the file.
+!.claude/skills/
+!.claude/skills/**
 skills-lock.json
 .env.local
 logs/

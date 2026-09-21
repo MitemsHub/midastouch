@@ -45,6 +45,16 @@
 // show the gate working, so the file is staged exactly like the spread series; when it
 // is absent the pass simply runs without it, which is the missing-file case.
 #property tester_file "MIDASTOUCH_news_calendar.csv"
+// And the FROZEN calendar (v1.19e), which is the one every REPLAY is judged against.
+// The rolling name above is refreshed LIVE from CalendarValueHistory(now +/- days), so its
+// coverage moves with the clock: measured 2026-09-21 17:52Z, that refresh cut the live file
+// down to a 2026-09-09..2026-10-09 window and left the certified window's replays with a
+// calendar holding no event in it at all -- the stand-down silently became a no-op. A replay
+// is measured against the calendar its window was measured under, so the harness stages that
+// snapshot (configs/calendars/MIDASTOUCH_news_calendar_frozen_20260102_20260924.csv) under
+// this second name and points InpNewsFile at it. This property is what makes the tester
+// mirror it into the agent sandbox; python reads the same staged bytes.
+#property tester_file "MIDASTOUCH_news_calendar_frozen.csv"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -89,6 +99,7 @@ input int                  InpNewsWindowMin    = 15;    // +/- minutes around a 
 input int                  InpNewsMaxAgeHours  = 24;    // refuse entries when the calendar is older than this
 input int                  InpNewsCoverHours   = 24;    // refuse entries unless it covers this far ahead
 input int                  InpNewsRefreshHours = 6;     // re-read the venue calendar this often (live only; 0 = never refresh)
+input bool                 InpRecordStateLabel = false; // stamp the entry's state (vol ratio, UTC hour, news) into the ledger OPEN row
 
 input int                 InpStaleMinutes     = 30;    // no M15 bar for N min -> stand down
 input group "=== Risk ==="
@@ -165,6 +176,9 @@ datetime       g_pending_sigct = 0;
 int            g_pending_dir = 0;
 double         g_pending_stop = 0.0;
 int            g_pending_hour = 0, g_pending_mac = 0;
+// v1.19e: the SIGNAL bar the pending (or the fill just taken) belongs to. The state stamp
+// is about the signal, never the fill bar — the study's cell is the entry bar's state.
+datetime       g_sig_bar_epoch = 0;
 datetime       g_pp_close_ct = 0;    // close-time bookkeeping of the managed bar (BAR mode)
 double         g_pp_open_sp = 0.0;   // recorded spread charged on entry (BAR mode)
 double         g_pp_dpu = 0.0;       // $ per 1.0 price-unit per 1.0 lot (stored at fill)
@@ -251,7 +265,12 @@ void HudUpdate()
    string pos = g_pp_open ? (g_pp_dir > 0 ? "LONG" : "SHORT")
               : (g_lv_posid != 0 ? (g_lv_dir > 0 ? "LONG(live)" : "SHORT(live)") : "flat");
    Comment(StringFormat(
-      "MIDASTOUCH %s | mode=%d %s | tf=%s | session %02d-%02d UTC\n"
+      // `entryTF=` and not `tf=`: the field is `EnumToString(InpEntryTF)`, the ENTRY/trigger
+      // timeframe — NOT the chart period, which this EA never reads (nothing calls
+      // Period()/_Period; every series call names its timeframe). Measured 2026-09-21: the
+      // label read `tf=PERIOD_M15` on an H1 chart and read as a contradiction. The
+      // invariant is pinned by tests/test_midas_hud.py.
+      "MIDASTOUCH %s | mode=%d %s | entryTF=%s | session %02d-%02d UTC\n"
       "vEq: $%.2f (start $%.2f) | pos: %s\n"
       "trades: %d/30 (gate reads at n=60) | wins %d | cumR %+.2f\n"
       "eval: %d no-trade bars | V: mis %d no-trg %d sess %d spr %d\n"
@@ -454,8 +473,16 @@ void PrintFloorTable()
    double stop = InpSlAtrMult * atr;
    double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double risk_min = stop * dpu * vmin;
-   PrintFormat(VersionTag() + "FLOOR TABLE %s: stop=%.2f ($%.2f) minlot=%.2f risk@minlot=$%.2f equity@1%%=$%.0f",
-               _Symbol, stop, stop, vmin, risk_min, risk_min / MathMax(InpRiskPercent / 100.0, 0.0001));
+   // The percentage is PRINTED, not assumed. This read `equity@1%%` while the value was
+   // `risk_min / InpRiskPercent` — correct only while the configured risk happened to be
+   // 1.00%. MEASURED 2026-09-21, after the risk was re-sized to 0.25%: the line read
+   // `equity@1%=$13234`, i.e. a label saying 1% beside a number computed at 0.25%. A
+   // diagnostic that names the wrong quantity is worse than no diagnostic, because the
+   // number is right and only the label is wrong.
+   PrintFormat(VersionTag() + "FLOOR TABLE %s: stop=%.2f ($%.2f) minlot=%.2f risk@minlot=$%.2f "
+               "equity@%.2f%%=$%.0f",
+               _Symbol, stop, stop, vmin, risk_min, InpRiskPercent,
+               risk_min / MathMax(InpRiskPercent / 100.0, 0.0001));
 }
 
 bool g_debug_done = false;
@@ -674,6 +701,25 @@ int OnInit()
       string news_init = NewsSourceProblem();
       PrintFormat(VersionTag() + "NEWS FILTER ON — source %s: %s", InpNewsFile,
                   (news_init == "") ? "usable" : news_init);
+   }
+   if(InpRecordStateLabel)
+   {
+      if(MQLInfoInteger(MQL_TESTER))
+      {
+         // A silent no-op is the failure mode this file exists to prevent: say which
+         // runs stamp and which do not, and why.
+         Print(VersionTag() + "STATE LABEL: ON but NOT STAMPED — strategy-tester ledgers "
+               "are the parity contract's artifacts and stay byte-identical; the python "
+               "side labels those rows from the corpus it already has.");
+      }
+      else
+      {
+         NewsRefreshIfDue(TimeGMT());     // a stale source records `na`, not news
+         string state_src = NewsSourceProblem();
+         PrintFormat(VersionTag() + "STATE LABEL ON — OPEN rows carry "
+                     "sig_ct,hour_utc,vol_ratio,news,off_min (%s)",
+                     (state_src == "") ? "calendar usable" : state_src);
+      }
    }
    string symU = _Symbol;
    StringToUpper(symU);
@@ -1054,10 +1100,10 @@ bool BarFillAndManage(datetime t)
          g_pp_open_sp = sp_open;            // python pos["sp"]
          g_pending_valid = false;
          filled = true;
-         PaperLog(StringFormat("OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s,%.5f,%.5f",
+         PaperLog(StringFormat("OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s,%.5f,%.5f%s",
                   (long)t, g_pp_ticket, g_pp_dir, fill, g_pp_sl, g_pp_tp,
                   lots, eff_risk, stop_d, InpTimeoutMinutes * 60, InpArmTag,
-                  stop_d / InpSlAtrMult, sp_open));   // v1.13 R10: atr_at_entry,spread_at_open (end-of-row append)
+                  stop_d / InpSlAtrMult, sp_open, StateAppend()));   // v1.13 R10: atr_at_entry,spread_at_open | v1.19e: the state stamp
       }
    }
 
@@ -1256,6 +1302,7 @@ void BarEvaluateSignal(datetime sig, double so, double sh, double sl_, double sc
 
    g_pending_valid  = true;
    g_pending_sigct  = sig + 900;
+   g_sig_bar_epoch  = sig;             // v1.19e state stamp: the signal bar, not the fill bar
    g_pending_dir    = direction;
    g_pending_stop   = stop_d;
    g_pending_hour   = dt.hour;
@@ -1443,6 +1490,177 @@ string NewsVetoReason(datetime now)
 }
 
 //+------------------------------------------------------------------+
+//| RECORDED STATE LABEL (v1.19e) — the entry's STATE, stamped into  |
+//| the paper ledger's OPEN row at fill time.                        |
+//|                                                                  |
+//| WHY. `scripts/gold_forward_cell_prereg.py` labels this arm's own  |
+//| ledger rows by looking each signal bar up in the VENUE'S data of  |
+//| record, and that has one failure class it cannot escape: a row    |
+//| stamped after the last history refresh is UNLABELLABLE ("signal   |
+//| bar beyond the data of record"), and the pre-registration's own   |
+//| answer is to refuse rather than grade a shrinking subset. A paper |
+//| ledger can also outlive the terminal's data folder. So the EA     |
+//| stamps the EVIDENCE at the moment it has it — the signal bar's    |
+//| own state — appended to the OPEN row, never inserted:            |
+//|                                                                  |
+//|   sig_ct     the signal bar's OPEN epoch, broker-SERVER frame     |
+//|   hour_utc   that bar's UTC hour, or -1 when no offset can be     |
+//|              vouched for (the init banner's own cross-check)      |
+//|   vol_ratio  M15 ATR(14) at the signal bar / its trailing median  |
+//|              over ATR_LOOKBACK bars (0.0 = not computable here)   |
+//|   news       in | out | na  (top-tier HIGH within +/- the window) |
+//|   off_min    the server-UTC offset used above, -9999 if unknown   |
+//|                                                                  |
+//| WHAT IT IS NOT. (1) It is not the EA choosing a CELL. The EA      |
+//| writes the raw ratio, hour and proximity; the python side bins    |
+//| them with `gold_persistence_state.label_of_values`, the SAME      |
+//| function that found the cell. A second binning implementation is  |
+//| how two engines come to claim one policy (the R6 lesson), so the  |
+//| axis constants below are pinned to the python values by           |
+//| tests/test_state_label_contract.py. (2) It is NOT a gate —        |
+//| nothing here vetoes anything (the stand-down is InpUseNewsFilter, |
+//| a separate input), so an unusable calendar degrades the RECORD    |
+//| and the stamp says `na` rather than inventing `out`.              |
+//|                                                                  |
+//| TESTER RUNS DO NOT STAMP, deliberately: parity replays compare    |
+//| two engines on the same bars and the python side labels those     |
+//| rows from the corpus it already has, so certified ledgers stay    |
+//| byte-identical — and INIT says so out loud rather than no-opping. |
+//+------------------------------------------------------------------+
+#define STATE_ATR_PERIOD   14     // = gold_walkforward.ATR_PERIOD
+#define STATE_VOL_LOOKBACK 500    // = gold_walkforward.ATR_LOOKBACK
+#define STATE_VOL_WARMUP   200    // recursion warm-up: seed influence < (13/14)^200 ~ 5e-7
+#define STATE_VOL_LO       0.8    // = gold_persistence_state.VOL_BINS low|normal edge
+#define STATE_VOL_HI       1.3    // = gold_persistence_state.VOL_BINS normal|high edge
+#define STATE_OFF_UNKNOWN  -9999  // no offset may be named (the two clocks disagree)
+#define STATE_NA           "na"
+
+// The offset the stamp is allowed to NAME. Same cross-check the init banner makes,
+// because the tick clock is worthless for minutes after a launch (measured 2026-09-21:
+// two launches reported -5h19m for a UTC+2 venue). When the two clocks disagree the
+// stamp writes STATE_OFF_UNKNOWN and hour -1 — a confident wrong hour is the exact
+// class of sign this program keeps paying for.
+int StateOffsetMinutes()
+{
+   int off_tick = OffsetMinutes();                             // from the last TICK
+   int off_trd  = (int)((TimeTradeServer() - TimeGMT()) / 60); // terminal-calculated
+   int delta = off_tick - off_trd;
+   if(delta < 0) delta = -delta;
+   if(delta > 1) return STATE_OFF_UNKNOWN;
+   if(off_tick < -14 * 60 || off_tick > 14 * 60) return STATE_OFF_UNKNOWN;
+   return off_trd;
+}
+
+// M15 ATR(STATE_ATR_PERIOD) at `sig_bar`, over its trailing median, computed from BARS the
+// way `gold_walkforward.wilder_atr` + `trailing_percentile` do. NOT iATR: the engine's
+// series is a plain Wilder recursion over the served bars, and a different indicator seed
+// is a different number for the same bar.
+//
+// The recursion is seeded STATE_VOL_WARMUP bars BEFORE the median window, so every window
+// member but the oldest few carries a decayed seed: (13/14)^200 ~ 5e-7 residual. That
+// bound — not a claim of exactness — is what tests/test_state_label_contract.py measures
+// against the engine on the venue's own bars.
+bool StateVolRatio(datetime sig_bar, double &ratio)
+{
+   ratio = 0.0;
+   int s = iBarShift(_Symbol, PERIOD_M15, sig_bar, false);   // exact: the bar whose OPEN is sig_bar
+   if(s < 0) return false;
+   int need = STATE_VOL_LOOKBACK + STATE_VOL_WARMUP + STATE_ATR_PERIOD + 1;
+   if(Bars(_Symbol, PERIOD_M15) < s + need) return false;
+   double hi[], lo[], cl[];
+   if(CopyHigh (_Symbol, PERIOD_M15, s, need, hi) != need) return false;
+   if(CopyLow  (_Symbol, PERIOD_M15, s, need, lo) != need) return false;
+   if(CopyClose(_Symbol, PERIOD_M15, s, need, cl) != need) return false;
+   // Copy* fills OLDEST FIRST: index 0 is the oldest bar of the window (shift s+need-1)
+   // and index need-1 is the signal bar itself — the chronological order wilder_atr walks.
+   double tr[], atr[];
+   ArrayResize(tr, need);
+   ArrayResize(atr, need);
+   for(int j = 0; j < need; j++)
+   {
+      if(hi[j] <= 0.0 || lo[j] <= 0.0 || cl[j] <= 0.0) return false;
+      tr[j] = (j == 0) ? (hi[0] - lo[0])
+            : MathMax(hi[j] - lo[j],
+                      MathMax(MathAbs(hi[j] - cl[j - 1]), MathAbs(lo[j] - cl[j - 1])));
+      atr[j] = 0.0;
+   }
+   double seed = 0.0;
+   for(int j = 1; j <= STATE_ATR_PERIOD; j++) seed += tr[j];
+   atr[STATE_ATR_PERIOD] = seed / STATE_ATR_PERIOD;
+   for(int j = STATE_ATR_PERIOD + 1; j < need; j++)
+      atr[j] = (atr[j - 1] * (STATE_ATR_PERIOD - 1) + tr[j]) / STATE_ATR_PERIOD;
+   // The trailing window INCLUDES the signal bar's own ATR, exactly as
+   // `trailing_percentile(values, LOOKBACK, 0.5)[i]` does.
+   int first = need - STATE_VOL_LOOKBACK;
+   double win[];
+   ArrayResize(win, STATE_VOL_LOOKBACK);
+   for(int k = 0; k < STATE_VOL_LOOKBACK; k++) win[k] = atr[first + k];
+   ArraySort(win);
+   double med = (win[STATE_VOL_LOOKBACK / 2 - 1] + win[STATE_VOL_LOOKBACK / 2]) / 2.0;
+   if(med <= 0.0 || atr[need - 1] <= 0.0) return false;
+   ratio = atr[need - 1] / med;
+   return true;
+}
+
+// "in" | "out" | "na" for the signal bar's UTC epoch. The five source refusals collapse
+// to ONE honest word: `na` means "this record cannot assert the news axis", which is
+// exactly what the forward harness needs in order to EXCLUDE the row instead of calling
+// it out-of-cell. The reference instant is the signal bar's OPEN epoch — the study's own
+// mask (`news_axis` -> `blackout_reason(events, epoch[i], window)`) — not "now": this
+// records the entry's state, it does not gate anything.
+string NewsProximityFlag(datetime sig_utc)
+{
+   if(NewsSourceProblem() != "") return STATE_NA;
+   long window_s = (long)InpNewsWindowMin * 60;
+   int fh = FileOpen(InpNewsFile, FILE_READ | FILE_TXT | FILE_ANSI);
+   if(fh == INVALID_HANDLE) return STATE_NA;
+   while(!FileIsEnding(fh))
+   {
+      string line = FileReadString(fh);
+      StringTrimLeft(line);
+      StringTrimRight(line);
+      if(StringLen(line) == 0) continue;
+      if(StringGetCharacter(line, 0) == '#') continue;
+      string parts[];
+      if(StringSplit(line, (ushort)';', parts) < 7) continue;
+      if(parts[5] != "HIGH") continue;      // top-tier only, same filter as the gate
+      long ev = (long)StringToInteger(parts[0]);
+      if(ev <= 0) continue;
+      long delta = (long)sig_utc - ev;
+      if(delta < 0) delta = -delta;
+      if(delta <= window_s) { FileClose(fh); return "in"; }
+   }
+   FileClose(fh);
+   return "out";
+}
+
+// The end-of-row append itself. "" when the stamp is off or this is a tester run, so the
+// certified parity ledgers are byte-identical BY CONSTRUCTION rather than by luck. The
+// row shape is fixed even when a field cannot be measured (0.0 / -1 / `na` / -9999), so a
+// reader never has to count fields to know which axis is missing.
+string StateAppend()
+{
+   if(!InpRecordStateLabel) return "";
+   if(MQLInfoInteger(MQL_TESTER)) return "";
+   datetime sig = g_sig_bar_epoch;
+   if(sig <= 0)
+      return StringFormat(",%I64d,%d,%.5f,%s,%d", (long)0, -1, 0.0, STATE_NA, STATE_OFF_UNKNOWN);
+   int off = StateOffsetMinutes();
+   double ratio = 0.0;
+   bool have_ratio = StateVolRatio(sig, ratio);
+   int      hour    = -1;
+   datetime sig_utc = sig;
+   if(off != STATE_OFF_UNKNOWN)
+   {
+      sig_utc = (datetime)((long)sig - (long)off * 60);
+      hour = (int)(((((long)sig_utc % 86400) + 86400) % 86400) / 3600);
+   }
+   string news = (off == STATE_OFF_UNKNOWN) ? STATE_NA : NewsProximityFlag(sig_utc);
+   return StringFormat(",%I64d,%d,%.5f,%s,%d", (long)sig, hour,
+                       have_ratio ? ratio : 0.0, news, off);
+}
+
+//+------------------------------------------------------------------+
 //| THE SOURCE HAS TO REPAIR ITSELF, OR THE GATE IS A PERMANENT STOP  |
 //| (v1.19c continued, 2026-09-20).                                   |
 //|                                                                  |
@@ -1567,7 +1785,10 @@ bool NewsWriteCalendar(datetime now_gmt)
 
 bool NewsRefreshIfDue(datetime now_gmt)
 {
-   if(!InpUseNewsFilter) return false;                 // off: nothing to protect, no file to keep
+   // v1.19e: the STATE STAMP reads the same file, so the source has to stay alive for it
+   // too — otherwise a recording-only arm (news gate OFF) would write `na` forever and the
+   // pre-registered forward cell would be permanently unassertable.
+   if(!InpUseNewsFilter && !InpRecordStateLabel) return false;
    if(MQLInfoInteger(MQL_TESTER)) return false;        // 4014 — not callable in the tester
    if(InpNewsRefreshHours <= 0) return false;          // operator refreshes it out of band
    if(g_news_refresh_at != 0 && now_gmt - g_news_refresh_at < 600)
@@ -1614,6 +1835,7 @@ void TrackFreshM15Bar()
 
    // evaluate the just-closed bar (index 1)
    datetime sig_open_time = iTime(_Symbol, InpEntryTF, 1);
+   g_sig_bar_epoch = sig_open_time;     // v1.19e state stamp: the bar that just closed
    int mac = MacroState();
    int trigger = TriggerOnClosedBar();
    int direction = 0;
@@ -1734,11 +1956,11 @@ bool OpenPaperPosition(int direction, double stop_d, int hour, int mac)
    // v1.02 parity instrumentation: the exact ATR + H1 bar stamp behind the stop
    datetime h1_stamp = iTime(_Symbol, PERIOD_H1, 1);
    double atr_used = AtrNow();
-   PaperLog(StringFormat("OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s%s,%.5f,%.5f",
+   PaperLog(StringFormat("OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s%s,%.5f,%.5f%s",
             (long)TimeCurrent(), ticket, direction, fill, sl, tp, lots, eff_risk,
             g_pp_orig_risk, InpTimeoutMinutes * 60, InpArmTag,
             floored ? "_FLOORED" : "",
-            atr_used, sprd));   // v1.13 R10: atr_at_entry,spread_at_open (end-of-row append)
+            atr_used, sprd, StateAppend()));   // v1.13 R10: atr_at_entry,spread_at_open | v1.19e: the state stamp
    PaperLog(StringFormat("PARITY,atr=%.5f,h1=%I64d,stop=%.5f",
             atr_used, (long)h1_stamp, g_pp_orig_risk));
    if(!g_debug_done) { DumpH1Debug(); g_debug_done = true; }
@@ -2084,10 +2306,14 @@ bool LiveSendOrder(int direction, double stop_d, int hour, int mac)
                      stop_d * dpu * lots, floored ? " | FLOORED-TO-MIN-LOT" : "", rc, attempt);
          PrintFormat(VersionTag() + "LIVE IDs: pos=%I64u order=%I64u deal=%I64u (netting: pos==order; hedging: pos_id is authoritative)",
                      g_lv_posid, g_lv_order, g_lv_deal);
-         PaperLog(StringFormat("LOPEN,%I64d,%I64u,%I64u,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s%s",
+         // v1.19e: the live fill carries the SAME state stamp as the paper one. It matters
+         // more here than there: an ARMED arm writes LOPEN (not OPEN), so without this the
+         // record of the arm as deployed would be unlabelled by construction — see the
+         // grammar note on StateAppend() and tests/test_state_label_contract.py.
+         PaperLog(StringFormat("LOPEN,%I64d,%I64u,%I64u,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s%s%s",
                   (long)TimeCurrent(), g_lv_posid, g_lv_order, g_lv_deal, direction, g_lv_entry, sl, tp,
                   lots, stop_d * dpu * lots, stop_d, InpTimeoutMinutes * 60, InpArmTag,
-                  floored ? "_FLOORED" : ""));
+                  floored ? "_FLOORED" : "", StateAppend()));
          g_last_action = StringFormat("LIVE OPEN %s %.2f @%.5f",   // v1.10 HUD
                         direction > 0 ? "BUY" : "SELL", lots, g_lv_entry);
          return true;

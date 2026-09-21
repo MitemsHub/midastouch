@@ -120,6 +120,26 @@ def test_collapse_removes_agreeing_duplicates_and_refuses_disagreeing_ones(prese
         gp.collapse_duplicate_keys(bad)
 
 
+def test_no_preset_hands_a_string_input_a_quoted_value():
+    """A QUOTED value reaches the EA with the quotes IN it, and the file then cannot exist.
+
+    MEASURED 2026-09-21 in the EA's own journal: `NewsSourceProblem()` printed
+    `calendar file missing ("MIDASTOUCH_news_calendar.csv")` — because the generator copied the
+    declaration's default literal (`= "MIDASTOUCH_news_calendar.csv"`) straight into the `.set`,
+    and the `[StartUp] ExpertParameters` route hands a string input its value literally. The
+    consequence is not cosmetic: `InpUseNewsFilter` is fail-closed, so the arm would have stood
+    down for good and reported a missing calendar that is sitting right there. The tester route
+    (`midas_parity.build_inputs`) always wrote the bare value — now every route does.
+    """
+    offenders = []
+    for path in sorted((ROOT / "mql5" / "MIDASTOUCH").glob("*.set")):
+        _comments, keys, _dupes = gp.read_set(path)
+        for k, v in keys.items():
+            if len(v) > 1 and v.startswith('"') and v.endswith('"'):
+                offenders.append(f"{path.name}: {k}={v}")
+    assert not offenders, f"quoted values reach the EA literally: {offenders}"
+
+
 def test_only_the_preset_the_arming_record_names_may_be_live():
     """Nothing on disk may send real orders without the record naming exactly that file.
 

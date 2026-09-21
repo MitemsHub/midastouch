@@ -235,7 +235,10 @@ def test_the_refresh_cannot_run_where_the_calendar_is_unreadable() -> None:
     """4014 is the platform's rule, not a preference: the tester must not even try."""
     fn = EA_CODE[EA_CODE.index("bool NewsRefreshIfDue"):EA_CODE.index("void TrackFreshM15Bar")]
     assert "if(MQLInfoInteger(MQL_TESTER)) return false;" in fn
-    assert "if(!InpUseNewsFilter) return false;" in fn
+    # 2026-09-21: the STATE STAMP reads the same file, so a recording-only arm (gate OFF,
+    # InpRecordStateLabel ON) keeps the source alive too — otherwise it would stamp `na`
+    # forever, and `na` is not evidence of no news.
+    assert "if(!InpUseNewsFilter && !InpRecordStateLabel) return false;" in fn
     assert "g_news_refresh_at" in fn, "the API must not be hammered every tick"
     assert "InpNewsRefreshHours" in fn
 

@@ -222,6 +222,33 @@ def record_first_fill(recs: list[dict], *, now: float | None = None) -> dict | N
         "why": ("captured at the first fill, when the ledger, the account's own history and "
                 "the EA's row describe the same event; afterwards the ledger is only a claim"),
     }
+    # AND THE PACKET, at the same instant: the identifier-set alarm above says the trail is
+    # complete, which is not the same as saying the two sides agree on price, size, side and
+    # time. `midas_first_fill_packet` compares them field by field and names every
+    # disagreement; its verdict is stored here because this is the one moment all three
+    # sources describe the same event. Imported lazily: the packet imports THIS module for the
+    # alarm, so a module-level import here would be a cycle.
+    if rec.get("ledger_path"):
+        try:
+            import midas_first_fill_packet as ffp  # noqa: PLC0415
+            packet = ffp.build_packet(str(rec["ledger_path"]), int(rec.get("magic") or 0))
+            out["packet"] = {"verdict": packet["verdict"],
+                             "paths": [c["verdict"] for c in packet["fills"]],
+                             "disagreements": [
+                                 {"position": c["posid"], "field": r["field"],
+                                  "ledger": r["ledger"], "venue": r["venue"]}
+                                 for c in packet["fills"] for r in c["rows"]
+                                 if r["verdict"] == "DISAGREE"],
+                             "path": os.path.join(REPO, "artifacts", "live",
+                                                  "first_fill_packet.json")}
+            try:
+                os.makedirs(os.path.dirname(out["packet"]["path"]), exist_ok=True)
+                with open(out["packet"]["path"], "w", encoding="utf-8") as fh:
+                    json.dump(packet, fh, indent=2)
+            except OSError:
+                pass
+        except Exception as exc:      # noqa: BLE001 — a failed packet must not lose the record
+            out["packet"] = {"verdict": "UNREADABLE", "why": str(exc)}
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(out, fh, indent=2)
@@ -253,9 +280,14 @@ def live_fill_problems(arms: list[dict]) -> list[dict]:
         if not m or m.group(1).strip().lower() not in ("true", "1"):
             continue
         mg = re.search(r"(?m)^InpMagic\s*=\s*(\d+)", txt)
-        rec = live_fill_reconciliation(str(a.get("ledger", "")),
-                                       magic=int(mg.group(1)) if mg else 0)
+        magic = int(mg.group(1)) if mg else 0
+        rec = live_fill_reconciliation(str(a.get("ledger", "")), magic=magic)
         rec["tag"] = tag
+        # BOTH halves of the identity, so the first-fill record can hand them to the packet
+        # builder without re-deriving them from the preset at a later moment (the preset can
+        # have been re-sized in between, and then the packet would describe a different arm).
+        rec["ledger_path"] = str(a.get("ledger", ""))
+        rec["magic"] = magic
         out.append(rec)
     return out
 
@@ -595,15 +627,33 @@ def latest_banner(data_folder: str | None) -> str | None:
     return b[-1] if b else None
 
 
+def _armed() -> bool:
+    """Whether an arming record exists. Unreadable -> False, which selects the PAPER
+    pin: of the two possible mistakes here, only one of them places real orders."""
+    try:
+        return bool(R.arming_state(REPO)["armed"])
+    except Exception:
+        return False
+
+
 def resplice_pins(arm: dict, pins_src: str | None = None) -> str | None:
     """Re-splice the arm's repo preset into its chart (terminal must be DOWN).
 
     Uses set_chart_preset's own parser/writer (the certified splice), with a
     timestamped backup and a re-parse verify. Returns the backup path or None.
     The preset is the ARM's own (§14: preset_for_tag), not a shared file.
+
+    ARMED RESOLUTION (2026-09-21). The default source is the ARMED pin, not the paper
+    one. `check()` detects drift against `preset_for_tag(tag, armed=arming["armed"])`,
+    so a remedy that re-spliced the UNARMED pin rewrote the chart to
+    `InpLiveExecution=false` — the supervisor undoing the operator's authorisation every
+    restup, booting a paper arm, and re-detecting the same drift twenty minutes later.
+    Measured on this machine: 16:52:20Z DRIFT "chart InpLiveExecution=false (repo pin
+    true)" resolved by writing the paper preset into `..._LIVE.set` (4564 bytes, paper
+    header), and 16:32:20Z the same against a chart missing `InpRecordStateLabel`.
     """
     import set_chart_preset as scp
-    src = pins_src or preset_for_tag(arm["tag"])
+    src = pins_src or preset_for_tag(arm["tag"], armed=_armed())
     vals = scp.parse_preset(src)
     if not vals:
         return None
@@ -855,6 +905,7 @@ def check(now_s: float | None = None, dry_run: bool = False,
     pin_err: str | None = None
     drift: list[str] = []
     drift_arms: list[dict] = []
+    pins_by_tag: dict[str, str] = {}
     try:
         from morning_status import preset_identity
         arming = R.arming_state(REPO)
@@ -863,6 +914,7 @@ def check(now_s: float | None = None, dry_run: bool = False,
         for a in arms:
             try:
                 pins_src = preset_for_tag(a["tag"], armed=arming["armed"])
+                pins_by_tag[a["tag"]] = pins_src
             except FileNotFoundError:
                 continue                       # unpinned arm: observe only (§12)
             try:
@@ -954,7 +1006,9 @@ def check(now_s: float | None = None, dry_run: bool = False,
                     if action == "DRIFT":
                         baks = []
                         for a in drift_arms:
-                            bak = resplice_pins(a)
+                            # The pin the DRIFT was detected against — never re-derived,
+                            # so the remedy cannot disagree with the detector.
+                            bak = resplice_pins(a, pins_by_tag.get(a["tag"]))
                             baks.append(os.path.basename(bak) if bak else None)
                         record["respliced_backup"] = [b for b in baks if b]
                         if not any(baks):

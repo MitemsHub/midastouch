@@ -455,7 +455,11 @@ def test_resplicing_a_start_up_arm_rewrites_the_staged_preset_it_loads(tmp_path:
     """
     from pathlib import Path as _P
     repo_preset = _P(wd.REPO) / "mql5" / "MIDASTOUCH" / "MidastouchAI_upcomers_gold.set"
-    monkeypatch.setattr(wd, "preset_for_tag", lambda tag: str(repo_preset))
+    # `armed=` is not decoration: the remedy resolves its source by the RECORD (see the
+    # armed-resolution test below), so a fake that ignores it would pass while the live
+    # path wrote the wrong preset.
+    monkeypatch.setattr(wd, "preset_for_tag", lambda tag, **kw: str(repo_preset))
+    monkeypatch.setattr(wd, "_armed", lambda: False)
     _seed_startup_arm(tmp_path, preset_body="InpMode=9\nInpArmTag=U25\n")
     arm = wd.midas_arms(str(tmp_path))[0]
     staged = _P(arm["startup"]["staged_preset"])
@@ -469,6 +473,85 @@ def test_resplicing_a_start_up_arm_rewrites_the_staged_preset_it_loads(tmp_path:
     # a destination that does not exist is refused, not invented
     staged.unlink()
     assert wd.resplice_pins(arm) is None
+
+
+def test_the_remedy_resolves_the_armed_pin_not_the_paper_one(tmp_path: Path,
+                                                             monkeypatch) -> None:
+    """THE LOOP, pinned. Measured on this machine on 2026-09-21: 16:52:20Z the drift check
+    reported `[U25] chart InpLiveExecution=false (repo pin true)` — it compares against
+    `preset_for_tag(tag, armed=True)` — and the remedy then re-wrote the staged preset from
+    `preset_for_tag(tag)` with arming DEFAULTED OFF, i.e. the paper preset (4564 bytes, paper
+    header, `InpLiveExecution=false`). The terminal restarted and booted paper, twenty minutes
+    later the same drift fired, and the supervisor reverted the operator's authorisation
+    forever. Detection against one pin and remediation from another is the defect; the remedy
+    must resolve the SAME pin.
+    """
+    from pathlib import Path as _P
+    armed_pin = _P(wd.REPO) / "mql5" / "MIDASTOUCH" / "MidastouchAI_upcomers_gold_LIVE.set"
+    paper_pin = _P(wd.REPO) / "mql5" / "MIDASTOUCH" / "MidastouchAI_upcomers_gold.set"
+    assert "InpLiveExecution=true" in armed_pin.read_text(encoding="utf-8-sig")
+    assert "InpLiveExecution=false" in paper_pin.read_text(encoding="utf-8-sig")
+    asked: list[bool] = []
+
+    def fake(tag: str, *, armed: bool = False) -> str:
+        asked.append(armed)
+        return str(armed_pin if armed else paper_pin)
+
+    monkeypatch.setattr(wd, "preset_for_tag", fake)
+    monkeypatch.setattr(wd, "_armed", lambda: True)
+    _seed_startup_arm(tmp_path, preset_body="InpMode=9\nInpArmTag=U25\n")
+    arm = wd.midas_arms(str(tmp_path))[0]
+    assert wd.resplice_pins(arm), "the armed arm must still be remediable"
+    staged = _P(arm["startup"]["staged_preset"]).read_text(encoding="utf-8-sig")
+    assert "InpLiveExecution=true" in staged, (
+        "the remedy wrote the paper preset over an ARMED arm — the arm boots paper and the "
+        "drift it was remedying is re-detected on the next pass")
+    assert asked == [True], f"the remedy must ask for the armed pin: {asked}"
+    # ...and with no arming record the behaviour is unchanged (paper, as before)
+    monkeypatch.setattr(wd, "_armed", lambda: False)
+    _seed_startup_arm(tmp_path, preset_body="InpMode=9\nInpArmTag=U25\n")
+    arm = wd.midas_arms(str(tmp_path))[0]
+    assert wd.resplice_pins(arm)
+    assert "InpLiveExecution=false" in _P(arm["startup"]["staged_preset"]).read_text(
+        encoding="utf-8-sig")
+
+
+def test_drift_remedy_is_handed_the_pin_the_drift_was_detected_against(
+        fresh_state, tmp_path: Path, monkeypatch) -> None:
+    """End to end through check(): the source used for the identity verdict must be the
+    source handed to the remedy, not re-derived behind it. Anything else lets the two
+    disagree — which is exactly how an armed arm got re-spliced to the paper preset.
+    """
+    from pathlib import Path as _P
+    import midas_watchdog as _wd
+    armed_pin = _P(wd.REPO) / "mql5" / "MIDASTOUCH" / "MidastouchAI_upcomers_gold_LIVE.set"
+    _seed_two_arm_charts(tmp_path)
+    for tag in ("M1", "U25"):
+        p = tmp_path / "MQL5" / "Files" / f"MIDASTOUCH_paper_XAUUSD_{tag}.csv"
+        p.write_text("\n".join(FLAT) + "\n")
+        os.utime(p, (NOW, NOW))
+    monkeypatch.setattr(_wd, "_armed", lambda: True)
+    arms = _wd.midas_arms(str(tmp_path))
+    for a in arms:
+        assert _wd.resplice_pins(a), "seed charts must be respliceable"
+    u25 = [a for a in arms if a["tag"] == "U25"][0]
+    txt = open(u25["chart"], encoding="utf-16", errors="replace").read()
+    m = re.search(r"InpMode=(\d+)", txt)
+    assert m
+    open(u25["chart"], "wb").write(
+        txt.replace(f"InpMode={m.group(1)}", "InpMode=7").encode("utf-16"))
+
+    handed: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(_wd, "resplice_pins",
+                        lambda arm, pins_src=None: handed.append((arm["tag"], pins_src)) or "bak")
+    monkeypatch.setattr(_wd, "data_folder_for_terminal", lambda: str(tmp_path))
+    monkeypatch.setattr(_wd, "terminal_pids_exact", lambda: [4242])
+    monkeypatch.setattr(_wd, "stop_terminal", lambda pids: True)
+    monkeypatch.setattr(_wd, "relaunch_terminal", lambda: None)
+    rec = _wd.check(now_s=NOW)
+    assert rec["action"] == "DRIFT"
+    assert handed == [("U25", str(armed_pin))], (
+        f"the remedy must be handed the armed pin it detected drift against: {handed}")
 
 
 def test_preset_for_tag_maps_the_portfolio() -> None:

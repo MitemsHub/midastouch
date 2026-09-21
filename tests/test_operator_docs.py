@@ -31,6 +31,7 @@ REPO = Path(__file__).resolve().parents[1]
 #: discipline as `scripts/rename_project.py`'s LIVE_REFERENCE_FILES): live
 #: instructions only, never dated reports.
 OPERATOR_DOCS = (
+    "AGENTS.md",
     "docs/MIDASTOUCH_HEALTH_GUIDE.md",
     "docs/MIDASTOUCH_GOLD_PLAYBOOK.md",
     "docs/MIDASTOUCH_PROTOCOL.md",
@@ -50,6 +51,20 @@ RETIRED_DOCS = (
 #: A reference to a script from inside the markdown. Extensions are limited to things
 #: that are actually runnable, so prose like "scripts/ directory" does not match.
 _SCRIPT_REF = re.compile(r"scripts[\\/]([A-Za-z0-9_.\-]+\.(?:py|ps1|cmd|bat))")
+
+#: A reference to a TEST module. Same promise as a script ("this is enforced here"), and it failed
+#: the same way once: `GOLD_FORWARD_PREREG_20260921.md` named `tests/test_gold_forward_prereg.py`
+#: as the file that pins its arithmetic, and no such file existed — a live document pointing at an
+#: enforcing mechanism that was not there. Docs naming scripts were guarded; docs naming tests were
+#: not, so the boundary was a habit rather than a check.
+_TEST_REF = re.compile(r"tests[\\/]([A-Za-z0-9_.\-]+\.py)")
+
+#: History is allowed to be wrong; a live instruction is not. A line that says a path WAS, WAS
+#: PREVIOUSLY, or has been CORRECTED is describing the past — `DATA_SCOPE_AND_CLOCK_20260920.md`
+#: records the old tester-runner name that way, and `GOLD_V2_RESEARCH_20260919.md` records its own
+#: bogus citation that way on purpose. Only the unmarked present tense is a claim.
+_HISTORY_MARK = re.compile(r"\bwas\b|\bwere\b|previously|renamed|never existed|corrected|"
+                           r"retired|deleted|replaced", re.I)
 
 #: A reference to a virtualenv interpreter. A named script and a named interpreter are
 #: the same kind of promise -- "run this" -- and this checkout shipped without a `.venv`
@@ -71,6 +86,18 @@ def _read(rel: str) -> str:
 def _dangling(text: str) -> list[str]:
     """Named scripts that do not exist, deduped and sorted (stable failure output)."""
     return sorted({m for m in _SCRIPT_REF.findall(text) if not (REPO / "scripts" / m).is_file()})
+
+
+def _dangling_tests(text: str) -> list[str]:
+    """Named test modules that do not exist, skipping lines that mark the mention as history."""
+    out: set[str] = set()
+    for line in text.splitlines():
+        if _HISTORY_MARK.search(line):
+            continue
+        for m in _TEST_REF.findall(line):
+            if not (REPO / "tests" / m).is_file():
+                out.add(m)
+    return sorted(out)
 
 
 def test_the_curated_list_is_real():
@@ -112,6 +139,31 @@ def test_no_document_outside_the_retired_list_names_a_dead_script():
     assert not offenders, (
         "these documents name scripts that do not exist and are not marked as records:\n  "
         + "\n  ".join(offenders))
+
+
+def test_the_test_reference_detector_fires_and_respects_history():
+    """A detector that never fires is not a guard — the three cases it must separate."""
+    assert _dangling_tests("run tests/test_nope.py to check") == ["test_nope.py"]
+    assert _dangling_tests("this was tests/test_nope.py until the rename") == []
+    assert _dangling_tests("tests/test_operator_docs.py pins this") == []
+
+
+def test_no_document_names_a_test_file_that_does_not_exist():
+    """The same rule as scripts, for the other half of a document's promises.
+
+    Deliberately tree-wide and deliberately not limited to OPERATOR_DOCS: the defect this catches
+    was in a dated research record, which is exactly where nobody looks for a stale instruction.
+    """
+    offenders: list[str] = []
+    for path in sorted((REPO / "docs").glob("*.md")) + [REPO / "README.md"]:
+        rel = path.relative_to(REPO).as_posix()
+        bad = _dangling_tests(path.read_text(encoding="utf-8", errors="replace"))
+        if bad and rel not in RETIRED_DOCS:
+            offenders.append(f"{rel}: {bad}")
+    assert not offenders, (
+        "these documents name test modules that do not exist and are not marked as history:\n  "
+        + "\n  ".join(offenders)
+        + "\nCreate the test, or rewrite the line so it reads as the past tense it is.")
 
 
 @pytest.mark.parametrize("rel", OPERATOR_DOCS + ("README.md",))

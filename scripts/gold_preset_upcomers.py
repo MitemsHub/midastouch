@@ -44,6 +44,31 @@ TARGET = PRESET_DIR / "MidastouchAI_upcomers_gold.set"
 
 #: The account this preset is for. Matches ThunderboltClassicRules' default size.
 ACCOUNT_SIZE = 25_000.0
+
+#: RISK PER TRADE, and it is a MEASURED number rather than the EA's 1.00 default.
+#:
+#: The sizing scan in `artifacts/gold_prereg_no_target.json` (`sizing_scan_post_hoc`: the
+#: prop governor inside, the venue's own bars, the 3% UTC-day line at $750) is where this
+#: comes from. 0.25% is the only size it scanned that breaches the venue's daily rule on NO
+#: day: worst day -$466.60 against the $750 line, i.e. $283.40 of headroom per day, 0 of 30
+#: days beyond. Every larger size breached:
+#:
+#:     1.00%  ->  worst day -$804.84, 13 days beyond the line
+#:     0.75%  ->  worst day -$803.46,  7 days beyond
+#:     0.50%  ->  worst day -$805.91, 10 days beyond
+#:     0.25%  ->  worst day -$466.60,  0 days beyond   <- this file
+#:
+#: The mechanism is worth keeping in view, because it is not "smaller is always safer":
+#: cutting the size makes the 6% trailing shield stop vetoing, so MORE entries are kept
+#: (498 at 0.25% against 67 at 1.00%) and the worst day is smaller anyway. The daily rule is
+#: a statement about SIZE, not about entry timing.
+#:
+#: What this number is NOT: it is the worst day of the no-target policy, not of the exact
+#: geometry this arm runs (stop 2.0xATR/TP 2.0R), so it is the closest measurement that
+#: exists rather than a measurement of the live exit. At 0.25% the $62.50 budget also sits
+#: above the venue's min-lot floor (~$33 for a stop this wide), so the EA can size within it
+#: instead of the floor forcing an overshoot.
+RISK_PERCENT = "0.25"
 #: Distinct from the Deriv-era 7801001 so a ledger cannot mix two eras' fills.
 MAGIC = 7825001
 ARM_TAG = "U25"
@@ -173,6 +198,15 @@ def build(comments: list[str], source_keys: dict[str, str], declared: dict[str, 
         "; would make the only forward record we have unrepresentative of the account it",
         "; is supposed to represent.",
         ";",
+        f"; RISK PER TRADE IS {RISK_PERCENT}%, AND IT IS A MEASURED NUMBER (2026-09-21).",
+        "; The EA's own default is 1.00%, which the sizing scan in",
+        "; artifacts/gold_prereg_no_target.json measures as breaching the venue's 3% daily line",
+        "; on 13 of 30 days (worst day -$804.84 against $750). 0.25% is the only scanned size",
+        "; that breaches on NO day: worst day -$466.60, i.e. $283.40 of headroom per day. The",
+        "; governor enforces the line either way; this is the size that keeps it from being",
+        "; reached. See scripts/gold_preset_upcomers.py (RISK_PERCENT) for the full table and",
+        "; for what it does not measure.",
+        ";",
         "; THE PROP GOVERNOR IS PINNED HERE. The EA now enforces all four venue rules",
         "; before an entry: the 3% UTC-day cap, the 6% trailing Dynamic Risk Shield, the",
         "; 5% profit target and the 20% Best Day ceiling on one day's gain. Their",
@@ -187,6 +221,15 @@ def build(comments: list[str], source_keys: dict[str, str], declared: dict[str, 
         "; never 'no news'), and this arm would no longer be running the configuration the",
         "; walk-forward certified. The gate is entry-only either way — it never blocks an",
         "; exit.",
+        ";",
+        "; THE STATE STAMP IS ON HERE (v1.19e), AND IT IS NOT A TRADING RULE.",
+        "; InpRecordStateLabel=true makes the EA append the entry's own state to the OPEN row",
+        "; (sig_ct, hour_utc, vol_ratio, news, off_min). Nothing reads it back as a gate: it",
+        "; exists so the pre-registered forward cell",
+        "; (docs/GOLD_PREREG_FORWARD_CELL_20260921.md) can label THIS arm's rows from the",
+        "; record the arm made, instead of rebuilding them from a history file that may not",
+        "; reach the newest row. It also keeps the calendar file fresh even with the gate",
+        "; OFF, because a stale source would otherwise stamp `na` forever (na is not `out`).",
     ]
     header += (
         [
@@ -215,11 +258,27 @@ def build(comments: list[str], source_keys: dict[str, str], declared: dict[str, 
         "InpMagic": str(MAGIC),
         "InpArmTag": ARM_TAG,
         "InpPaperEquity": f"{ACCOUNT_SIZE:.1f}",
+        "InpRiskPercent": RISK_PERCENT,     # see RISK_PERCENT: the measured survivable size
         "InpLiveExecution": "true" if live else "false",
+        # v1.19e: the state stamp, ON for this arm. Its default is false so the frozen
+        # Deriv-era baseline preset and every certified parity run stay byte-identical;
+        # this arm is the one whose forward record has to be labelable.
+        "InpRecordStateLabel": "true",
         **PROP_KEYS,
     })
     for k in declared:
         keys.setdefault(k, declared[k])
+    # MEASURED 2026-09-21, in the EA's own journal, after the state stamp started reading the
+    # calendar file: `NewsSourceProblem()` printed `calendar file missing
+    # ("MIDASTOUCH_news_calendar.csv")` — with the quotes IN the filename. A `.set` (and the
+    # `[StartUp] ExpertParameters` route that consumes it) hands a string input its value
+    # LITERALLY, so a default copied out of the declaration (`= "MIDASTOUCH_news_calendar.csv"`)
+    # arrives as a filename that cannot exist: `FileIsExist()` is false and every write fails.
+    # The consequence is not cosmetic — with `InpUseNewsFilter=true` the gate is fail-closed, so
+    # the arm would have stood down forever and reported a missing calendar nobody could find.
+    # The tester route (`midas_parity.build_inputs`) always wrote the bare value; now both do.
+    keys = {k: (v[1:-1] if len(v) > 1 and v.startswith('"') and v.endswith('"') else v)
+            for k, v in keys.items()}
     ordered = {k: keys[k] for k in declared if k in keys}
     ordered.update({k: v for k, v in keys.items() if k not in declared})
     body.append("")

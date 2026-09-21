@@ -33,6 +33,7 @@ subtracted from every trade's gross R.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import math
 import sys
@@ -468,13 +469,115 @@ def prop_compat(trades: list[dict], epoch: np.ndarray, rules, risk_usd: float) -
     }
 
 
-def criteria(rs: list[float], control_total: float) -> dict:
-    """The frozen V1-V6 block from docs/GOLD_WFO_PROTOCOL.md section 6."""
+def max_abs_z_stats(n_trials: int, draws: int = 200_000,
+                    seed: int = 20260921) -> tuple[float, float]:
+    """(mean, 95th percentile) of max |z| over `n_trials` standard normal draws.
+
+    WHAT THIS ANSWERS, AND WHY IT IS IN THE ENGINE. V6 asks `t >= 1.5`, which is a
+    threshold for ONE hypothesis. This gate does not test one hypothesis: each fold
+    selects its configuration from the whole grid, so the number it reports is the
+    best of many, and the distribution of a best-of-N maximum is not centred on zero.
+    The 95th percentile here IS the multiplicity-adjusted critical value -- a search of
+    N trials crosses it 5% of the time under the null, whatever N is -- and at N=1 it
+    is 1.96, so V7 contains V6 rather than replacing it with a different rule.
+
+    Monte Carlo because the maximum of N normals has no elementary quantile. Seeded, so
+    the constant is reproducible and the same on every machine.
+    """
+    rng = np.random.default_rng(seed)
+    chunk = max(1000, min(draws, 20_000))
+    maxima: list[np.ndarray] = []
+    seen = 0
+    while seen < draws:
+        m = min(chunk, draws - seen)
+        maxima.append(np.abs(rng.standard_normal((m, n_trials))).max(axis=1))
+        seen += m
+    allmax = np.concatenate(maxima)
+    return float(allmax.mean()), float(np.percentile(allmax, 95.0))
+
+
+def selection_threshold(n_trials: int) -> float:
+    """The t a best-of-`n_trials` result must beat: 95% family-wise, so 1.96 at N=1."""
+    return max_abs_z_stats(n_trials)[1]
+
+
+def probability_of_backtest_overfitting(matrix, n_splits: int = 8) -> dict:
+    """PBO by Combinatorially Symmetric Cross-Validation (Bailey et al., 2017).
+
+    WHAT QUESTION THIS ANSWERS. V7 asks whether the reported winner is distinguishable from
+    noise. PBO asks a different one, and the audit in
+    `docs/GOLD_DECIDABILITY_AUDIT_20260921.md` named it as the gap it could not close:
+    **when this selection procedure picks a configuration, how often does the one it picks on
+    past windows turn out to be below the median on future ones?** A high PBO means the
+    procedure itself is the problem, not any single result it produced.
+
+    `matrix` is (n_configs x n_windows), each entry being that configuration's performance
+    MEASURED IN that window -- a total R or a mean R, as long as every row is the same kind
+    of number and larger is better. Windows are the walk-forward folds.
+
+    The method: split the T windows into S disjoint groups, take every way of choosing S/2 of
+    them as in-sample, rank the configurations there, take the winner's rank in the
+    complementary out-of-sample half, and record the logit of its relative rank. PBO is the
+    share of combinations whose logit is <= 0, i.e. whose in-sample winner landed at or below
+    the out-of-sample median. Symmetric by construction, which is why it needs no separate
+    holdout period: every window serves as in-sample and as out-of-sample.
+    """
+    M = np.asarray(matrix, dtype=float)
+    if M.ndim != 2 or M.shape[0] < 2 or M.shape[1] < 4:
+        return {"pbo": None, "n_combos": 0, "splits": 0, "windows": int(M.shape[-1] if M.ndim else 0),
+                "reason": ("needs at least 2 configurations and 4 windows; got "
+                           f"{M.shape if M.ndim else 'a non-matrix'}")}
+    n_cfg, T = M.shape
+    S = min(n_splits if n_splits % 2 == 0 else n_splits - 1, T - (T % 2))
+    if S < 2:
+        return {"pbo": None, "n_combos": 0, "splits": 0, "windows": T,
+                "reason": f"{T} windows is too few to split symmetrically"}
+    groups = [list(range(g * T // S, (g + 1) * T // S)) for g in range(S)]
+    logits: list[float] = []; is_best: list[int] = []; oos_ranks: list[float] = []
+    for combo in itertools.combinations(range(S), S // 2):
+        ins = [i for g in combo for i in groups[g]]
+        oos = [i for g in range(S) if g not in combo for i in groups[g]]
+        if not ins or not oos:
+            continue
+        best = int(np.argmax(M[:, ins].mean(axis=1)))
+        oos_perf = M[:, oos].mean(axis=1)
+        # Average rank (1 = worst .. n_cfg = best), ties averaged: the score is a RANK, so a
+        # configuration that ties the median must not be counted as beating it.
+        rank = 0.5 + float(np.sum(oos_perf < oos_perf[best])) \
+            + 0.5 * float(np.sum(oos_perf == oos_perf[best]))
+        omega = rank / (n_cfg + 1)
+        logits.append(math.log(omega / (1.0 - omega)))
+        is_best.append(best); oos_ranks.append(rank)
+    if not logits:
+        return {"pbo": None, "n_combos": 0, "splits": S, "windows": T,
+                "reason": "no symmetric split could be formed"}
+    per_cfg = M.mean(axis=1)
+    return {
+        "pbo": round(sum(1 for x in logits if x <= 0) / len(logits), 4),
+        "n_combos": len(logits), "splits": S, "windows": T, "configs": n_cfg,
+        "mean_logit": round(float(np.mean(logits)), 4),
+        "is_winner_distinct": len(set(is_best)),
+        "full_sample_best_config": int(np.argmax(per_cfg)),
+        "median_oos_rank": round(float(np.median(oos_ranks)), 2),
+    }
+
+
+def criteria(rs: list[float], control_total: float,
+             trials: int | None = None) -> dict:
+    """The frozen V1-V7 block from docs/GOLD_WFO_PROTOCOL.md section 6.
+
+    V7 ("t beats selection threshold") is an AMENDMENT, not a re-baselining: it can
+    only ever make this gate stricter, because the threshold it applies is >= 1.96
+    where V6's was 1.5. The certified artifact's verdict was already NOT VALIDATED and
+    stays so.
+    """
     tot = sum(rs)
     pos = sum(1 for x in rs if x > 0)
     srt = sorted(rs)
     n = len(rs)
     median = (srt[n // 2] if n % 2 else (srt[n // 2 - 1] + srt[n // 2]) / 2) if n else 0.0
+    n_trials = len(configs()) if trials is None else trials
+    t_req = selection_threshold(n_trials)
     return {
         "V1 total>0": tot > 0,
         "V2 pos>=60%": pos >= 0.6 * n,
@@ -482,8 +585,12 @@ def criteria(rs: list[float], control_total: float) -> dict:
         "V4 beats control": tot > control_total,
         "V5 median>0": median > 0,
         "V6 t>=1.5": tstat(rs) >= 1.5,
+        # Fixed key name on purpose: the threshold and the search size live in the
+        # `_` stats below, so the artifact's check keys stay stable across runs and
+        # nothing has to string-match a formatted number.
+        "V7 t>selection threshold": tstat(rs) >= t_req,
         "_total": tot, "_pos": pos, "_n": n, "_median": median, "_t": tstat(rs),
-        "_control": control_total,
+        "_control": control_total, "_t_req": t_req, "_trials": n_trials,
     }
 
 
@@ -671,6 +778,9 @@ def main(argv: list[str]) -> int:
         "oos_r_per_fold": oos_rs,
         "checks": {k: bool(v) for k, v in checks.items() if k.startswith("V")},
         "stats": {k: checks[k] for k in checks if k.startswith("_")},
+    #: The search size the V7 threshold was computed from, recorded with the result so
+    #: a reader can see how many alternatives the reported best was drawn from.
+    "trials_searched": checks["_trials"],
         "control_total_r": control_total,
         "oos_trades": n_oos_trades,
         "leave_one_fold_out": {"without_best": round(tot_oos - best_fold_r, 2),

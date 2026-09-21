@@ -71,18 +71,27 @@ def excursions(bars: dict, entry_i: int, dir_: int, entry: float, risk: float,
 
 
 def simulate_policy(bars: dict, entries: list[dict], atr: np.ndarray, *, tp: float | None,
-                    trail: tuple[float, float] | None, time_bars: int | None) -> list[dict]:
+                    trail: tuple[float, float] | None, time_bars: int | None,
+                    stop_mult: float = 1.0) -> list[dict]:
     """Apply one exit policy to the FIXED entry set, with the frozen cost model.
 
-    Stop = 1.0 x ATR (the certified family's stop), so every policy shares one risk unit and
-    the comparison is about exits, not about sizing.
+    Stop = `stop_mult` x ATR. The default is 1.0 — the certified family's stop — so every
+    policy in the original comparison shares one risk unit and the comparison is about exits
+    rather than sizing, and every number in `artifacts/gold_exit_capture.json` reproduces
+    exactly. `stop_mult` exists because the derived-stop study
+    (`scripts/gold_prereg_derived_stop.py`) needs to vary the one component this function
+    deliberately held fixed.
+
+    1R is the STOP DISTANCE, not a fixed ATR: at `stop_mult = k` the risk unit is `k x ATR`,
+    so a stop-out is exactly -1R at any k, the spread and commission are charged in the same
+    units, and a wider stop does not silently mean a bigger loss per trade.
     """
     o, h, l, c, epoch = (bars["open"], bars["high"], bars["low"], bars["close"],
                          bars["epoch"])
     out: list[dict] = []
     for e in entries:
         i0, dir_, entry = e["entry_i"], e["dir"], e["entry"]
-        risk = float(atr[i0])
+        risk = float(atr[i0]) * stop_mult
         if risk <= 0:
             continue
         stop = entry - dir_ * risk

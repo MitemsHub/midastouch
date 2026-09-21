@@ -113,7 +113,12 @@ def test_a_source_edited_since_the_deploy_is_stale(tmp_path):
     """The case the leg exists for: the pins describe source that is not what runs."""
     src, ex5 = _source(tmp_path), _binary(tmp_path)
     rec = _record(tmp_path, src, ex5)
-    time.sleep(0.01)
+    # No sleep here on purpose. This leg decides "stale" by comparing the recorded
+    # source HASH against the file's hash (see `deployed_build_state`), so the verdict
+    # does not depend on mtimes or on clock granularity at all. A `time.sleep(0.01)`
+    # used to sit on this line: a wall-clock wait whose only possible contribution was
+    # flakiness on a filesystem or VM where the write landed inside the same timestamp
+    # tick. The assertion is about CONTENT, so the wait was never load-bearing.
     src.write_text("// edited after the deploy\n", encoding="utf-8")
     state, detail = lr.deployed_build_state(src, [ex5], rec)
     assert state == "stale" and "DIFFERENT source" in detail

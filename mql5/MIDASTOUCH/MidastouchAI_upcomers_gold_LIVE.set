@@ -13,6 +13,15 @@
 ; would make the only forward record we have unrepresentative of the account it
 ; is supposed to represent.
 ;
+; RISK PER TRADE IS 0.25%, AND IT IS A MEASURED NUMBER (2026-09-21).
+; The EA's own default is 1.00%, which the sizing scan in
+; artifacts/gold_prereg_no_target.json measures as breaching the venue's 3% daily line
+; on 13 of 30 days (worst day -$804.84 against $750). 0.25% is the only scanned size
+; that breaches on NO day: worst day -$466.60, i.e. $283.40 of headroom per day. The
+; governor enforces the line either way; this is the size that keeps it from being
+; reached. See scripts/gold_preset_upcomers.py (RISK_PERCENT) for the full table and
+; for what it does not measure.
+;
 ; THE PROP GOVERNOR IS PINNED HERE. The EA now enforces all four venue rules
 ; before an entry: the 3% UTC-day cap, the 6% trailing Dynamic Risk Shield, the
 ; 5% profit target and the 20% Best Day ceiling on one day's gain. Their
@@ -27,6 +36,15 @@
 ; never 'no news'), and this arm would no longer be running the configuration the
 ; walk-forward certified. The gate is entry-only either way — it never blocks an
 ; exit.
+;
+; THE STATE STAMP IS ON HERE (v1.19e), AND IT IS NOT A TRADING RULE.
+; InpRecordStateLabel=true makes the EA append the entry's own state to the OPEN row
+; (sig_ct, hour_utc, vol_ratio, news, off_min). Nothing reads it back as a gate: it
+; exists so the pre-registered forward cell
+; (docs/GOLD_PREREG_FORWARD_CELL_20260921.md) can label THIS arm's rows from the
+; record the arm made, instead of rebuilding them from a history file that may not
+; reach the newest row. It also keeps the calendar file fresh even with the gate
+; OFF, because a stale source would otherwise stamp `na` forever (na is not `out`).
 ; ARMED — THIS ARM PLACES REAL ORDERS ON THE FUNDED ACCOUNT.
 ; InpLiveExecution=true, and the ONLY thing that makes that legitimate is the
 ; arming record artifacts/live/armed.json: read it before touching this file.
@@ -67,13 +85,14 @@ InpSessionEndHour=20
 InpSpreadCapPctStop=1.5
 InpFridayCutoffHour=20
 InpUseNewsFilter=false
-InpNewsFile="MIDASTOUCH_news_calendar.csv"
+InpNewsFile=MIDASTOUCH_news_calendar.csv
 InpNewsWindowMin=15
 InpNewsMaxAgeHours=24
 InpNewsCoverHours=24
 InpNewsRefreshHours=6
+InpRecordStateLabel=true
 InpStaleMinutes=30
-InpRiskPercent=1.0
+InpRiskPercent=0.25
 InpMaxRiskPct=15.0
 InpLiveExecution=true
 InpPaperEquity=25000.0

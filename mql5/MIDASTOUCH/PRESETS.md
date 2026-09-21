@@ -3,11 +3,14 @@
 **The rule: exactly ONE of these files is ever attached to a chart on the funded
 account.** Everything else is either a reference pin for the monitoring tooling or a
 staged experiment that has not been run. If you are looking for "which preset do I
-load", the answer is the first row and only the first row.
+load", the answer is the two Upcomers rows below — the paper mirror, as the arms-length
+forward record, and the LIVE variant, which is what the funded account actually runs
+(armed by `artifacts/live/armed.json`, an operator override on a FAILED gate).
 
 | file | role | live orders |
 |---|---|---|
-| `MidastouchAI_upcomers_gold.set` | **THE trading preset** — $25,000 Upcomers evaluation, magic 7825001, arm tag U25, all four venue rules pinned | **no** (arming is a frozen-gate event; no signal has passed the gate) |
+| `MidastouchAI_upcomers_gold.set` | **THE paper mirror** — $25,000 Upcomers evaluation, magic 7825001, arm tag U25, all four venue rules pinned | **no** (arithmetic hard-off) |
+| `MidastouchAI_upcomers_gold_LIVE.set` | **the armed variant** — byte-identical inputs except `InpLiveExecution=true`, generated only while the arming record names it | **YES — on the record** (`artifacts/live/armed.json`; the gate FAILED and the record says so) |
 | `MidastouchAI_M1_gold.set` | reference pin the watchdog and `morning_status` read as the canonical baseline (`REPO_PRESET`) | no |
 | `MidastouchAI_LV_gold.set` | base of the P6 TP-1.5R comparison; the LV arm's own historical record | no |
 | `MidastouchAI_LV_TP15_M15_gold.set` | **staged**, not run: the P6 variant queued behind the 2026-10-01 reading | no |
@@ -45,3 +48,19 @@ They look like clutter and they are not, in three specific ways:
 - **Sized for the real account.** `InpPaperEquity` was `50.0` — the old $50 synthetic arm.
   On a $25,000 evaluation that understates every lot by ~500×, so the trading preset pins
   the true size.
+
+## The one input that is on for the RECORD, not for trading
+
+`InpRecordStateLabel=true` (both Upcomers presets; **false** everywhere else, including the
+frozen baseline) makes the EA append the entry's own state to the paper ledger's `OPEN` row:
+`sig_ct, hour_utc, vol_ratio, news, off_min`. No gate reads it back — the news stand-down is
+`InpUseNewsFilter`, a separate input, and it is still **off**.
+
+It exists because a pre-registered test needs it (`docs/GOLD_PREREG_FORWARD_CELL_20260921.md`):
+the forward cell is a post-hoc *state label*, and labelling the arm's rows by looking them up in
+the venue's data of record fails for any row newer than the last history refresh. With the stamp,
+the row carries its own axes. It is also why the calendar file stays fresh on this arm even with
+the gate off: a stale source stamps `na`, and `na` is not `out`.
+
+Turning it OFF is safe at any time (the harness falls back to rebuilding the label, and says so);
+turning it ON is what the preset already does. Neither touches how the arm trades.

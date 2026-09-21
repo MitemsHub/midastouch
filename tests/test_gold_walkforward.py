@@ -163,6 +163,72 @@ def test_criteria_on_a_negative_series_fails_v1():
 
 
 # --------------------------------------------------------------------------- #
+# V7 — the selection-adjusted threshold (protocol amendment, 2026-09-21)
+# --------------------------------------------------------------------------- #
+
+def test_the_threshold_is_the_conventional_one_for_a_single_test():
+    """V7 must CONTAIN V6, not replace it with a different rule.
+
+    At N=1 the 95th percentile of max|z| is the familiar 1.96, so a single
+    pre-registered test is judged exactly as it always was.
+    """
+    assert gw.selection_threshold(1) == pytest.approx(1.96, abs=0.02)
+
+
+def test_the_threshold_rises_as_the_search_gets_wider():
+    th = [gw.selection_threshold(n) for n in (1, 5, 13, 24, 48, 168)]
+    assert th == sorted(th), th
+    assert th[-1] == pytest.approx(3.61, abs=0.05)
+
+
+def test_v7_can_only_ever_tighten_the_gate():
+    """The amendment's whole justification: it can never pass something V6 failed."""
+    for n in (1, 2, 24, 168):
+        assert gw.selection_threshold(n) >= 1.96 > 1.5
+
+
+def test_v7_fails_a_result_that_v6_would_pass():
+    """The exact hole this closes.
+
+    A two-point fold series with 60% positive folds and a t of about 1.6 clears every
+    V1-V6 leg. It is still the best of `len(configs())` alternatives, so it must not
+    clear V7 -- and this is what the program's own frozen grid looked like.
+    """
+    rs = [1.0] * 18 + [-0.8413] * 12          # n=30: 60% positive, median>0, worst>-3
+    checks = gw.criteria(rs, control_total=-99.0)
+    assert checks["V6 t>=1.5"] is True, checks["_t"]
+    assert checks["V7 t>selection threshold"] is False
+    assert 1.5 <= checks["_t"] < 2.0, checks["_t"]
+    assert checks["_trials"] == len(gw.configs())
+
+
+def test_v7_passes_only_when_the_best_of_the_search_beats_its_own_noise():
+    rs = [1.0] * 30 + [-0.2] * 5
+    checks = gw.criteria(rs, control_total=-99.0)
+    assert checks["_t"] > checks["_t_req"]
+    assert checks["V7 t>selection threshold"] is True
+
+
+@pytest.mark.skipif(not (ROOT / "artifacts" / "gold_wfo.json").is_file(),
+                    reason="artifacts/ is gitignored, so the frozen walk-forward record is "
+                           "local to the machine that produced it - regenerate with "
+                           "python scripts/gold_walkforward.py")
+def test_the_frozen_artifact_is_still_not_validated_under_the_amendment():
+    """The record predates V7, so its own stored stats are re-checked here.
+
+    Regenerating `artifacts/gold_wfo.json` would move V1-V6 as well (a re-baseline,
+    not an amendment), so the amendment is applied to the numbers it already carries.
+    The verdict must not become MORE favourable.
+    """
+    import json
+    art = json.loads((ROOT / "artifacts" / "gold_wfo.json").read_text(encoding="utf-8"))
+    t = art["stats"]["_t"]
+    trials = art.get("trials_searched") or len(gw.configs())
+    assert t < gw.selection_threshold(trials)
+    assert art["verdict"] == "NOT VALIDATED"
+
+
+# --------------------------------------------------------------------------- #
 # Simulation behaviour
 # --------------------------------------------------------------------------- #
 

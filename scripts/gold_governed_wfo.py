@@ -77,12 +77,21 @@ DECIDABLE_N = 100
 # --------------------------------------------------------------------------- #
 
 def govern(trades: list[dict], epoch: np.ndarray, *, rules,
-           risk_usd: float = RISK_USD) -> tuple[list[dict], dict]:
+           risk_usd: float = RISK_USD,
+           risk_usd_for=None) -> tuple[list[dict], dict]:
     """Apply the EA's governor to a trade list. Returns (kept, veto counts).
 
     Path-dependent by construction: whether an entry is allowed depends on the equity the
     account has accumulated, so the trades are walked in entry order and each accepted
     trade moves the equity the next decision sees.
+
+    `risk_usd_for(trade) -> float` overrides the flat dollars-per-R with a PER-TRADE value,
+    which is what the venue's minimum lot actually imposes: at 0.01 lot the dollars a trade
+    risks is its own stop distance in dollars, and that varies trade to trade (a 20-point
+    ATR stop risks a third of what a 60-point one does). The equity the governor tracks is
+    then the sum of what the sizes really were, instead of one average multiplied by the
+    trade count. `risk_usd` remains the flat fallback, so every existing caller and every
+    pinned number is unchanged when the hook is not passed.
     """
     cap_usd = rules.account_size * rules.profit_target_pct / 100.0 * rules.best_day_pct / 100.0
     equity = rules.account_size
@@ -97,6 +106,7 @@ def govern(trades: list[dict], epoch: np.ndarray, *, rules,
         vetoes[reason] = vetoes.get(reason, 0) + 1
 
     for t in sorted(trades, key=lambda x: x["entry_i"]):
+        r_usd = risk_usd if risk_usd_for is None else float(risk_usd_for(t))
         d = datetime.fromtimestamp(float(epoch[t["entry_i"]]), timezone.utc).date()
         if d != day:
             day = d
@@ -112,7 +122,7 @@ def govern(trades: list[dict], epoch: np.ndarray, *, rules,
             veto("Best Day cap (1R/day)")
             continue
         kept.append(t)
-        equity += t["net_r"] * risk_usd
+        equity += t["net_r"] * r_usd
         peak = max(peak, equity)
     return kept, vetoes
 
@@ -252,8 +262,16 @@ def trade_stats(trades: list[dict]) -> dict:
 def power_trades(mean_r: float, sd: float, t_target: float = 1.5) -> int | None:
     """Trades needed for a one-sample t >= t_target at this effect size.
 
-    The number that turns "wait for more trades" into an answer: at 0.068R/trade it is
-    ~27,657 (99 years at the observed rate); at 0.15R it is ~120.
+    The number that turns "wait for more trades" into an answer. With the dispersion this program
+    keeps measuring (sd 1.09R) and the gate's own threshold (t >= 1.5), the answer is: at
+    0.068R/trade it is 579 (the venue window's combined edge), at 0.010R/trade it is 26,733 (the
+    arm's deployed exit, measured), and at 0.15R/trade it is 119 — the last being the figure the
+    forward pre-registration is built on.
+
+    CORRECTED 2026-09-21: this docstring used to quote "~27,657" as the figure for 0.068R/trade.
+    No sd reproduces that from 0.068R; a mean of ~0.0098R does, and that mean is the arm's deployed
+    exit rather than the window's edge. Both pairings are pinned in
+    `tests/test_gold_forward_prereg.py` so they cannot drift apart again.
     """
     if not sd or mean_r is None or mean_r <= 0:
         return None
@@ -491,12 +509,69 @@ def walk_forward(args, B, epoch, n, atr, hours, ok, rules,
             "prop_compat": prop}
 
 
+# --------------------------------------------------------------------------- #
+# Mode C: PBO / CSCV over the frozen grid (a diagnostic, not a pass)
+# --------------------------------------------------------------------------- #
+
+def pbo_matrix(args, B, epoch, n, atr, hours, ok, rules) -> dict:
+    """The config x fold matrix the decidability audit named as missing, then CSCV on it.
+
+    The fold definition, the governor and the per-fold bar slicing mirror `walk_forward()`
+    exactly -- same `gw.build_folds(epoch)`, same `lo <= entry_i < hi` membership, same
+    `govern()` -- so the matrix describes the same procedure the gate certifies, rather than
+    a parallel one. Built for BOTH the governed and the raw trade sets: whether imposing the
+    governor changes overfitting risk is itself worth seeing.
+
+    This mode writes its OWN artifact. `--mode pbo` must never overwrite
+    `artifacts/gold_governed_wfo.json`, which is the record of a test that was pre-registered
+    before it ran.
+    """
+    folds = gw.build_folds(epoch)
+    all_cfgs = gw.configs()
+    raw_mat = np.zeros((len(all_cfgs), len(folds)))
+    gov_mat = np.zeros((len(all_cfgs), len(folds)))
+    for k, cfg in enumerate(all_cfgs):
+        raw = run_grid(B, hours, ok, atr, cfg, n)
+        for fi, (_nm, lo, hi) in enumerate(folds):
+            inside = [t for t in raw if lo <= t["entry_i"] < hi]
+            raw_mat[k, fi] = sum(t["net_r"] for t in inside)
+            kept, _v = govern(inside, epoch, rules=rules)
+            gov_mat[k, fi] = sum(t["net_r"] for t in kept)
+
+    gov_res = gw.probability_of_backtest_overfitting(gov_mat, n_splits=args.pbo_splits)
+    raw_res = gw.probability_of_backtest_overfitting(raw_mat, n_splits=args.pbo_splits)
+    print(f"\n== PBO / CSCV over the frozen {len(all_cfgs)}-config grid x {len(folds)} folds "
+          f"(governed) ==")
+    print(f"  combinations evaluated: {gov_res['n_combos']} (S={gov_res['splits']} groups, "
+          f"half of them in-sample each)")
+    print(f"  PBO = {gov_res['pbo']:.1%} = the share of splits whose in-sample winner lands at "
+          f"or below the out-of-sample median")
+    print(f"  distinct winners across splits: {gov_res['is_winner_distinct']} of "
+          f"{gov_res['configs']} configs | median OOS rank {gov_res['median_oos_rank']} "
+          f"| mean logit {gov_res['mean_logit']:+.3f}")
+    print(f"  full-sample best: config {gov_res['full_sample_best_config']} "
+          f"{all_cfgs[gov_res['full_sample_best_config']]}")
+    print(f"  same question WITHOUT the governor: PBO = {raw_res['pbo']:.1%}")
+    print("  (PBO near or above 0.5 means the PROCEDURE picks winners that do not persist -- "
+          "the selection scheme is then the problem, not any single result it produced)")
+    return {"frozen_grid": len(all_cfgs), "folds": len(folds),
+            "governed": gov_res, "raw": raw_res,
+            "per_config_governed_total": [round(float(x), 3) for x in gov_mat.sum(axis=1)],
+            "matrix_shape": list(gov_mat.shape)}
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--symbol", default=gw.SYMBOL)
     ap.add_argument("--bars", type=int, default=60000)
-    ap.add_argument("--mode", choices=("governed", "sweep", "both"), default="both")
+    ap.add_argument("--mode", choices=("governed", "sweep", "both", "pbo"), default="both",
+                    help="pbo: build the config x fold matrix and compute CSCV's "
+                         "Probability of Backtest Overfitting (writes --pbo-out, never the "
+                         "governed artifact)")
+    ap.add_argument("--pbo-splits", type=int, default=8,
+                    help="CSCV groups the folds are partitioned into (even; min 2)")
+    ap.add_argument("--pbo-out", default="artifacts/gold_pbo.json")
     ap.add_argument("--control-reps", type=int, default=200)
     ap.add_argument("--exclude-lowvol", action="store_true",
                     help="suppress signals whose H1 ATR is below 0.8x its trailing median "
@@ -519,6 +594,26 @@ def main(argv: list[str]) -> int:
           f"(the venue's served window) | governor ON: 3% day / 6% shield / "
           f"Best Day {rules.best_day_pct:.0f}% of {rules.profit_target_pct:.0f}% = "
           f"{rules.account_size * rules.profit_target_pct / 100 * rules.best_day_pct / 100:.0f} USD/day")
+
+    if a.mode == "pbo":
+        # Early return: this mode has its own artifact and must not rewrite the governed
+        # record (see `pbo_matrix`).
+        res = pbo_matrix(a, B, epoch, n, atr, hours, ok, rules)
+        res.update({"declared_as": "diagnostic -- PBO cannot fail or pass the gate",
+                    "harness": "scripts/gold_governed_wfo.py --mode pbo",
+                    "why": ("docs/GOLD_DECIDABILITY_AUDIT_20260921.md named this as the "
+                            "gap the audit could not close")})
+        dest = Path(a.pbo_out)
+        if not dest.is_absolute():
+            dest = ROOT / dest
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps({"spec": {"symbol": a.symbol, "bars": n,
+                                              "window": [first.isoformat(), last.isoformat()],
+                                              "account_size": ACCOUNT_SIZE,
+                                              "risk_usd": RISK_USD},
+                                    "pbo": res}, indent=2, default=str), encoding="utf-8")
+        print(f"\nartifact: {dest}")
+        return 0
 
     out: dict = {"spec": {"symbol": a.symbol, "bars": n,
                           "window": [first.isoformat(), last.isoformat()],

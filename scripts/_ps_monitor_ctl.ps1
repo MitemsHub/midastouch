@@ -2,12 +2,19 @@ param(
     [Parameter(Mandatory = $true)][string]$Action  # status | restart
 )
 $ErrorActionPreference = "SilentlyContinue"
-$py = "C:\Users\USER\Desktop\Projects\Synthetic Indices Bot\.venv\Scripts\python.exe"
-$repo = "C:\Users\USER\Desktop\Projects\Synthetic Indices Bot"
+
+# REPOINTED 2026-09-21, same defect as _ps_deploy_ctl.ps1: the interpreter and the
+# working directory named the predecessor checkout, while the script it manages
+# (scripts\midas_lv_broker_monitor.py) lives HERE. A control script that targets the
+# wrong tree reports "0 running" about a program that is not this one, which reads
+# exactly like "nothing to see".
+$repo = Split-Path -Parent $PSScriptRoot
+$py = Join-Path $repo ".venv\Scripts\python.exe"
+if (-not (Test-Path $py)) { $py = "python" }
 
 function Get-MonitorProcs {
     Get-CimInstance Win32_Process -Filter "Name like 'python%'" |
-        Where-Object { $_.CommandLine -match 'lv_broker_monitor' }
+        Where-Object { $_.CommandLine -match 'midas_lv_broker_monitor' }
 }
 
 switch ($Action) {
