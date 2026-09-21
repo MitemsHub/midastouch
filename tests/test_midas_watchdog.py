@@ -73,6 +73,13 @@ def fresh_state(monkeypatch, tmp_path: Path) -> Path:
     # the VPS-era marker is an OPERATOR artifact — tests NEVER touch the real
     # file; the two VPS-era tests point VPS_HOSTING_MARKER at a tmp copy
     monkeypatch.setattr(wd, "VPS_HOSTING_MARKER", str(tmp_path / "no_vps_marker"))
+    # ...and so is the pause marker. It was read from the repo, so a parity or tester
+    # session in progress — which is a NORMAL state on this machine, and the whole point
+    # of the marker — made 7 of these tests fail with "pause marker present, observing
+    # only". Red during every live session is red that gets ignored, and it hid the one
+    # thing this suite exists to assert: what the watchdog does when nothing is paused.
+    # test_pause_marker_blocks_action still overrides this with its own tmp marker.
+    monkeypatch.setattr(wd, "PAUSE_MARKER", str(tmp_path / "no_pause_marker"))
     return tmp_path / "state.json"
 
 
