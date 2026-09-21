@@ -43,12 +43,18 @@ from pathlib import Path
 
 sys.path.insert(0, "scripts")
 sys.path.insert(0, "tests")
+# src/ as well: the news veto is `midas_prop.risk.news_calendar`'s rule, and this harness
+# arms the engine of record with it directly (`news_events_for_pass`). The suite gets this
+# from tests/conftest.py, but the CLI does not — and the failure is a bare
+# ModuleNotFoundError before anything is stopped, which is at least the cheap direction.
+sys.path.insert(0, "src")
 
 import mt5_tester_driver as T                       # noqa: E402
 import mt5_ops as R                                 # noqa: E402  (terminal ops;
 # was v28_sweep_runner, the closed indices sweep runner, kept alive only for these
 # four primitives — they now resolve the LIVE install by account identity)
 import midas_sweep as M                             # noqa: E402
+from midas_prop.risk import news_calendar as NC     # noqa: E402  (the one news rule)
 
 # --- the account basis, declared once, on BOTH sides -----------------------
 # A parity run claims the EA and the python engine agree on ONE account. They used to
@@ -87,7 +93,22 @@ T._BASE_TESTER_INI["Deposit"] = f"{ACCOUNT_BASIS_USD:.0f}"
 # declares what it feeds; python_build_data refuses if the declaration and
 # the feed ever disagree.
 R6_GOLD_ONLY = True
+#: The certified contract declares the gate OFF, and a pass that does not say otherwise
+#: gets exactly that. It is no longer the ONLY admissible stance — it was, while the
+#: python engine of record could not see the rule and a BAR pass with the gate on would
+#: have named a protection that could not act. The engine of record applies the same veto
+#: now, so the invariant is no longer "never on" but "never on for one engine only".
 R6_NEWS_FILTER_OFF = True
+R6_NEWS_MIRRORED = True
+
+#: One file, both engines. The EA reads `InpNewsFile` out of the terminal's MQL5\Files
+#: (the tester mirrors that folder read-only into the agent's sandbox), and the python side
+#: reads the same path here — a pass whose two sides read different calendars would be
+#: comparing two rules while reporting one.
+NEWS_FILE = "MIDASTOUCH_news_calendar.csv"
+NEWS_WINDOW_MIN = 15      # MUST equal the EA's InpNewsWindowMin
+NEWS_MAX_AGE_HOURS = 24   # MUST equal the EA's InpNewsMaxAgeHours
+NEWS_COVER_HOURS = 24     # MUST equal the EA's InpNewsCoverHours
 
 EXPERT = r"MIDASTOUCH\MidastouchAI"    # the Upcomers install's layout, named for the
                                        # repo's own folder. It WAS
@@ -288,7 +309,8 @@ def to_utc(trades: list[dict], offset_min: int) -> list[dict]:
     return out
 
 
-def build_inputs(mode: str, t0: int, t1: int, offset_min: int = 0) -> dict:
+def build_inputs(mode: str, t0: int, t1: int, offset_min: int = 0,
+                 news: bool = False) -> dict:
     """The BAR-parity input contract, per window (mode + window pins vary).
 
     `offset_min` is the venue server's offset from UTC. The contract is DECLARED in
@@ -323,7 +345,20 @@ def build_inputs(mode: str, t0: int, t1: int, offset_min: int = 0) -> dict:
         "InpSessionEndHour": str(20 + shift_h),
         "InpSpreadCapPctStop": "1.5",
         "InpFridayCutoffHour": str(20 + shift_h),          # UTC 20:00, in server time
-        "InpUseNewsFilter": "false",
+        # The news gate, declared in BOTH stances. The python engine of record applies
+        # the same +/-15-minute stand-down (scripts/midas_sweep.py `use_news`), reading
+        # the same file, judged at the same instant — this bar's close, which is what the
+        # EA's TimeGMT() returns when it evaluates that bar. `news=False` is the certified
+        # contract; `news=True` is the parity run that used to be refused at init.
+        "InpUseNewsFilter": "true" if news else "false",
+        "InpNewsFile": NEWS_FILE,
+        "InpNewsWindowMin": str(NEWS_WINDOW_MIN),
+        "InpNewsMaxAgeHours": str(NEWS_MAX_AGE_HOURS),
+        "InpNewsCoverHours": str(NEWS_COVER_HOURS),
+        # NEVER refresh inside a replay. The calendar API is unavailable in the tester
+        # (error 4014), and a refresh would rewrite the very file this pass is judged
+        # against — the comparison would then be against a source that moved.
+        "InpNewsRefreshHours": "0",
         "InpStaleMinutes": "30",
         "InpRiskPercent": "1.0",
         "InpLiveExecution": "false",
@@ -445,21 +480,27 @@ def collect_ea_evidence(snaps: dict) -> tuple[list[dict], str]:
 
 # --- python engine of record ------------------------------------------------
 
-def python_build_data() -> dict:
+def python_build_data(news: bool = False) -> dict:
     """Indicator build shared by every mode's regen (done once per session).
 
-    v1.16 R6 mirror (one-commit law with the EA): the python engine of
-    record runs the SAME two fail-closed preconditions the EA enforces at
-    init — news-filter input must be the no-protection value (false) and
-    the symbol must be gold. The harness feeds exactly that (XAUUSD,
-    InpUseNewsFilter=false), so a violation here is a harness bug and must
-    refuse loudly instead of certifying an un-labeled configuration.
+    v1.16 R6 mirror, REVISED 2026-09-21 (one-commit law with the EA). The old invariant
+    was "the news filter must be the no-protection value", because the python engine of
+    record could not apply the rule and a pass with the gate on would have named a
+    protection that could not act. The engine of record applies it now, so the invariant
+    becomes the one that actually matters: **the two engines must be in the same stance**.
+    The symbol must still be gold.
+
+    `news` must equal what the EA input block this pass builds declares; a mismatch is a
+    harness bug and refuses loudly rather than certifying an unlabelled configuration.
     """
-    assert R6_NEWS_FILTER_OFF, "R6: news filter must be the no-protection value"
     assert R6_GOLD_ONLY, "R6: engine of record is gold-only by charter"
+    assert R6_NEWS_MIRRORED, "R6: the news gate must be mirrored by the engine of record"
     assert T._BASE_TESTER_INI.get("Symbol", "").upper().startswith("XAU"), \
         "R6: harness must feed a gold symbol"
-    assert inputs_declares_news_off()
+    assert inputs_declare_news(news), (
+        f"R6: this pass asked the engine of record for news={news} while the EA input "
+        f"block declares the other stance — the two engines would be running different "
+        f"rules and every comparison between them would be meaningless")
     h1 = M.load_bars(os.path.join(M.DATA_DIR, "XAUUSD_H1.csv"))
     m15 = M.load_bars(os.path.join(M.DATA_DIR, "XAUUSD_M15.csv"))
     h4 = M.h4_series(h1)
@@ -478,17 +519,24 @@ def python_build_data() -> dict:
 
 
 def python_regen(mode: str, t0: int, t1: int,
-                 data: dict | None = None) -> list[dict]:
+                 data: dict | None = None, news: bool = False,
+                 events: tuple = (), stats: dict | None = None) -> list[dict]:
     """Run scripts/midas_sweep.py run_mode on the requested window (SMA ATR).
 
     Sized on the ACCOUNT basis, set here rather than at import: the research engine's
     certified default is its own $5,000 corpus basis, and a harness that mutated that
     global merely by being imported would silently re-basis every other consumer in
-    the process.
+    the process. The news events are armed the same way and for the same reason.
+
+    `stats`, when given, receives the engine's own counts (`news_vetoed`), so the artifact
+    can say how many entries the stand-down refused rather than only what survived it.
     """
     M.use_basis(ACCOUNT_BASIS_USD)
-    data = data or python_build_data()
+    M.use_news(events if news else None)
+    data = data or python_build_data(news=news)
     rr = M.run_mode(mode, t0, t1, data)
+    if stats is not None:
+        stats.update({"news_vetoed": rr.news_vetoed, "news_events": len(events) if news else 0})
     return [{"open_ct": t["open_ct"], "close_ct": t["close_ct"], "side": t["side"],
              "reason": t["reason"], "r": t["r"]} for t in rr.trades]
 
@@ -596,13 +644,69 @@ def _should_relaunch_terminal(stopped: bool, ran_passes: bool) -> bool:
     return stopped or ran_passes
 
 
-def inputs_declares_news_off() -> bool:
-    """The EA input block the harness builds must carry the R6 value."""
-    return str(build_inputs("ORIGINAL", 0, 1)["InpUseNewsFilter"]).lower() == "false"
+def inputs_declare_news(news: bool) -> bool:
+    """Does the EA input block this harness builds carry the gate in the asked state?"""
+    want = "true" if news else "false"
+    return str(build_inputs("ORIGINAL", 0, 1, news=news)["InpUseNewsFilter"]).lower() == want
+
+
+def news_stance_consistent(inputs: dict, engine_armed: bool) -> bool:
+    """Is the pass's DECLARED stance the one the engine of record was armed with?
+
+    This is the invariant that replaced "the news filter must be off". A pass may run the
+    gate either way now, but never in two stances at once: the EA's input block and the
+    engine of record must agree, or every keyed comparison between them is measuring the
+    difference between two rules and reporting it as an engine difference.
+    """
+    declared = str(inputs.get("InpUseNewsFilter", "false")).strip().lower() == "true"
+    return declared == bool(engine_armed)
+
+
+def news_calendar_path() -> Path | None:
+    """The calendar both engines read, in the install the pass will run on.
+
+    `<data>\\MQL5\\Files` is where the EA's `FileOpen(InpNewsFile)` resolves in the tester
+    (the terminal mirrors that folder into the agent sandbox read-only), and it is where
+    `MidasNewsProbe.mq5` writes. One file, so the two sides cannot disagree about the news.
+    """
+    data = R.data_folder_for_terminal()
+    if not data:
+        return None
+    return Path(data) / "MQL5" / "Files" / NEWS_FILE
+
+
+def news_events_for_pass(spec: dict) -> tuple:
+    """The HIGH events this pass will be judged against, or a refusal that says why not.
+
+    Refuses on the same terms the EA refuses, because a pass run against a calendar the
+    EA itself would reject is a measurement of a rule nobody runs. Freshness and coverage
+    are checked at the END of the window (`t1`), which is the strictest instant in it: a
+    calendar that stops covering partway through would let the EA fail closed mid-window
+    while python kept trading, and that would read as an engine difference.
+    """
+    path = news_calendar_path()
+    if path is None or not path.is_file():
+        raise SystemExit(
+            f"REFUSING: news gate requested but there is no calendar at {path}. Attach "
+            f"mql5/MIDASTOUCH/MidasNewsProbe.mq5 once to write the venue's own feed, or "
+            f"run the pass with the gate OFF (its certified stance).")
+    try:
+        cal = NC.read_calendar(path)
+    except NC.CalendarUnusable as exc:
+        raise SystemExit(f"REFUSING: the calendar at {path} is unusable ({exc.reason})")
+    problem = NC.source_problem(cal, int(spec["t1"]), max_age_hours=NEWS_MAX_AGE_HOURS,
+                               cover_hours=NEWS_COVER_HOURS)
+    if problem:
+        raise SystemExit(
+            f"REFUSING: {problem} (calendar {path}, judged at the window's end "
+            f"{datetime.fromtimestamp(int(spec['t1']), timezone.utc):%Y-%m-%d %H:%M} UTC). "
+            f"The EA fails closed on this, so a pass over a window it does not cover "
+            f"compares two different rule sets.")
+    return NC.top_tier_events(cal)
 
 
 def run_one_mode(mode: str, spec: dict, window_name: str, data: dict,
-                 expert: str = EXPERT) -> dict:
+                 expert: str = EXPERT, news: bool = False) -> dict:
     """One certified tester pass + keyed comparison for a single mode.
 
     `expert` names the binary path under MQL5\\Experts the pass runs. The
@@ -624,7 +728,24 @@ def run_one_mode(mode: str, spec: dict, window_name: str, data: dict,
     # window costs a refusal instead of a stopped terminal and a mis-aligned result.
     offset_min = assert_server_offset(spec)
     tag = f"{spec['tag']}_{TAG_MODE_CODE[mode]}"
-    inputs = build_inputs(mode, t0, t1, offset_min=offset_min)
+    # Both engines in one stance, resolved BEFORE anything is stopped: the calendar is
+    # read once and the same event tuple is handed to the EA's input block and to the
+    # engine of record, so a news-on pass differs from a news-off pass by one flag and
+    # nothing else. A refusal here costs nothing; discovering it mid-session costs a
+    # stopped terminal and up to an hour.
+    events: tuple = ()
+    if news:
+        events = news_events_for_pass(spec)
+        print(f"  news gate ON — {len(events)} HIGH event(s) from {news_calendar_path()}",
+              flush=True)
+    inputs = build_inputs(mode, t0, t1, offset_min=offset_min, news=news)
+    # The invariant that replaced "news must be off": the EA input block this pass feeds
+    # and the engine of record's stance are the SAME, so a mismatch cannot be reported as
+    # an engine difference. Cheap to check here, impossible to detect afterwards.
+    assert set(inputs) >= {"InpUseNewsFilter", "InpNewsFile", "InpNewsWindowMin"}, \
+        "the news contract must be declared in the input block, both stances"
+    assert news_stance_consistent(inputs, news), \
+        "the EA input block and the engine of record must be in one news stance"
     rotated = rotate_sandbox_ledgers()
     if rotated:
         print(f"  rotated stale sandbox ledgers: {rotated}")
@@ -641,7 +762,8 @@ def run_one_mode(mode: str, spec: dict, window_name: str, data: dict,
     time.sleep(10)                   # agent flushes journal + ledger after report
     ea, source = collect_ea_evidence(snaps)
     ea = to_utc(ea, offset_min)      # EA ledger epochs are venue server time
-    py = python_regen(mode, t0, t1, data)
+    py_stats: dict = {}
+    py = python_regen(mode, t0, t1, data, news=news, events=events, stats=py_stats)
     cmp = keyed_compare(ea, py)
     verdict, refused_for = recorded_verdict(cmp, ticks)
     if refused_for:
@@ -667,6 +789,10 @@ def run_one_mode(mode: str, spec: dict, window_name: str, data: dict,
             if cmp[name]:
                 print(f"    {name}: {cmp[name]}")
     return {"mode": mode, "tag": tag, "evidence_source": source,
+            "news": {"enabled": bool(news), "file": NEWS_FILE,
+                     "window_min": NEWS_WINDOW_MIN,
+                     "high_events": len(events) if news else 0,
+                     "python_news_vetoed": py_stats.get("news_vetoed", 0)},
             "server_offset_min": offset_min, "tick_model": ticks,
             "anchor": anchor, "anchor_match": anchor_match, "cmp": cmp,
             "python": {"n": len(py), "sum_r": round(sum(t["r"] for t in py), 4), "trades": py},
@@ -742,6 +868,11 @@ def main() -> int:
                     help="EA path under MQL5\\Experts for the tester pass "
                          "(default: the deployed binary — the certified target; "
                          "pass a shadow path to certify an un-deployed build)")
+    ap.add_argument("--news", action="store_true",
+                    help="run the pass with the news stand-down ON, on BOTH sides "
+                         "(default: OFF, the certified contract). The engine of record "
+                         "applies the same veto, so the pass is compared key-by-key "
+                         "instead of being refused at init.")
     args = ap.parse_args()
     expert = args.expert_path
     if expert != EXPERT:
@@ -816,11 +947,12 @@ def main() -> int:
         if M.selftest() != 0:
             print("python engine selftest FAILED — refusing to certify")
             return 3
-        data = python_build_data()
+        data = python_build_data(news=args.news)
 
         print(f"parity session: window={args.window} tester_dates={dates} "
-              f"modes={','.join(modes)} expert={expert}")
-        records = [run_one_mode(m, spec, args.window, data, expert=expert)
+              f"modes={','.join(modes)} expert={expert} "
+              f"news={'ON' if args.news else 'OFF'}")
+        records = [run_one_mode(m, spec, args.window, data, expert=expert, news=args.news)
                    for m in modes]
         ran_passes = True
 
@@ -859,6 +991,9 @@ def main() -> int:
             print(f"over tolerance:     {cmp['n_over_tol']}")
             print(f"tick model used:    {rec.get('tick_model', {}).get('used')} "
                   f"({rec.get('tick_model', {}).get('evidence')})")
+            print(f"news gate:          {'ON' if rec['news']['enabled'] else 'OFF'} "
+                  f"({rec['news']['high_events']} HIGH event(s); engine of record "
+                  f"vetoed {rec['news']['python_news_vetoed']} entr(y/ies))")
             if cmp.get("refused_for"):
                 print(f"refused for:        {cmp['refused_for']}")
             print(f"PARITY:             {cmp['verdict']}")
@@ -869,7 +1004,8 @@ def main() -> int:
                 "window": {"t0": t0, "t1": t1, "name": args.window},
                 "tester_dates": dates, "symbol": "XAUUSD",
                 "server_offset_min": rec["server_offset_min"],
-                "inputs": build_inputs(rec["mode"], t0, t1,
+                "news": rec["news"],
+                "inputs": build_inputs(rec["mode"], t0, t1, news=rec["news"]["enabled"],
                                        offset_min=rec["server_offset_min"]),
                 "evidence_source": rec["evidence_source"],
                 "tick_model": rec.get("tick_model", {}),

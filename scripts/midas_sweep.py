@@ -47,6 +47,21 @@ RISK_FRACTION = 0.01
 #: which is exactly what a basis change has to be measured against, not assumed away.
 _BASIS: float | None = None
 
+#: ── the news stand-down, run-scoped ─────────────────────────────────────────────
+#: This engine of record applies the SAME +/-15-minute veto the EA applies at its entry
+#: gate, judged at the same instant: `ct`, the closed bar's own close time, which is what
+#: the EA's `TimeGMT()` reads when it evaluates that bar. It exists so a BAR-mode parity
+#: pass can run with the gate ON and be compared key-by-key, instead of being refused at
+#: init because the other engine could not see the rule — a rule only one engine applies
+#: is a rule that silently does nothing, which is the failure this whole mechanism exists
+#: to prevent.
+#:
+#: Empty by default, so every existing consumer keeps the certified news-OFF contract.
+NEWS_WINDOW_MIN = 15
+_NEWS: tuple = ()                     # tuple[news_calendar.Event, ...] — HIGH only
+_NEWS_WINDOW_MIN = NEWS_WINDOW_MIN
+_NEWS_MODULE = None
+
 
 def use_basis(basis_usd: float) -> None:
     """Size this run's simulated account at `basis_usd`."""
@@ -55,6 +70,46 @@ def use_basis(basis_usd: float) -> None:
     if val <= 0:
         raise ValueError(f"sizing basis must be positive, got {basis_usd!r}")
     _BASIS = val
+
+
+def _news_calendar():
+    """The mirror's calendar module, imported once (and from THIS checkout).
+
+    `src/` is put first for the same reason `tests/conftest.py` does it: this machine has
+    a second checkout whose package used to share this one's name on `sys.path`, and a
+    rule that silently resolves to another repository's constants is worse than no rule.
+    """
+    global _NEWS_MODULE
+    if _NEWS_MODULE is None:
+        src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from midas_prop.risk import news_calendar  # noqa: PLC0415
+        _NEWS_MODULE = news_calendar
+    return _NEWS_MODULE
+
+
+def use_news(events=None, window_min: int = NEWS_WINDOW_MIN) -> None:
+    """Arm (or clear) the news veto for subsequent `run_mode` calls.
+
+    Called per run, exactly like `use_basis`, and never at import: a module that mutated
+    a global merely by being imported would silently re-rule every other consumer in the
+    process. `events` is any iterable of `news_calendar.Event`.
+    """
+    global _NEWS, _NEWS_WINDOW_MIN
+    _NEWS = tuple(events or ())
+    _NEWS_WINDOW_MIN = int(window_min)
+
+
+def news_veto_reason(ct: int) -> str:
+    """Why an entry judged at `ct` is vetoed, or "" — the EA's own phrases.
+
+    The window, the HIGH-importance filter and the vocabulary are `news_calendar`'s, not
+    a copy: this function only chooses WHEN to ask.
+    """
+    if not _NEWS:
+        return ""
+    return _news_calendar().blackout_reason(_NEWS, int(ct), _NEWS_WINDOW_MIN)
 
 
 def equity_basis() -> float:
@@ -223,6 +278,10 @@ class RunResult:
         self.trades: list[dict] = []
         self.final_equity = equity_basis()
         self.vetoed = 0
+        #: Entries the news stand-down suppressed (0 unless `use_news` armed it).
+        #: Counted separately from `vetoed` (the min-lot risk cap): two different
+        #: refusals, and a run that cannot say which one it hit cannot be read.
+        self.news_vetoed = 0
 
 
 def minlot_risk_exceeds_cap(stop_d: float, basis: float) -> bool:
@@ -352,6 +411,17 @@ def run_mode(mode: str, t0: int, t1: int, data: dict) -> RunResult:
         hr = datetime.fromtimestamp(b["time"], tz=timezone.utc).hour
         if not (6 <= hr < 20):
             continue
+
+        # 4b) NEWS STAND-DOWN. Sits with the time gates and before the signal is
+        #     stashed, which is where the EA puts it (before sizing, after the
+        #     session window). Entry-only by construction: nothing here can touch an
+        #     OPEN position, because a rule that could trap a trade through a release
+        #     would breach the shield it claims to protect.
+        if _NEWS:
+            if news_veto_reason(ct):
+                res.news_vetoed += 1
+                pending = None
+                continue
 
         pending = {"direction": direction, "stop_d": stop_d,
                    "hour": hr, "mac": mac, "sig_ct": ct}

@@ -629,18 +629,24 @@ int OnInit()
       g_win_t1 = (datetime)InpWindowEnd;
    }
 
-   // BAR parity is the REPLAY of a corpus, and that corpus was certified news-OFF: the
-   // python engine of record does not apply this veto yet, so a BAR pass with the filter
-   // ON would run a rule the other engine cannot see — a filter that silently does
-   // nothing, which is the one failure mode this whole mechanism exists to prevent.
-   // The live and paper arms run PERTICK, where the gate does act. Refuse, do not pretend.
+   // BAR parity REFUSED this combination until v1.19d, and it was right to: the python
+   // engine of record did not apply the veto, so a BAR pass with the gate ON would have
+   // named a protection that could not act — a filter that silently does nothing, which
+   // is the one failure mode this mechanism exists to prevent. The engine of record now
+   // applies the SAME +/-15-minute stand-down from the SAME file at the SAME instant
+   // (`scripts/midas_sweep.py` `use_news`, fed by `scripts/midas_parity.py --news`), so
+   // the combination is no longer a lie and no longer needs refusing.
+   //
+   // It is still not a REPRODUCTION. The frozen walk-forward was run news-OFF, so a BAR
+   // pass with the gate ON measures a different strategy — an amendment. That is said
+   // here, and stamped into the ledger's era note below, because the difference between
+   // the two runs has to survive the pass.
    if(InpBarModel && InpUseNewsFilter)
    {
-      Print(VersionTag() + "INIT FAILED: InpBarModel + InpUseNewsFilter — the parity replay "
-            "does not apply the news veto (and neither does the research engine of record "
-            "yet); this combination would name a protection that cannot act. Run the gate "
-            "on the PERTICK path, or leave it off for parity.");
-      return INIT_FAILED;
+      Print(VersionTag() + "NEWS STAND-DOWN ON IN BAR REPLAY: an AMENDMENT to the certified "
+            "contract, not a reproduction of it — the frozen walk-forward ran with the gate "
+            "OFF. The python engine of record applies this same veto from the same "
+            "calendar, so the two engines still compare key-by-key.");
    }
 
    // NEWS FILTER — R6 REVISED, 2026-09-20. The v1.16 decision was an INIT_FAILED
@@ -724,6 +730,12 @@ int OnInit()
    // keep the exact parity-era note byte-for-byte.
    if(!InpBarModel)
       era_note += "+telemetry-only-per-V2-register";
+   // v1.19d: a BAR pass with the news gate ON is an AMENDMENT (see the init note), and the
+   // ledger is where that has to survive — a pass certifying a stance the corpus never ran
+   // must not be byte-identical to one that reproduced it. The gate-OFF BAR note is
+   // untouched, because those ledgers are compared against the certified era verbatim.
+   if(InpBarModel && InpUseNewsFilter)
+      era_note += "+news-amendment";
    // v1.18: the NOFILL diagnostics ledger is review-item-1 telemetry. NOFILL
    // rows are appends AFTER trade rows, never alter any CLOSE row, and exist
    // only in live/paper-file ledgers — this tag keeps the version transition

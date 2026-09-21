@@ -249,12 +249,40 @@ def test_an_empty_answer_never_overwrites_a_usable_calendar() -> None:
         "the write must be guarded before the file is opened for writing"
 
 
-def test_the_bar_replay_refuses_a_gate_it_cannot_apply() -> None:
-    """BAR parity replays a corpus certified news-OFF: a rule the other engine cannot see
-    is a silent no-op, so that combination is refused at init instead of pretended."""
+def test_the_bar_replay_no_longer_refuses_a_gate_the_other_engine_now_applies() -> None:
+    """v1.19c refused `InpBarModel + InpUseNewsFilter` at init because the python engine of
+    record could not apply the veto: a rule the other engine cannot see is a silent no-op.
+
+    v1.19d removed that refusal — but only because the condition it named went away. The
+    engine of record applies the same veto now (`scripts/midas_sweep.py` `use_news`), and
+    the test below is what keeps the removal honest: if the mirror is ever dropped, the
+    refusal must come back, because this combination would be a lie again.
+    """
     init = EA_CODE[EA_CODE.index("int OnInit()"):]
-    block = init[init.index("if(InpBarModel && InpUseNewsFilter)"):]
-    assert "INIT_FAILED" in block[:600]
+    block = init[init.index("if(InpBarModel && InpUseNewsFilter)"):][:900]
+    assert "INIT_FAILED" not in block, (
+        "the sole reason for that refusal — the other engine cannot apply the rule — is "
+        "gone; refusing now would forbid a comparison the harness can make")
+    assert "AMENDMENT" in block, \
+        "but it is still not a reproduction, and the init line must say so"
+    mirror = (REPO / "scripts" / "midas_sweep.py").read_text(encoding="utf-8")
+    assert "def use_news(" in mirror and "news_veto_reason(" in mirror, (
+        "the EA may only drop that refusal while the engine of record really applies the "
+        "veto — this assertion is the pair to the one above")
+    engine = (REPO / "scripts" / "midas_parity.py").read_text(encoding="utf-8")
+    assert "use_news(events if news else None)" in engine, (
+        "and the harness must arm it on both sides in one stance")
+
+
+def test_a_bar_pass_with_the_gate_on_is_stamped_as_an_amendment() -> None:
+    """A pass certifying a stance the corpus never ran must not look identical to one that
+    reproduced it. The ledger's era note is where that survives the pass."""
+    b = EA_CODE
+    assert 'if(InpBarModel && InpUseNewsFilter)\r\n      era_note += "+news-amendment";' \
+        in b or 'if(InpBarModel && InpUseNewsFilter)\n      era_note += "+news-amendment";' in b, \
+        "the BAR+news pass must say so in its own ledger"
+    assert 'era_note = InpBarModel ? "bar-model-parity"' in b, (
+        "and the gate-OFF BAR note must stay byte-for-byte as certified")
 
 
 # --- and the two engines must not drift ----------------------------------------------

@@ -127,8 +127,14 @@ def test_harness_declares_the_r6_preconditions() -> None:
                 and isinstance(node.targets[0], ast.Name):
             consts[node.targets[0].id] = node.value
     gold, news = consts.get("R6_GOLD_ONLY"), consts.get("R6_NEWS_FILTER_OFF")
+    mirrored = consts.get("R6_NEWS_MIRRORED")
     assert isinstance(gold, ast.Constant) and gold.value is True
-    assert isinstance(news, ast.Constant) and news.value is True
+    assert isinstance(news, ast.Constant) and news.value is True, \
+        "the certified contract still declares the gate OFF by default"
+    assert isinstance(mirrored, ast.Constant) and mirrored.value is True, (
+        "R6, REVISED 2026-09-21: the invariant is no longer 'news is never on' — the "
+        "engine of record applies the same veto now, so what must hold is that the gate "
+        "is NEVER ON FOR ONE ENGINE ONLY")
 
 
 def test_harness_asserts_a_gold_feed() -> None:

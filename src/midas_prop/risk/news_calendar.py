@@ -118,6 +118,17 @@ def parse(text: str) -> Calendar:
                     window_to_utc=window_to, events=tuple(events), declared_events=declared)
 
 
+def top_tier_events(cal: Calendar) -> tuple[Event, ...]:
+    """The events that can veto, in the order the file lists them.
+
+    ONE definition of "what blocks an entry", shared by every consumer: the EA's reader
+    applies `is_top_tier` per event, and the research engines take this slice rather than
+    filtering for themselves. A second filter with a different constant is how two
+    engines end up measuring different rules while both claiming the same policy.
+    """
+    return tuple(e for e in cal.events if e.is_top_tier)
+
+
 def _int(value: str) -> int:
     try:
         return int(value)
