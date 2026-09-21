@@ -1443,3 +1443,142 @@ class ArmingGate:
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
         return (now - then).total_seconds() / 86400.0
+
+    def evidence_family(self, ea_source: str | os.PathLike | None = None) -> dict:
+        """Does the evidence the arming record cites describe THIS strategy?
+
+        THE DEFECT THIS CLOSES (measured 2026-09-21). ``artifacts/live/armed.json`` cites
+        ``artifacts/gold_wfo.json`` in its ``gate_detail``, and that artifact is a walk-forward
+        of an **M15 EMA stack** (its only trigger axis is ``spec.grid.ema_sets``, and neither
+        Bollinger nor RSI appears anywhere in the engine that wrote it). The EA's trigger is
+        BB(20, 2.0) touch-back-inside or RSI(14) 70/30. Measured on the same 174 days of M15
+        bars the two rules agree on the same bar AND the same direction 258 times — **3.4%** of
+        the gate engine's 7,606 signals. So the verdict the record cites is a statement about a
+        different strategy, and nothing in the record said so.
+
+        A disagreement is a REFUSAL unless the arming record says so in words
+        (``gate_family_mismatch``), because what is being prevented is a verdict about one
+        strategy being *presented* as the evidence for another — not an operator who knows and
+        says so. A declaration that cannot be read on either side is also a refusal: "we could
+        not tell" is not agreement, and defaulting it to one would make this check decorative.
+        """
+        root = Path(__file__).resolve().parents[3]
+        src = Path(ea_source) if ea_source else root / DEFAULT_EA_SOURCE
+        try:
+            ea = ea_strategy_family(src)
+        except OSError as exc:
+            return {"state": "unknown", "ea": None, "artifact": None, "disclosed": False,
+                    "reason": f"cannot read the EA source {src}: {exc}"}
+        try:
+            arm = self.read_arm_file()
+        except (FileNotFoundError, ValueError) as exc:
+            return {"state": "no-arm-record", "ea": ea, "artifact": None,
+                    "disclosed": False,
+                    "reason": f"no readable arming record ({exc}) — nothing cites any evidence"}
+        detail = arm.get("gate_detail") or {}
+        cited = detail.get("artifact") or detail.get("artifact_path")
+        disclosed = bool(arm.get("gate_family_mismatch"))
+        if not cited:
+            return {"state": "unknown", "ea": ea, "artifact": None, "disclosed": disclosed,
+                    "reason": "the arming record cites no validation artifact, so there is no "
+                              "declared strategy family to compare"}
+        art_path = Path(cited)
+        if not art_path.is_absolute():
+            art_path = root / cited
+        try:
+            art = artifact_strategy_family(art_path)
+        except (OSError, ValueError) as exc:
+            return {"state": "unknown", "ea": ea, "artifact": None, "disclosed": disclosed,
+                    "reason": f"cannot read the cited artifact {cited}: {exc}"}
+        base = {"ea": ea, "artifact": art, "disclosed": disclosed}
+        if ea["family"] == FAMILY_UNKNOWN or art["family"] == FAMILY_UNKNOWN:
+            return {**base, "state": "unknown",
+                    "reason": "a strategy family is not declared on both sides and cannot be "
+                              f"established — EA: {ea['evidence']}; artifact: {art['evidence']}"}
+        if ea["family"] == art["family"]:
+            return {**base, "state": "match",
+                    "reason": f"both sides declare {ea['family']} — EA: {ea['evidence']}; "
+                              f"artifact: {art['evidence']}"}
+        reason = (f"the cited artifact measured {art['family']} ({art['evidence']}), while the "
+                  f"EA implements {ea['family']} ({ea['evidence']}) — a verdict about a "
+                  f"different strategy, presented as this arm's evidence")
+        return {**base, "state": "disclosed-mismatch" if disclosed else "mismatch",
+                "reason": reason + (" [the arming record discloses this]" if disclosed
+                                    else " [the arming record does NOT say so]")}
+
+
+# --------------------------------------------------------------------------- #
+# Strategy families: which rule did a result measure?
+# --------------------------------------------------------------------------- #
+
+#: The EA whose behaviour every certification has to describe.
+DEFAULT_EA_SOURCE = "mql5/MIDASTOUCH/MidastouchAI.mq5"
+
+FAMILY_UNKNOWN = "undeclared"
+FAMILY_BB_RSI = "bb_rsi_trigger"
+FAMILY_EMA_STACK = "ema_stack_trigger"
+
+
+def ea_strategy_family(source_path: str | os.PathLike) -> dict:
+    """What entry rule does this EA source implement? Read from the source, not asserted.
+
+    Reads the trigger the source actually builds (``iBands``/``iRSI`` handles and the inputs
+    that parameterise them) rather than a comment or a version string, because the whole
+    failure this guards against is a *label* that disagrees with the code.
+    """
+    import re
+    text = Path(source_path).read_text(encoding="utf-8", errors="replace")
+
+    def num(name: str, cast=float):
+        m = re.search(rf"input\s+\w+\s+{name}\s*=\s*([0-9.]+)", text)
+        return cast(m.group(1)) if m else None
+
+    bb, dev = num("InpBBPeriod", int), num("InpBBDev")
+    rsi = num("InpRSIPeriod", int)
+    lo, up = num("InpRSILower"), num("InpRSIUpper")
+    macro = num("InpMacroEmaPeriod", int)
+    if "iBands(" in text and "iRSI(" in text and bb and rsi:
+        return {"family": FAMILY_BB_RSI, "declared": True,
+                "evidence": f"iBands + iRSI handles: BB({bb}, {dev}), RSI({rsi}) "
+                            f"{lo:g}/{up:g}, regime EMA{macro} on H1+H4"}
+    if "EMA_FAST" in text or re.search(r"\be_f\b\s*[<>]\s*\be_m\b", text):
+        return {"family": FAMILY_EMA_STACK, "declared": True,
+                "evidence": "an EMA-stack trigger in the source"}
+    return {"family": FAMILY_UNKNOWN, "declared": False,
+            "evidence": "no Bollinger/RSI handles and no EMA-stack trigger found"}
+
+
+def artifact_strategy_family(artifact_path: str | os.PathLike) -> dict:
+    """What entry rule did this validation artifact measure? Read, then refuse if unreadable.
+
+    Two shapes are recognised, both of them by their own declaration rather than by guessing:
+    an artifact carrying a ``rule.trigger`` in words (``rule.trigger``), and one whose only
+    trigger axis is an EMA grid (``spec.grid.ema_sets`` — the shape
+    ``scripts/gold_walkforward.py`` writes). Anything else is ``FAMILY_UNKNOWN``, which the
+    gate treats as a refusal: an artifact that does not say what it measured cannot be shown
+    to describe the arm.
+    """
+    import json
+    raw = json.loads(Path(artifact_path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        return {"family": FAMILY_UNKNOWN, "declared": False,
+                "evidence": "the artifact is not a JSON object"}
+    rule = raw.get("rule") if isinstance(raw.get("rule"), dict) else {}
+    trigger = str(rule.get("trigger", "")).strip()
+    if trigger:
+        upp = trigger.upper()
+        if "BB(" in upp and "RSI" in upp:
+            fam = FAMILY_BB_RSI
+        elif "EMA" in upp:
+            fam = FAMILY_EMA_STACK
+        else:
+            fam = FAMILY_UNKNOWN
+        return {"family": fam, "declared": True, "evidence": f"rule.trigger = {trigger!r}"}
+    spec = raw.get("spec") if isinstance(raw.get("spec"), dict) else {}
+    grid = spec.get("grid") if isinstance(spec.get("grid"), dict) else {}
+    if "ema_sets" in grid:
+        return {"family": FAMILY_EMA_STACK, "declared": True,
+                "evidence": "spec.grid.ema_sets — the grid's trigger axis is an EMA stack"}
+    return {"family": FAMILY_UNKNOWN, "declared": False,
+            "evidence": ("no rule.trigger and no spec.grid.ema_sets — this artifact does not "
+                         "declare which rule it measured")}

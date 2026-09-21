@@ -145,6 +145,10 @@ SPREAD_FLOOR = 0.10               # dollars, when the bar records 0
 SL_ATR_MULT = 2.0
 TP_MULT = 2.0
 TIMEOUT_BARS = 48
+#: The UTC entry window, and the EA's own defaults (InpSessionStartHour / InpSessionEndHour).
+#: Named constants rather than literals so a caller can sweep the window the way the EA's
+#: inputs allow (`run_mode(..., win_lo=, win_hi=)`) without editing a literal in the engine.
+SESSION_LO, SESSION_HI = 6, 20
 SESSION_HOURS = (12, 16)          # H1 (frozen hypothesis window)
 
 WINDOWS = {
@@ -443,7 +447,24 @@ def minlot_risk_exceeds_cap(stop_d: float, basis: float) -> bool:
     return stop_d * TICK_VALUE_PER_LOT * MIN_LOT > basis * MAX_RISK_FRACTION
 
 
-def run_mode(mode: str, t0: int, t1: int, data: dict) -> RunResult:
+def run_mode(mode: str, t0: int, t1: int, data: dict, *,
+             sl_atr_mult: float = SL_ATR_MULT, tp_mult: float = TP_MULT,
+             win_lo: int = SESSION_LO, win_hi: int = SESSION_HI,
+             risk_fraction: float = RISK_FRACTION) -> RunResult:
+    """One mode over one window. Every keyword defaults to the certified value.
+
+    EXTENDED 2026-09-21 for the EA-rule walk-forward (`scripts/gold_wfo_ea.py`, protocol
+    `docs/GOLD_WFO_EA_PROTOCOL.md`). Before this, four certified quantities were module
+    constants, so a caller could not sweep them — and the grid axes a walk-forward needs
+    (stop width, target multiple, session window, sizing fraction) are exactly those four.
+    Every one is also a live EA input (`InpSlAtrMult`, `InpTpMult`,
+    `InpSessionStartHour`/`EndHour`, `InpRiskPercent`), so sweeping them certifies something
+    an operator can actually select.
+
+    The defaults reproduce the pre-extension behaviour EXACTLY — same numbers, same
+    arithmetic, same trades — which is what the parity pins assert, because a parity pass
+    that silently re-sizes or re-times a fill would compare two different strategies.
+    """
     h1, m15, h4 = data["h1"], data["m15"], data["h4"]
     h1_ema, h1_atr = data["h1_ema"], data["h1_atr"]
     h4_ema = data["h4_ema"]
@@ -471,7 +492,7 @@ def run_mode(mode: str, t0: int, t1: int, data: dict) -> RunResult:
             sp_open = max(b["spread"], SPREAD_FLOOR)
             fill = b["open"] + side * sp_open / 2
             stop_d = pending["stop_d"]
-            risk_frac_dollars = equity * RISK_FRACTION
+            risk_frac_dollars = equity * risk_fraction
             lots = risk_frac_dollars / (stop_d * TICK_VALUE_PER_LOT)
             if lots < MIN_LOT:
                 if minlot_risk_exceeds_cap(stop_d, equity):
@@ -487,7 +508,7 @@ def run_mode(mode: str, t0: int, t1: int, data: dict) -> RunResult:
             risk_d = stop_d * TICK_VALUE_PER_LOT * lots
             pos = {"side": side, "entry": fill,
                    "sl": fill - side * stop_d,
-                   "tp": fill + side * stop_d * TP_MULT,
+                   "tp": fill + side * stop_d * tp_mult,
                    "open_ct": b["time"], "lots": lots, "risk_d": risk_d,
                    "sp": sp_open, "closed": False, "mfe": 0.0, "mae": 0.0,
                    "hour": pending["hour"], "mac": pending["mac"],
@@ -514,7 +535,7 @@ def run_mode(mode: str, t0: int, t1: int, data: dict) -> RunResult:
             continue
 
         atr = h1_atr[k1 - 1]
-        stop_d = SL_ATR_MULT * atr
+        stop_d = sl_atr_mult * atr
         if stop_d <= 0:
             continue
         mac = macro_state(h1[k1 - 1]["close"], h1_ema[k1 - 1],
@@ -560,7 +581,7 @@ def run_mode(mode: str, t0: int, t1: int, data: dict) -> RunResult:
         # 4) session gate (frozen policy: entries only 06:00-20:00 UTC),
         #    then STASH the signal — it fills at the next bar's open.
         hr = datetime.fromtimestamp(b["time"], tz=timezone.utc).hour
-        if not (6 <= hr < 20):
+        if not (win_lo <= hr < win_hi):
             continue
 
         # 4b) NEWS STAND-DOWN. Sits with the time gates and before the signal is
@@ -607,7 +628,7 @@ def _manage(pos: dict, b: dict, res: RunResult, equity: float) -> None:
         elif b["low"] <= pos["tp"]:
             exit_px, reason = pos["tp"], "TP"
     bars_held = b["time"] + 900 - pos["open_ct"]
-    if exit_px is None and bars_held >= TIMEOUT_BARS * 900:
+    if exit_px is None and bars_held >= pos.get("timeout_bars", TIMEOUT_BARS) * 900:
         sp = max(b["spread"], SPREAD_FLOOR)
         exit_px = b["close"] - side * sp / 2
         reason = "TIMEOUT"

@@ -162,7 +162,9 @@ def test_ea_version_is_the_r6_build() -> None:
     prop = re.search(r'#property\s+version\s+"(\d+)\.(\d+)"', s)
     define = re.search(r'#define\s+APP_VERSION\s+"MIDAS(\d+)\.(\d+)"', s)
     assert prop and define and prop.groups() == define.groups()
-    # R6 shipped as v1.16; the tree advanced to v1.17 (P5 telemetry) and
-    # v1.18 (NOFILL diagnostics) with registered never-abort builds — the
-    # pin follows the tree's registered version history.
-    assert define.group(2) in ("16", "17", "18", "19"), "tree version outside registered history"
+    # R6 shipped as v1.16; the tree advanced through v1.17 (P5 telemetry), v1.18 (NOFILL
+    # diagnostics), v1.19 (the P6 build block) and v1.20 (the restart-persistent refusal
+    # census) — each a registered never-abort build, and the pin follows that history.
+    # A NEW RELEASE EXTENDS THIS LIST, it does not replace it.
+    assert define.group(2) in ("16", "17", "18", "19", "20"), \
+        "tree version outside registered history"

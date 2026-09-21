@@ -34,7 +34,7 @@
 //| passing forward gate, in its own reviewed build.                 |
 //+------------------------------------------------------------------+
 #property copyright "MIDASTOUCH"
-#property version   "1.19"   // v1.19: P6 build block — parameterized entry TF (InpEntryTF, default M15 = certified) + TP-preset axis; certified paths byte-identical at defaults
+#property version   "1.20"   // v1.20: the RESTART-PERSISTENT REFUSAL CENSUS (NOFILLSUM + the UTC-day roll). v1.19 described two different builds — with and without the census — and a version tag that cannot tell them apart is worse than no tag: the ledger's ERA row is how a replay knows which behaviour produced it. v1.19: P6 build block (InpEntryTF default M15 = certified) + TP-preset axis
 // Tester agents wipe their Files sandbox at pass start: this property makes
 // the tester copy the recorded-spread series from <data>\MQL5\Files into the
 // agent for every BAR-mode pass (name must be the literal staged file).
@@ -157,7 +157,11 @@ int            g_nofill_signal = 0, g_nofill_mism = 0, g_nofill_session = 0,
                g_nofill_friday = 0, g_nofill_spread = 0, g_nofill_riskcap = 0,
                g_nofill_brk = 0, g_nofill_notr = 0, g_nofill_wrote = 0,
                g_nofill_news = 0;   // v1.19c: news stand-down (reason in the journal line)
-datetime       g_diag_day0 = 0;
+// v1.20: the census' DAY KEY and the signature of what was last recorded. Both are
+// restored from the ledger at init, so the counters above survive an EA reload instead
+// of being zeroed by it. See DiagRestoreFromLedger for the failure this replaces.
+int            g_diag_day = 0;       // UTC day number the counters belong to (0 = nothing measured)
+string         g_diag_sig = "";      // signature of the counters already written to a NOFILLSUM row
 // v1.19c: calendar-refresh bookkeeping. The gate is fail-closed, so a source that is
 // never refreshed becomes a permanent stand-down — these keep the EA from either
 // hammering the venue's API or silently letting the file age out.
@@ -224,7 +228,7 @@ double DollarPerUnit()
    return DollarPerUnitPerLot(dpu) ? dpu : 0.0;
 }
 
-#define APP_VERSION  "MIDAS1.19"   // v1.19: P6 build block (InpEntryTF parameter + TP-preset axis) — defaults byte-identical to v1.18
+#define APP_VERSION  "MIDAS1.20"   // v1.20: the census build (see #property version). The banner, the ledger's ERA row and every reader of them move together — tests/test_midas_hud.py pins #property == APP_VERSION so the two can never drift apart
 #define SPREAD_FLOOR 0.10              // $ — MUST equal midas_sweep.SPREAD_FLOOR
 #define LEDGER_BASE  "MIDASTOUCH_paper"
 
@@ -793,8 +797,14 @@ int OnInit()
    // midas_verdict's never-abort class via this citation (§1 walk).
    if(!InpBarModel)
       era_note += "+p6-entrytf";
+   // v1.20: the census gained a row type (NOFILLSUM) and reads itself back at init, a
+   // grammar change that belongs in the era note for the same reason +diag-nofill does:
+   // a reader must be able to tell which ledger it is holding from the ledger alone.
+   if(!InpBarModel)
+      era_note += "+diag-census";
    PaperLog(StringFormat("ERA,%s,%I64d,%s", APP_VERSION, (long)TimeCurrent(), era_note));
    RestoreOrVerifyLedger();
+   DiagRestoreFromLedger();             // v1.20: continue the day this reload interrupted
    if(!MQLInfoInteger(MQL_TESTER))
       PaperLog(StringFormat("EQ,%.2f", PaperEquity()));   // v1.07: init epoch touch (watchdog sees a fresh mtime immediately)
    EventSetTimer(900);                                 // v1.07: heartbeat — the ledger must provably stay live
@@ -810,6 +820,7 @@ void OnDeinit(const int reason)
    EventKillTimer();                                   // v1.07: release the heartbeat
    if(InpBarModel)
       ReplayTailFlush();
+   DiagSnapshot();      // v1.20: capture the census on the way out (recompile, close, restart)
    PaperLog(StringFormat("EQ,%.2f", PaperEquity()));
    IndicatorRelease(g_h1_ema); IndicatorRelease(g_h4_ema);
    IndicatorRelease(g_h1_atr); IndicatorRelease(g_m15_bb);
@@ -1322,6 +1333,127 @@ void DiagCountReset()
    g_nofill_friday = 0; g_nofill_spread = 0; g_nofill_riskcap = 0;
    g_nofill_brk = 0; g_nofill_notr = 0; g_nofill_wrote = 0; g_nofill_news = 0;
 }
+// v1.20: the UTC DAY NUMBER (epoch / 86400) the counters belong to. The v1.18 cadence
+// was "once per 24h since the first refusal", anchored in memory — so every EA reload
+// moved the anchor and, with the reloads this arm actually sees, the daily census could
+// never fire at all. A day KEY cannot drift with the process: it is a property of the
+// clock, and the counters that belong to it are read back from the ledger.
+int UtcDayNo(datetime t) { return (int)((long)t / 86400); }
+// The nine counters, in the LEDGER's field order. One definition, used by the census row
+// and by the snapshot row, so the two can never disagree about a column's meaning.
+string DiagCounters()
+{
+   return StringFormat("%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                       g_nofill_signal, g_nofill_mism, g_nofill_session,
+                       g_nofill_friday, g_nofill_spread, g_nofill_riskcap,
+                       g_nofill_brk, g_nofill_notr, g_nofill_news);
+}
+string DiagSignature(int day) { return StringFormat("%d|%s", day, DiagCounters()); }
+
+//+------------------------------------------------------------------+
+//| The census snapshot: the RUNNING counters, written to the ledger  |
+//| so a reload can pick them up instead of restarting from zero.     |
+//|                                                                   |
+//| MEASURED DEFECT, 2026-09-21. The ledger held NO NOFILL row for a  |
+//| whole live day on which every bar was refused, because the day    |
+//| anchor and all nine counters were in-memory globals: 22 EA inits  |
+//| that day, each one resetting them, and the once-per-24h rule could|
+//| never fire. The one record built to answer "why didn't it trade"  |
+//| was unreachable exactly when the arm was being reloaded most.     |
+//|                                                                   |
+//| A NOFILLSUM row is appended whenever the counters CHANGE (or the  |
+//| day rolls), which is at most one row per evaluated M15 bar, plus  |
+//| one on deinit. So the worst a crash can lose is the increments    |
+//| since the last accounting call — and every increment site calls    |
+//| DiagMaybeWrite immediately.                                        |
+//+------------------------------------------------------------------+
+void DiagSnapshot()
+{
+   if(MQLInfoInteger(MQL_TESTER)) return;                 // parity ledgers byte-clean
+   if(InpBarModel) return;
+   if(g_diag_day == 0) return;                            // nothing measured yet
+   string sig = DiagSignature(g_diag_day);
+   if(sig == g_diag_sig) return;                          // unchanged: no row, the ledger stays readable
+   PaperLog(StringFormat("NOFILLSUM,%I64d,%d,%s",
+            (long)TimeUTCNow(), g_diag_day, DiagCounters()));
+   g_diag_sig = sig;
+}
+
+//+------------------------------------------------------------------+
+//| The roll: on the FIRST accounting call of a new UTC day, write    |
+//| the census row for the day that just ended.                        |
+//+------------------------------------------------------------------+
+void DiagRollIfNewDay(datetime now)
+{
+   if(MQLInfoInteger(MQL_TESTER)) return;
+   if(InpBarModel) return;
+   int day = UtcDayNo(now);
+   if(g_diag_day == 0) { g_diag_day = day; return; }       // first sighting: no day has ended
+   if(day == g_diag_day) return;
+   if(g_nofill_signal > 0)                                // a zero-activity day writes nothing
+   {
+      // The field list is APPEND-ONLY and positional: consumers read it by index, so a
+      // new counter goes on the end and the format literal changes only by addition.
+      PaperLog(StringFormat("NOFILL,%I64d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+               (long)now, g_nofill_signal, g_nofill_mism,
+               g_nofill_session, g_nofill_friday, g_nofill_spread,
+               g_nofill_riskcap, g_nofill_brk, g_nofill_notr, g_nofill_news));
+      g_nofill_wrote++;
+   }
+   DiagCountReset();
+   g_diag_day = day;
+   g_diag_sig = "";     // force the zeroed state onto the record: a reload after a roll
+                        // must not resurrect the counts the roll just accounted for
+}
+
+//+------------------------------------------------------------------+
+//| Read the census back. Called from OnInit, after the ERA row, so  |
+//| a reload continues the day it interrupted instead of erasing it.  |
+//+------------------------------------------------------------------+
+void DiagRestoreFromLedger()
+{
+   if(MQLInfoInteger(MQL_TESTER)) return;
+   if(InpBarModel) return;
+   int fh = FileOpen(PaperFile(), FILE_READ | FILE_TXT | FILE_ANSI);
+   if(fh == INVALID_HANDLE)
+   {
+      Print(VersionTag() + "NOFILL census: fresh ledger, nothing to restore");
+      return;
+   }
+   ulong snap_ct = 0;
+   int snap_day = 0;
+   int c[9];
+   ArrayInitialize(c, 0);
+   while(!FileIsEnding(fh))
+   {
+      string line = FileReadString(fh);
+      string p[];
+      int n = StringSplit(line, ',', p);
+      // NOFILLSUM = prefix + epoch + day + 9 counters = 12 fields. A short row is not a
+      // snapshot (and is not silently treated as one): the last COMPLETE row wins.
+      if(n < 12 || p[0] != "NOFILLSUM") continue;
+      snap_ct  = (ulong)StringToInteger(p[1]);
+      snap_day = (int)StringToInteger(p[2]);
+      for(int i = 0; i < 9; i++) c[i] = (int)StringToInteger(p[3 + i]);
+   }
+   FileClose(fh);
+   if(snap_ct == 0)
+   {
+      Print(VersionTag() + "NOFILL census: no snapshot row yet, counting from zero");
+      return;
+   }
+   g_diag_day = snap_day;
+   g_nofill_signal = c[0]; g_nofill_mism = c[1]; g_nofill_session = c[2];
+   g_nofill_friday = c[3]; g_nofill_spread = c[4]; g_nofill_riskcap = c[5];
+   g_nofill_brk = c[6]; g_nofill_notr = c[7]; g_nofill_news = c[8];
+   g_diag_sig = DiagSignature(g_diag_day);   // already on the record: do not rewrite it
+   PrintFormat(VersionTag() + "NOFILL census restored: day=%d signal=%d no-trigger=%d "
+               "mismatch=%d session=%d friday=%d spread=%d riskcap=%d breaker=%d news=%d "
+               "(from NOFILLSUM @%I64u)",
+               g_diag_day, g_nofill_signal, g_nofill_notr, g_nofill_mism,
+               g_nofill_session, g_nofill_friday, g_nofill_spread, g_nofill_riskcap,
+               g_nofill_brk, g_nofill_news, snap_ct);
+}
 string TextVeto(int trigger, int mac)
 {
    if(trigger == 0 && mac == 0)  return "NO-SIGNAL(0,0)";
@@ -1329,22 +1461,16 @@ string TextVeto(int trigger, int mac)
    if(mac == 0)                  return StringFormat("MACRO-DIVERGENCE(trg=%+d)", trigger);
    return StringFormat("MISMATCH(mac=%+d,trg=%+d)", mac, trigger);
 }
+// The single accounting entry point every veto path calls (and the heartbeat calls).
+// v1.20: it no longer decides WHEN the census is due from an in-memory anchor — it rolls
+// the day and records the running state, and the two guards above are what keep certified
+// BAR-replay ledgers byte-identical (the tester never reaches either row).
 void DiagMaybeWrite()
 {
    if(MQLInfoInteger(MQL_TESTER)) return;                 // parity ledgers byte-clean
    if(InpBarModel) return;
-   if(g_nofill_signal == 0) return;                       // nothing to account
-   if(g_diag_day0 == 0) g_diag_day0 = TimeUTCNow();
-   if(TimeUTCNow() - g_diag_day0 < 86400) return;         // once per UTC day
-   // The trailing field is APPENDED, never inserted: consumers that read the row by
-   // position keep working, and a census that omitted news vetoes would be misleading
-   // in exactly the way this program refuses to be.
-   PaperLog(StringFormat("NOFILL,%I64d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
-            (long)TimeUTCNow(), g_nofill_signal, g_nofill_mism,
-            g_nofill_session, g_nofill_friday, g_nofill_spread,
-            g_nofill_riskcap, g_nofill_brk, g_nofill_notr, g_nofill_news));
-   g_nofill_wrote++;
-   DiagCountReset();
+   DiagRollIfNewDay(TimeUTCNow());
+   DiagSnapshot();
 }
 //+------------------------------------------------------------------+
 //| New-M15-bar pump — research-parity execution:                    |
@@ -1845,6 +1971,9 @@ void TrackFreshM15Bar()
       if(trigger == 0) g_nofill_notr++;                 //   no trigger fired at all
       else             g_nofill_mism++;                 //   trigger fired but mode refused
       g_last_action = StringFormat("VETO %s", TextVeto(trigger, mac));   // v1.18: honest HUD
+      DiagMaybeWrite();   // v1.20: this is the COMMONEST veto class and it used to return
+                          // without accounting — the census leaned on the 15-min heartbeat
+                          // to notice it, which is only true while the EA is still running
       return;
    }
    g_last_action = StringFormat("SIGNAL %s evaluated",   // v1.10 HUD (PERTICK path only)

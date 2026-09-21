@@ -1,5 +1,60 @@
 # Changelog
 
+## 2026-09-21 (late) — the build that carries the census stops calling itself 1.19
+
+- **`MIDAS1.19` described two different builds.** The restart-persistent census (NOFILLSUM
+  rows, the UTC-day roll, the init restore) shipped in the source while `#property version`
+  and `APP_VERSION` still read `1.19`, so a build *with* the census and a build *without* it
+  were indistinguishable in the journal banner and in the ledger's `ERA` row — the one field a
+  replay uses to know which behaviour produced a row. Measured: the previous build wrote
+  `ERA,MIDAS1.19,1790021732,...,+diag-census`.
+- **Both tags are now `1.20`**, and the source comments that had already moved to "v1.20" for
+  this change now agree with the tag. The compiled binary is deployed to both copies:
+  `source 921c7c88 == the source the deployed binary was built from`.
+- **The pins were literals and are now invariants**, because a literal is what let the tag go
+  stale: `tests/test_midas_telemetry.py` asserts the label *rides* the P6 build block
+  (`>= 1.19`) and that `APP_VERSION` equals whatever `#property version` declares;
+  `tests/test_midas_p6_build.py` asserts the deployer admits the released version's ERA stamp
+  (and a v1.20 ledger verifies); `tests/test_midas_r6_preconditions.py` extends the registered
+  version history to include 1.20. The deployer's accepted-stamp list is *extended*, never
+  replaced — an un-migrated ledger still has to verify.
+
+## 2026-09-21 (evening) — the refusal census survives a restart, and stops mislabeling itself
+
+- **The census is now in the ledger, not in the process.** The v1.18 rule was "write a NOFILL
+  row once per 24h since the first refusal", anchored in an in-memory `datetime`. MEASURED:
+  on 2026-09-21 the arm logged **22 inits** and the ledger held **zero** NOFILL rows for a
+  live day on which every evaluated bar was refused — each reload reset the anchor and all
+  nine counters, so the rule could never fire. The one record built to answer "why didn't it
+  trade" was unreachable exactly when the arm was being reloaded most.
+- **New row `NOFILLSUM,<epoch>,<utc day>,<9 counters>`** — the RUNNING census, appended
+  whenever a counter changes (at most one per evaluated M15 bar) and on `OnDeinit`, so a crash
+  or a recompile loses nothing measurable. The census `NOFILL` row is now written by the
+  **UTC day roll** (`UtcDayNo`, epoch/86400 — a property of the clock, not of the process),
+  and after the roll the zeroed state is forced onto the record so a reload cannot resurrect
+  counts the roll already accounted for.
+- **The EA reads it back at init**: `DiagRestoreFromLedger()` runs after the ERA row and
+  before any veto can be counted, and prints `NOFILL census restored: day=… signal=… (from
+  NOFILLSUM @…)`. `morning_status` gained `nofill_open_day()` and prints the day in progress
+  (`no-fill (day N, running): …`) beside the rolled 24h line, so the question answers during
+  the day. Proven on the live arm, not just pinned: two real reloads at 19:04:55 and 19:15:32
+  restored `day=20717 signal=1 no-trigger=1` instead of counting from zero, and the restored
+  counter then continued to 2 on the next bar. Era note carries `+diag-census`.
+- **A read-side defect found while wiring it up**: `morning_status.NOFILL_KEYS` named the
+  row's fields in a different order than the EA writes them — `no_trigger` third where the
+  third field is `session` — so every column from three onward was reported under the wrong
+  name (session vetoes attributed to the trigger, spread vetoes to the risk cap). Nothing
+  caught it because the only fixture used a row whose trailing fields were all zero, and a
+  permutation of zeros is invisible. The tuple now carries the writer's order and the pin
+  uses nine distinct values, which is the test that would have caught it.
+- Also fixed: the **commonest** veto path (`NO-TRIGGER` mode refusals, the dominant class in a
+  quiet market) returned without calling the accounting entry point at all, leaning on the
+  15-minute heartbeat to notice it — true only while the EA is still running.
+- `docs/MIDASTOUCH_HEALTH_GUIDE.md` §3a documents the two rows, the counter order, how to read
+  them, and why a ledger with no snapshot row reports nothing rather than zeros.
+- Tests: `tests/test_nofill_census_restart.py` (11) plus the rewritten cadence pins in
+  `tests/test_midas_telemetry.py` — **1257 passed, 10 skipped**; surface audit 0 dangling.
+
 ## 2026-09-21 (after the push) — "I copied nothing" is not "the build is stale"
 
 - **`scripts/compile_midas.py`** no longer prints `NOT deployed — a chart still loads whatever

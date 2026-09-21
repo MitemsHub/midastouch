@@ -46,7 +46,9 @@ def test_v119_frozen_defaults():
     mm = re.search(r'#property version\s+"([\d.]+)"', s)
     md = re.search(r'#define\s+APP_VERSION\s+"MIDAS(\d+)\.(\d+)"', s)
     assert mm and md and mm.group(1) == f"{md.group(1)}.{md.group(2)}"
-    assert md.group(2) == "19", "this build block is v1.19"
+    # v1.20 (2026-09-21): this was `== "19"`, which forbade any later release from keeping
+    # the frozen defaults. The invariant is that the build is the P6 block or a later one.
+    assert int(md.group(2)) >= 19, "the P6 build block rides v1.19 or later"
 
 
 def test_live_path_fully_tf_parameterized():
@@ -213,6 +215,29 @@ def test_deployer_verify_accepts_v119_citation():
     src = (REPO / "scripts" / "midas_deploy_v118.py").read_text(encoding="utf-8")
     assert '"ERA,MIDAS1.19,"' in src, "deployer verify must admit the v1.19 ERA stamp"
     assert '"ERA,MIDAS1.18,"' in src, "v1.18 acceptance retained"
+    # v1.20 (2026-09-21): the release IN THE TREE must be admitted, whatever number it
+    # carries. A verifier that only knows the previous stamp refuses the ledger the deploy
+    # itself just produced, and the failure looks like a broken arm rather than a stale pin.
+    ea = (REPO / "mql5" / "MIDASTOUCH" / "MidastouchAI.mq5").read_text(encoding="utf-8")
+    released = re.search(r'#property\s+version\s+"(\d+\.\d+)"', ea).group(1)
+    assert f'"ERA,MIDAS{released},"' in src, \
+        f"deployer verify must admit the released {released} ERA stamp"
+
+
+def test_deployer_verify_arms_a_v120_ledger(tmp_path):
+    sys.path.insert(0, str(REPO / "scripts"))
+    import midas_deploy_v118 as dep
+    import os
+    now = 1_800_000_000.0
+    p = tmp_path / "MIDASTOUCH_paper_XAUUSDmicro_M1.csv"
+    p.write_text(
+        "ERA,MIDAS1.19,100,pertick-fills+telemetry-only-per-V2-register+diag-nofill+p6-entrytf\n"
+        "ERA,MIDAS1.20,101,pertick-fills+telemetry-only-per-V2-register+diag-nofill"
+        "+p6-entrytf+diag-census\n"
+        "EQ,50.00\n", encoding="utf-8")
+    os.utime(p, (now, now))
+    v = dep.verify_arms(tmp_path, min_epoch=now - 60)
+    assert v["M1"] == "ok", "a v1.20-era paper ledger must verify"
 
 
 def test_deployer_verify_arms_v119_ledger(tmp_path, monkeypatch):

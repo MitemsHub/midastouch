@@ -139,10 +139,15 @@ def deploy_binaries(scratch_ex5: Path, mql5_experts: Path,
 
 def verify_arms(files_root: Path, min_epoch: float) -> dict:
     """Post-relaunch proof: each paper ledger carries an ERA row from a
-    registered never-abort build (MIDAS1.18 or later v1.19 P6 build block —
-    both cite the register) with the diag-nofill tag, and an EQ row newer
-    than min_epoch."""
-    accepted_era = ("ERA,MIDAS1.18,", "ERA,MIDAS1.19,")
+    registered never-abort build (MIDAS1.18, the v1.19 P6 build block, or the
+    v1.20 census build — all cite the register) with the diag-nofill tag, and
+    an EQ row newer than min_epoch.
+
+    A NEW RELEASE EXTENDS THIS LIST, it does not replace it: the older stamps are
+    what an un-migrated or historical ledger carries, and a verifier that stopped
+    admitting them would report a healthy old arm as broken.
+    """
+    accepted_era = ("ERA,MIDAS1.18,", "ERA,MIDAS1.19,", "ERA,MIDAS1.20,")
     out = {}
     for tag in PAPER_TAGS:
         p = files_root / f"MIDASTOUCH_paper_XAUUSDmicro_{tag}.csv"

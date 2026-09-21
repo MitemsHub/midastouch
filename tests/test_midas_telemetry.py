@@ -149,7 +149,12 @@ def test_version_bumped_and_property_consistent() -> None:
     define = re.search(r'#define\s+APP_VERSION\s+"MIDAS(\d+)\.(\d+)"', s)
     assert prop and define
     assert prop.groups() == define.groups(), "#property version must equal APP_VERSION"
-    assert prop.group(1) + "." + prop.group(2) == "1.19", "P6 build block rides v1.19"
+    # WAS a literal "1.19" until 2026-09-21. A literal here has to be hand-edited on every
+    # release, and the release that forgets leaves a tag which cannot tell two different
+    # builds apart — which is exactly what v1.19 became (with and without the census fix).
+    # The invariant is that the label RIDES the P6 build block, i.e. it is that release or
+    # later, and the build's own tag says so.
+    assert tuple(int(g) for g in prop.groups()) >= (1, 19), "P6 build block rides v1.19+"
 
 
 # --- the safety net: every python consumer tolerates the appended rows --------
@@ -343,20 +348,60 @@ def test_every_enumerated_consumer_tolerates_appends(tmp_path):
 
 # --- v1.18 NOFILL diagnostics (register review item 1) ------------------------
 
-def test_nofill_row_written_from_pertick_path_only():
+def test_nofill_census_cadence_is_the_utc_day_key_not_the_process():
     """DiagMaybeWrite appends to the paper ledger from the PERTICK paths
     (TrackFreshM15Bar gates + sizing vetoes + LiveOnTick breaker) and is
     hard-gated OFF in the tester and BAR replay — certified ledgers must
-    stay byte-identical."""
+    stay byte-identical.
+
+    v1.20 REPLACED THE CADENCE, and the reason is measured rather than aesthetic. The
+    v1.18 rule was "once per 24h since the first refusal", anchored in an in-memory
+    datetime (`g_diag_day0`). On 2026-09-21 the arm logged 22 inits and the ledger held
+    ZERO NOFILL rows for a day on which every evaluated bar was refused: each reload
+    reset the anchor and the counters, so the rule could never fire. The cadence under
+    test is now a property of the clock and of the ledger, not of the process — a UTC
+    day NUMBER restored at init, with the counters beside it."""
     b = body("DiagMaybeWrite")
     assert "MQL_TESTER" in b, "tester gate required"
     assert "InpBarModel" in b, "BAR-replay gate required"
-    assert "g_nofill_signal == 0" in b, "no rows on zero-activity days"
-    assert "86400" in b, "daily cadence on UTC days"
+    assert "DiagRollIfNewDay" in b and "DiagSnapshot" in b, \
+        "one entry point: roll the day, then record the running state"
+    roll = body("DiagRollIfNewDay")
+    assert "g_diag_day0" not in src(), \
+        "the in-memory 24h anchor is what made the census unreachable across a reload"
+    assert "UtcDayNo(now)" in roll, "the cadence is the UTC day number"
+    assert "if(day == g_diag_day) return;" in roll, "roll when the DAY changes"
+    assert "86400" not in roll, \
+        "a 24h delta would re-introduce the drift the day key removes"
+    assert "g_nofill_signal > 0" in roll, "no census row on a zero-activity day"
     for fn in ("TrackFreshM15Bar", "OpenPaperPosition", "LiveOnTick"):
         assert "DiagMaybeWrite" in body(fn), f"{fn} must account its vetoes"
     assert "DiagMaybeWrite" not in body("OnBarReplay"), \
         "BAR parity replay must never write NOFILL rows"
+
+
+def test_the_census_is_read_back_at_init_and_captured_at_deinit():
+    """The two edges a reload has: OnInit picks the day up, OnDeinit puts it down.
+    Without the first the counters restart at zero on every reload; without the second a
+    clean recompile loses the increments since the last accounting call."""
+    assert "DiagRestoreFromLedger()" in body("OnInit")
+    assert "DiagSnapshot()" in body("OnDeinit")
+    r = body("DiagRestoreFromLedger")
+    assert 'p[0] != "NOFILLSUM"' in r, "the snapshot row is the restore source"
+    assert "n < 12" in r, "a short row is not a snapshot — never partially believed"
+    assert "g_diag_day = snap_day" in r and "g_diag_sig = DiagSignature(" in r, \
+        "the day key and the signature both come back, so an unchanged state is not rewritten"
+    assert "g_nofill_signal = c[0]" in r
+    assert body("DiagSnapshot").count("MQL_TESTER") == 1, \
+        "the snapshot is guarded like the census row it shadows"
+    # The one row type the census added. Field count is the contract: prefix, epoch, day,
+    # then the nine counters NOFILL_KEYS names in the same order.
+    code = strip_comments(src())
+    m = re.search(r'"NOFILLSUM,%I64d,%d,%s"', code)
+    assert m, "NOFILLSUM format moved — update this fixture and nofill_open_day together"
+    from morning_status import NOFILL_KEYS, nofill_open_day
+    assert len(NOFILL_KEYS) == 9, "twelve fields = prefix + epoch + day + nine"
+    assert nofill_open_day.__doc__ and "NOFILLSUM" in nofill_open_day.__doc__
 
 
 def test_nofill_reason_grammar_is_pinned():
@@ -436,7 +481,11 @@ def test_v119_era_note_carries_full_citation_chain():
     assert 'era_note += "+telemetry-only-per-V2-register";' in code
     assert 'era_note += "+diag-nofill";' in code
     assert 'era_note += "+p6-entrytf";' in code
-    assert '"MIDAS1.19"' in code, "APP_VERSION bumped"
+    # The released version, read from the source rather than pinned by hand (v1.20,
+    # 2026-09-21): this now fails if the tag is bumped without APP_VERSION following it,
+    # and stops being a chore that a busy release skips.
+    released = re.search(r'#property\s+version\s+"(\d+\.\d+)"', src()).group(1)
+    assert f'"MIDAS{released}"' in code, f"APP_VERSION must be the released {released}"
     # the init writer composes the ERA row with the composed note
     assert 'StringFormat("ERA,%s,%I64d,%s"' in code
 

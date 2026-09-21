@@ -143,6 +143,8 @@ append-only, one line per event:
 | `EQ` | equity | every boot, every heartbeat (~15 min), every close |
 | `OPEN` | time,ticket,dir,entry,sl,tp,lots,risk,stop,timeout,tag | followed eventually by a `CLOSE` with the same ticket |
 | `CLOSE` | time,ticket,reason,exit,R,pnl,equity | `reason` ∈ SL/TP/TIME |
+| `NOFILLSUM` | epoch, UTC day, 9 counters | the running refusal census — see §3a |
+| `NOFILL` | epoch, 9 counters | a day that has ended — see §3a |
 
 Two questions it answers:
 
@@ -153,6 +155,56 @@ Two questions it answers:
 
 **Do not touch the ledger.** Never edit, rename or "clean up" it. An empty file
 with only `ERA`/`EQ` rows is a deliberate fresh book, not data loss.
+
+### 3a. Why didn't it trade? (the refusal census)
+
+An arm that does nothing has to be able to say why **from the record**, not from anyone's
+memory of the chart. Two row types carry that, and they are the same nine counters:
+
+| row | when | what it is |
+|---|---|---|
+| `NOFILLSUM,<epoch>,<utc day>,<9 counters>` | whenever a counter changes (at most once per evaluated M15 bar), and on deinit | the **running** census of the current UTC day |
+| `NOFILL,<epoch>,<9 counters>` | when the UTC day rolls | the **final** census of the day that ended |
+
+The nine counters, in this exact order (the reader in `scripts/morning_status.py` shares
+this order, and a test pins both against the writer):
+
+```
+signal, mismatch, session, friday, spread, riskcap, breaker, no_trigger, news
+```
+
+`signal` counts evaluated bars that produced no trade; `no_trigger` is the lane that
+dominates a quiet market — **the pattern never lined up**, which is a normal day, not a
+fault. `session`, `friday`, `spread` and `riskcap` are the gates refusing a signal that
+did fire; `news` is the stand-down of §5a.
+
+```
+python scripts/morning_status.py
+  no-fill (day 20717, running): no_trigger=2  (the census so far; it rolls to a NOFILL row at the UTC day change)
+  no-fill (24h): no_trigger=6, session=1      (days that have ENDED)
+```
+
+**Why the snapshot row exists (measured 2026-09-21).** The counters used to live only in
+the EA's memory, with a "write once per 24h since the first refusal" rule. On a day the arm
+was reloaded 22 times, each reload zeroed them and the day's census was never written at
+all — the one record built to answer this question was unreachable exactly when the arm was
+being restarted most. The EA now reads the last `NOFILLSUM` row back at init and says so:
+
+```
+[MIDAS1.20]NOFILL census restored: day=20717 signal=3 no-trigger=3 ... (from NOFILLSUM @1790016300)
+[MIDAS1.20]NOFILL census: no snapshot row yet, counting from zero     <- a ledger with no
+                                                                        snapshot row at all
+```
+
+**Read the version on those lines.** The census shipped while the tag still said `1.19`, so a
+build *with* the census and a build *without* it could both stamp `[MIDAS1.19]` — and the ERA
+row is where a replay learns which behaviour produced a day's rows. They are now `MIDAS1.20`
+(2026-09-21), and `tests/test_midas_hud.py` pins `#property version` to `APP_VERSION` so the
+banner, the ERA row and every reader of them cannot drift apart again.
+
+A ledger with **no** `NOFILLSUM` row cannot answer for that day (a v1.18/v1.19 ledger, or a
+day that predates this change), and `morning_status` reports nothing rather than a day of
+zeros — "the arm's account of itself was erased" must never read as "the arm was idle".
 
 ---
 

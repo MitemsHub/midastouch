@@ -446,6 +446,21 @@ def main() -> int:
         str(VALIDATION_PATH) if VALIDATION_PATH.is_file()
         else "absent — nothing has passed the walk-forward gate", blocking=False)
 
+    # ---- 2b. does the evidence the record cites describe THIS strategy? --- #
+    # A verdict about a different strategy is not evidence for this arm, and until
+    # 2026-09-21 nothing here checked. `artifacts/live/armed.json` cites
+    # `artifacts/gold_wfo.json` — a walk-forward whose only trigger axis is an M15 EMA stack,
+    # with no Bollinger or RSI anywhere in the engine that wrote it — while the EA trades a
+    # BB(20,2.0)/RSI(14) trigger. The two rules agree on the same bar and direction 3.4% of the
+    # time, so the cited verdict is about a different strategy. Silence is the failure mode
+    # here, which is why an UNDISCLOSED mismatch BLOCKS while a recorded one is named and
+    # passes: what is being prevented is the presentation, not the operator's decision.
+    family = gate.evidence_family()
+    report["evidence_family"] = family
+    family_ok = family["state"] in ("match", "disclosed-mismatch", "no-arm-record")
+    add("evidence describes this strategy", family_ok, family["reason"][:230],
+        blocking=(family["state"] == "mismatch"))
+
     # ---- 3. market hours, stated so nobody has to guess ------------------- #
     nxt = next_gold_open(now)
     hours = (nxt - now).total_seconds() / 3600.0
@@ -483,6 +498,8 @@ def main() -> int:
         print(f"  authorisation: ARMED BY OPERATOR OVERRIDE ({state.get('arm', '?')}) — real "
               f"orders are being placed. NO validation record exists: this is the "
               f"account holder's decision on a FAILED gate, not a strategy that passed.")
+    if family["state"] in ("mismatch", "disclosed-mismatch", "unknown"):
+        print(f"  evidence: {family['reason']}")
     elif arming_armed:
         print("  authorisation: ARMED — a recorded validation plus the operator's act.")
     else:
@@ -502,6 +519,10 @@ def main() -> int:
         print("  Real orders go out at the preset's declared risk. The walk-forward gate")
         print("  did not pass and no validation record exists; see artifacts/live/armed.json")
         print("  for the numbers the override was taken on, and what would retire it.")
+        if family["state"] == "disclosed-mismatch":
+            print("  AND the gate it cites measured a DIFFERENT STRATEGY — the record says so;")
+            print("  see docs/GOLD_WFO_EA_VERDICT_20260921.md for the walk-forward of the")
+            print("  rule this arm actually trades (also NOT VALIDATED).")
     elif verdict == "READY_TO_TRADE":
         print("VERDICT: READY TO TRADE.")
     elif verdict == "OPERATIONALLY_READY_BUT_NOT_AUTHORISED":
@@ -513,6 +534,19 @@ def main() -> int:
         print("VERDICT: NOT READY.")
         for n in report.get("failures", []):
             print(f"  blocking: {n}")
+    # The evidence refusal is its own statement, and it is NOT a machine fault: the terminal,
+    # the account, the build and the market can all be perfect while this fails, because what
+    # fails is a practice — citing another strategy's verdict as this arm's evidence. Saying
+    # so explicitly keeps "NOT READY" from being misread as "the arm is not trading".
+    if family["state"] == "mismatch":
+        print()
+        print("REFUSAL: the arming record cites a verdict about a DIFFERENT STRATEGY and does")
+        print("  not say so, so it is refused as this arm's evidence. This is not a machine")
+        print("  fault — the operational legs above are unchanged by it, and the arm keeps")
+        print("  trading on the operator's override. What it refuses is the presentation.")
+        print("  To clear it: cite a walk-forward of the EA's own rule (artifacts/gold_wfo_ea.json")
+        print("  exists and is NOT VALIDATED either), or record the mismatch in the arming")
+        print(f"  record under 'gate_family_mismatch': {family['reason'][:150]}")
     return 0 if operational_ok else 1
 
 

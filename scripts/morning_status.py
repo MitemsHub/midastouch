@@ -1268,8 +1268,52 @@ def correlate_midas_positions(positions: list[dict],
 #: simply stops early — an old ledger still parses, and a new one reports the gate that
 #: can stop trading for days. That asymmetry is the reason this is a named constant
 #: rather than an inline tuple: the EA's format test and this reader must move together.
-NOFILL_KEYS = ("signal", "mismatch", "no_trigger", "session", "friday", "spread",
-               "riskcap", "breaker", "news")
+#:
+#: MEASURED MISLABEL, 2026-09-21: this tuple named the fields in a DIFFERENT order than
+#: the EA writes them — `no_trigger` sat third while the third field is `session` — so
+#: every column from three onward was reported under the wrong name: the operator's
+#: "why didn't it trade" line attributed session vetoes to the trigger, spread vetoes to
+#: the risk cap, and so on. Nothing caught it because the only fixture in the suite used
+#: a row whose trailing fields were all ZERO, and a permutation of zeros is invisible.
+#: The pin now uses nine distinct values, and NOFILLSUM (below) reuses this same tuple
+#: through the same zip, so the two rows cannot drift apart either.
+#: The order is the writer's literal argument order in the EA:
+#:   signal, mismatch, session, friday, spread, riskcap, breaker, no_trigger, news
+NOFILL_KEYS = ("signal", "mismatch", "session", "friday", "spread", "riskcap",
+               "breaker", "no_trigger", "news")
+
+
+def nofill_open_day(path: str) -> dict | None:
+    """The census of the UTC day IN PROGRESS, read from the EA's last NOFILLSUM row.
+
+    WHY THIS EXISTS. `nofill_summary` can only report days that have ENDED — the EA
+    writes its NOFILL row when the UTC day rolls. On 2026-09-21 that meant a full live
+    day of refusals reported nothing, twice over: the row had not rolled yet, AND the
+    in-memory counters it would have rolled had been erased by 22 EA restarts. The EA's
+    snapshot row fixes the second half (it is written as the counters change and read
+    back at init); this reads it, so "why didn't it trade" answers during the day and
+    survives the reloads — which is exactly when the operator is asking.
+
+    Keys: the nine NOFILL_KEYS plus `day` (the UTC day number the counters belong to).
+    The row is append-only and positional, so the last COMPLETE row wins and a shorter
+    row is ignored rather than partially believed.
+    """
+    try:
+        best: dict | None = None
+        with open(path) as f:
+            for line in f:
+                p = line.strip().split(",")
+                if len(p) < 12 or p[0] != "NOFILLSUM":
+                    continue
+                try:
+                    row = {"day": int(p[2]), "epoch": int(p[1])}
+                    row.update(zip(NOFILL_KEYS, map(int, p[3:12])))
+                except ValueError:
+                    continue
+                best = row
+        return best
+    except OSError:
+        return None
 
 
 def nofill_summary(path: str, now_ts: float | None = None) -> dict | None:
@@ -1423,6 +1467,13 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
     veq_s = f"{veq:.2f}" if veq is not None else "n/a"
     start_s = f" (start {start:.2f})" if start is not None else ""
     print(f"  ledger: {os.path.basename(ledger_path)} | age {age_s} | veq {veq_s}{start_s}")
+    od = nofill_open_day(ledger_path)  # v1.20: the day IN PROGRESS, restart-proof
+    if od and od.get("signal"):
+        top = sorted(((k, v) for k, v in od.items()
+                      if k in NOFILL_KEYS and v), key=lambda kv: -kv[1])[:4]
+        print(f"  no-fill (day {od['day']}, running): "
+              + ", ".join(f"{k}={v}" for k, v in top)
+              + "  (the census so far; it rolls to a NOFILL row at the UTC day change)")
     nf = nofill_summary(ledger_path)   # v1.18: why-no-trade accounting, 24h
     if nf:
         top = sorted(((k, v) for k, v in nf.items() if v), key=lambda kv: -kv[1])[:4]
