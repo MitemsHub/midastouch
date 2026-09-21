@@ -118,16 +118,19 @@ def test_the_low_vol_mask_suppresses_only_the_quiet_bars() -> None:
     n = look + 100
     atr = np.full(n, 10.0)
     mask = gg.low_vol_mask(atr, n)
-    # FAIL-CLOSED THROUGH THE WARM-UP, measured: a bar whose trailing median does not exist
-    # yet is suppressed, not assumed quiet-or-not (101 of 600 True on the first run). The
-    # walk-forward starts at WARMUP_BARS so no tradeable bar is lost, and a filter that
-    # defaulted to "take it" would trade the first 500 bars on no measurement at all.
-    assert not mask[:look].any(), "bars with no trailing median were treated as tradeable"
-    assert mask[look:].all(), "a constant ATR series is not a low-volatility series"
+    # FAIL-CLOSED THROUGH THE WARM-UP, measured: the trailing median first exists at index
+    # `ATR_LOOKBACK - 1` (the window is full there), so 101 of these 600 bars are tradeable
+    # and the rest are suppressed rather than assumed quiet-or-not. The walk-forward starts
+    # at WARMUP_BARS (480), a filter that defaulted to "take it" would trade 500 bars on no
+    # measurement at all, and the boundary is asserted at its real index because the off-by-
+    # one between 499 and 500 is exactly the kind of thing a summary would hide.
+    assert mask.sum() == n - (look - 1), f"boundary moved: {int(mask.sum())} tradeable"
+    assert not mask[:look - 1].any(), "bars with no trailing median were treated as tradeable"
+    assert mask[look - 1:].all(), "a constant ATR series is not a low-volatility series"
     atr[look + 50] = 1.0    # well below 0.8 x the median at that point
     mask = gg.low_vol_mask(atr, n)
     assert not mask[look + 50], "the quiet bar was not suppressed"
-    assert mask[look:look + 50].all(), "the filter suppressed bars it should not have"
+    assert mask[look - 1:look + 50].all(), "the filter suppressed bars it should not have"
     # A bar with no usable ATR is never tradeable: the filter must fail closed on the
     # missing-value path rather than treating "no measurement" as "not quiet".
     atr_zero = np.full(n, 10.0)  # a second array: the constant one above is now modified
@@ -136,7 +139,8 @@ def test_the_low_vol_mask_suppresses_only_the_quiet_bars() -> None:
     mask_zero = gg.low_vol_mask(atr_zero, n)
     assert not mask_zero[10] and not mask_zero[11], \
         "a bar with no ATR was treated as tradeable"
-    assert mask_zero[100] and mask_zero[599], "clean bars were suppressed with the rest"
+    assert mask_zero[550] and mask_zero[599], \
+        "clean bars were suppressed along with the two broken ones"   # both past the warm-up
 
 
 # --------------------------------------------------------------------------- #
