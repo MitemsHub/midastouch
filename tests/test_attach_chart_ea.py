@@ -40,6 +40,15 @@ def _preset(tmp_path: Path, **over: str) -> Path:
     return p
 
 
+def _staged_expert(tmp_path: Path, expert: str = r"Experts\MIDASTOUCH\MidastouchAI.ex5") -> Path:
+    """A fake compiled binary where MT5 will look for it, so the start-up route has
+    something to verify. Without one the route now REFUSES (see the refusal test below)."""
+    ex5 = at.expert_binary(tmp_path, expert)
+    ex5.parent.mkdir(parents=True, exist_ok=True)
+    ex5.write_bytes(b"fake ex5")
+    return ex5
+
+
 def _chart(tmp_path: Path, body: str | None = None) -> Path:
     p = tmp_path / "chart01.chr"
     p.write_text(body or "<chart>\r\nsymbol=XAUUSD\r\nperiod_type=1\r\nperiod_size=1\r\n\r\n"
@@ -103,22 +112,60 @@ def test_a_missing_preset_file_is_refused(tmp_path):
 # --- the working route ---------------------------------------------------------------
 
 def test_the_startup_ini_names_the_expert_symbol_period_and_preset(tmp_path, capsys):
+    _staged_expert(tmp_path)
     ini = tmp_path / "config" / "midas_attach.ini"
     rc = at.main(["--startup-ini", str(ini), "--dir", str(tmp_path),
                   "--preset", str(PRESET), "--expert", r"Experts\MIDASTOUCH\MidastouchAI.ex5"])
     assert rc == 0
     text = ini.read_text(encoding="ascii")
     assert "[StartUp]" in text and "[Experts]" in text
-    assert "Expert=Experts\\MIDASTOUCH\\MidastouchAI" in text, \
-        "MT5 takes the expert WITHOUT the .ex5 extension in [StartUp]"
+    assert "Expert=MIDASTOUCH\\MidastouchAI" in text, \
+        "MT5 takes the expert WITHOUT the .ex5 extension and WITHOUT the Experts\\ " \
+        "prefix it prepends itself"
+    assert "Expert=Experts\\" not in text, \
+        "the doubled prefix makes MT5 look for Experts\\Experts\\... and load nothing"
     assert "ExpertParameters=MidastouchAI_upcomers_gold.set" in text
     assert "Symbol=XAUUSD" in text and "AllowedDll" not in text
     assert "AllowLiveTrading=1" in text, "an EA that cannot trade is an EA that does nothing"
 
 
+def test_the_startup_ini_strips_the_prefix_mt5_adds_itself(tmp_path):
+    """PINNED FROM THE TERMINAL'S OWN JOURNAL, 2026-09-21. This value was wrong here, and
+    wrong in the direction that fails silently:
+
+        Expert=Experts\\MIDASTOUCH\\MidasNewsProbe
+        MQL5   expert 'Experts\\Experts\\MIDASTOUCH\\MidasNewsProbe' not found from start config
+
+    The terminal came up with no expert on the chart and one journal line as the only
+    symptom. Every spelling a caller might copy from the chart route must land on the same
+    relative path.
+    """
+    want = r"MIDASTOUCH\MidastouchAI"
+    for spelling in (r"Experts\MIDASTOUCH\MidastouchAI.ex5",
+                     r"MIDASTOUCH\MidastouchAI.ex5",
+                     r"MIDASTOUCH\MidastouchAI",
+                     r"experts/MIDASTOUCH/MidastouchAI.ex5",
+                     r"\MIDASTOUCH\MidastouchAI"):
+        assert at.mt5_expert_path(spelling) == want, spelling
+
+
+def test_a_startup_ini_for_an_uncompiled_expert_is_refused(tmp_path):
+    """A start config naming an expert that is not under this terminal's MQL5\\Experts is
+    written happily and then ignored at launch — which is how the probe run above ended
+    with no expert and no explanation. The remedy is nameable, so refuse here."""
+    try:
+        at.main(["--startup-ini", str(tmp_path / "a.ini"), "--dir", str(tmp_path),
+                 "--preset", str(PRESET), "--expert", r"Experts\MIDASTOUCH\MidasNewsProbe"])
+    except SystemExit as e:
+        assert "no compiled expert" in str(e) and "compile_midas.py --deploy" in str(e)
+    else:
+        raise AssertionError("an ini that cannot attach anything must not be written")
+
+
 def test_the_startup_route_stages_the_preset_where_mt5_looks_for_it(tmp_path):
     """`ExpertParameters` must resolve inside `<data>\\MQL5\\Presets` — a path anywhere else
     is silently ignored and the EA comes up on code defaults."""
+    _staged_expert(tmp_path)
     ini = tmp_path / "midas_attach.ini"
     at.main(["--startup-ini", str(ini), "--dir", str(tmp_path), "--preset", str(PRESET)])
     staged = tmp_path / "MQL5" / "Presets" / PRESET.name

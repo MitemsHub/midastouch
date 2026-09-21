@@ -168,6 +168,39 @@ def apply_to_chart(txt: str, block: str) -> str:
     return txt[:m.start()] + block + txt[m.start():]
 
 
+def mt5_expert_path(expert: str) -> str:
+    """The value `[StartUp] Expert=` must carry: RELATIVE TO `<data>\\MQL5\\Experts`.
+
+    MEASURED 2026-09-21 in the terminal's own journal, after this value was wrong:
+
+        Expert=Experts\\MIDASTOUCH\\MidasNewsProbe
+        MQL5   expert 'Experts\\Experts\\MIDASTOUCH\\MidasNewsProbe' not found from start config
+
+    MT5 prepends `Experts\\` itself, so the leading segment is not decoration: including it
+    asks for a path that does not exist, the launch comes up with NO expert on the chart,
+    and the only symptom is one journal line written at start-up — a terminal that looks
+    exactly like a quiet market, which is this repository's recurring failure mode. It was
+    wrong here for a day, and it was wrong *because* the script wrote the same spelling it
+    used for the chart route (`Experts\\MIDASTOUCH\\MidastouchAI.ex5`), where the segment
+    IS correct. Hence one helper, used only by the start-up route.
+
+    Also drops a trailing `.ex5` (MT5 takes the path without the extension), and tolerates
+    either separator and either case for the leading segment, so a caller copying the chart
+    route's spelling cannot reintroduce the doubled prefix.
+    """
+    p = expert.strip().replace("/", "\\")
+    if p.lower().endswith(".ex5"):
+        p = p[:-4]
+    while p.lower().startswith("experts\\"):
+        p = p[len("experts\\"):]
+    return p.lstrip("\\")
+
+
+def expert_binary(data: Path, expert: str) -> Path:
+    """Where MT5 will look for this expert's compiled binary under terminal data `data`."""
+    return data / "MQL5" / "Experts" / (mt5_expert_path(expert) + ".ex5")
+
+
 def startup_ini_text(expert: str, symbol: str, period: str, preset_name: str) -> str:
     """The `/config` INI MT5 needs to attach an expert on its own.
 
@@ -198,7 +231,7 @@ def startup_ini_text(expert: str, symbol: str, period: str, preset_name: str) ->
         "[StartUp]",
         f"Symbol={symbol}",
         f"Period={period}",
-        f"Expert={expert[:-4] if expert.lower().endswith('.ex5') else expert}",
+        f"Expert={mt5_expert_path(expert)}",
         f"ExpertParameters={preset_name}",
         "",
     ])
@@ -248,6 +281,16 @@ def main(argv: list[str]) -> int:
                 and not ARMING_RECORD.is_file():
             raise SystemExit(f"REFUSING: {Path(a.preset).name} enables LIVE execution with "
                              f"no arming record — arming is a frozen-gate event")
+        # A start config naming an expert that is not compiled under this terminal's
+        # MQL5\Experts is accepted, written and then silently ignored at launch (measured
+        # 2026-09-21). Refuse here instead, where the remedy is nameable.
+        ex5 = expert_binary(data, a.expert)
+        if not ex5.is_file():
+            raise SystemExit(
+                f"REFUSING: no compiled expert at {ex5}. [StartUp] Expert="
+                f"{mt5_expert_path(a.expert)} would load NOTHING and the terminal would "
+                f"come up with no arm on it, with one journal line as the only symptom — "
+                f"run `python scripts/compile_midas.py --deploy` first")
         ini = Path(a.startup_ini)
         ini.parent.mkdir(parents=True, exist_ok=True)
         ini.write_text(startup_ini_text(a.expert, a.startup_symbol, a.startup_period,

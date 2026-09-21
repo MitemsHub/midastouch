@@ -49,6 +49,12 @@ sys.path.insert(0, str(REPO / "scripts"))
 DEFAULT_TARGETS = [
     REPO / "mql5" / "MIDASTOUCH" / "MidastouchAI.mq5",
     REPO / "mql5" / "MIDASTOUCH" / "MidasOffsetProbe.mq5",
+    # The news probe is a MEASUREMENT tool, but it is the only path to this venue's
+    # economic calendar (the Python API exposes no calendar function and the tester cannot
+    # call one). Leaving it out of the default set meant it was deployed by hand once and
+    # then silently absent — which is how a start config ends up naming an expert that is
+    # not there (`--deploy` deploys every default target, and records each one's hashes).
+    REPO / "mql5" / "MIDASTOUCH" / "MidasNewsProbe.mq5",
 ]
 
 METAEDITOR_CANDIDATES = [
