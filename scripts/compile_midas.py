@@ -23,6 +23,11 @@ Usage:
     read back and hash-compared, and the line prints `source=… ex5=…` because the
     compiler is not bit-reproducible: provenance is the recorded pair, not a mismatch.
 
+    A verify-only run REPORTS the deployed build's state in that same vocabulary —
+    CURRENT / STALE / UNKNOWN — so "I copied nothing" and "the deployed build is
+    wrong" can never be read as each other (one line used to say the first in the
+    words of the second). See `verify_only_lines`.
+
   * the REGISTERED deploy for the paper arms remains `scripts/midas_deploy_v118.py`:
     stop -> copy -> sha256 verify -> relaunch, gated on the cert chain. `--deploy` here
     is the manual-attach equivalent (no chain gate) and MT5 re-initialises whatever
@@ -176,6 +181,48 @@ def deploy_ex5(ex5: Path, mq5: Path, mql5_dir: Path) -> list[str]:
     return out
 
 
+def verify_only_lines(mq5: Path, mql5_dir: Path) -> list[str]:
+    """What a VERIFY-ONLY run says about the binary a chart would actually load.
+
+    MEASURED DEFECT, 2026-09-21: this used to print `NOT deployed — a chart still loads
+    whatever is at <dest>` on every run without `--deploy`, which is a report of what this
+    process DID (it copied nothing) wearing the words of a report about the ARTIFACT (the
+    deployed build is wrong). Those are different facts with different remedies, and the
+    second is the one this repo treats as a failure — so the alarm fired on a healthy
+    state and said nothing at all when a stale build was really sitting under a chart.
+    A report that cries wolf on the normal case trains its reader to skip the line that
+    matters.
+
+    So the two are separated here and only one word carries the alarm:
+
+      CURRENT  — a chart already loads this source (hashes checked, see below)
+      STALE    — the deployed build is NOT this source: older, replaced, or absent
+      UNKNOWN  — the provenance cannot be checked (no record, and newer is not proof)
+
+    The verdict is NOT re-derived here. It is `live_readiness.deployed_build_state`'s own,
+    over the same two destinations and the same build record, so the compiler and the
+    readiness gate can never disagree about what "stale" means — and the case that has no
+    record is reported as UNKNOWN rather than as either green or alarm, because MetaEditor
+    is not bit-reproducible and a recompile can never prove provenance.
+
+    Advisory, not enforcing: this is a compile tool, and a successful compile still exits
+    0. `scripts/live_readiness.py` is the leg that FAILS on a stale deployed build.
+    """
+    import live_readiness as lr          # lazy: keeps a compile run off the prop layer
+    state, detail = lr.deployed_build_state(mq5, deploy_paths(mq5, mql5_dir),
+                                            BUILD_RECORD)
+    word = {"ok": "CURRENT", "stale": "STALE", "unconfirmed": "UNKNOWN"}[state]
+    lines = ["      verified only (--deploy not passed: nothing was copied)",
+             f"        {word} — {detail}"]
+    if state == "stale":
+        lines.append("        -> scripts/live_readiness.py fails on this state; "
+                     "--deploy is the remedy")
+    elif state == "unconfirmed":
+        lines.append("        -> not a fault and not a pass: nothing here can prove "
+                     "the deployed binary came from this source")
+    return lines
+
+
 def compile_one(editor: Path, mq5: Path, mql5_dir: Path,
                 keep: bool = False, deploy: bool = False) -> dict:
     """Compile `mq5` from an in-tree scratch folder; verify 0/0 + .ex5, then deploy."""
@@ -296,14 +343,17 @@ def main() -> int:
             for p in r["deployed"]:
                 print(f"      deployed ({fp}) -> {p}")
         elif r["ok"]:
-            dest = deploy_paths(t, mql5_dir)[1]
-            print(f"      NOT deployed — a chart still loads whatever is at {dest}; "
-                  f"re-run with --deploy to copy this build there")
+            for line in verify_only_lines(t, mql5_dir):
+                print(line)
         failed += 0 if r["ok"] else 1
     if args.deploy:
         record = write_build_record(results)
+        # "NOT written" here never meant "nothing was deployed" — on `--deploy` every
+        # verified target is deployed — it means the record is unchanged because there is
+        # nothing to describe. Kept honest so an empty record cannot read as a deploy.
         print(f"  build record -> {record}" if record else
-              "  build record: NOT written (nothing was deployed)")
+              "  build record: left alone — nothing was copied, so the existing record "
+              "still describes the deployed build")
     return 1 if failed else 0
 
 

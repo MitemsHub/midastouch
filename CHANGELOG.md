@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-09-21 (after the push) — "I copied nothing" is not "the build is stale"
+
+- **`scripts/compile_midas.py`** no longer prints `NOT deployed — a chart still loads whatever
+  is at <dest>` on every verify-only run. MEASURED DEFECT: that sentence reports what the
+  PROCESS did (it copied nothing) in the words of a report about the ARTIFACT (the deployed
+  build is wrong). Those are different facts with different remedies, and the second is the one
+  `live_readiness` treats as a failure — so the alarm stood on a healthy state, and the same
+  run that printed it also had a deployed binary in step with its source (`source 71886ca3 ==
+  the source the deployed binary was built from`). A line that cries wolf on the normal case
+  teaches its reader to skip the line that matters.
+- **Two facts, three words, one alarm.** A verify-only run now says what it skipped, then
+  reports the deployed build's state: `CURRENT` (a chart already loads this source), `STALE`
+  (older, replaced, or absent — the only alarm), `UNKNOWN` (no record: newer-than-source is not
+  proof, because MetaEditor is not bit-reproducible). The verdict is **not re-derived** — it is
+  `live_readiness.deployed_build_state`'s own, over the same two destinations and the same
+  build record, so the compiler and the readiness gate can never disagree about what "stale"
+  means. Advisory, not enforcing: a successful compile still exits 0.
+- Also separated: the deploy record line. `build record: NOT written (nothing was deployed)`
+  never meant that — on `--deploy` every verified target is deployed — so it now says the
+  record was LEFT ALONE because nothing was copied, and cannot read as a deploy.
+- **Pinned in `tests/test_build_provenance.py` (13 -> 21)**, and both directions proved by
+  restoring the defect: the alarm word on a healthy state fails 3 pins; the retired one-
+  sentence-for-both-facts form fails 5. Writing the pins caught my own first guard being
+  evadable — it scanned lines containing `print(`, and a mutation that reassigned the whole
+  list (`lines = [f"      NOT deployed …"]`) printed the retired sentence straight through it.
+  The guard is now structural (`ast` string constants, docstrings excluded), so it cannot be
+  walked around by changing which expression holds the string — and the comment recording WHY
+  the sentence was wrong is still allowed to quote it.
+
 ## 2026-09-21 (later still) — the size the arm really takes, and the first-fill packet
 
 - **`scripts/gold_minlot_sizing.py`**: the deployability leg re-run at the size this account
