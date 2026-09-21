@@ -1461,6 +1461,21 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
             print(f"  fills: {rec['detail']}")
             if not rec["healthy"]:
                 problems.append("live fills: " + rec["detail"])
+            # The FIRST fill is captured once, from all three sources, at the moment they
+            # describe the same event (see midas_watchdog.record_first_fill).
+            try:
+                from midas_watchdog import FIRST_FILL_PATH
+                if os.path.exists(FIRST_FILL_PATH):
+                    with open(FIRST_FILL_PATH, encoding="utf-8") as fh:
+                        ff = json.load(fh)
+                    print(f"  first fill: {ff.get('recorded_utc', '?')} | ledger "
+                          f"{ff.get('ledger_fills')} vs account {ff.get('account_identifiers')}"
+                          f" | row: {str(ff.get('first_ledger_row'))[:70]}")
+                elif rec.get("account"):
+                    problems.append("the account shows fills but no first-fill record was "
+                                    "written — run the watchdog")
+            except Exception:      # noqa: BLE001 — reporting must never break the block
+                pass
         except Exception as exc:      # noqa: BLE001 — never let this mask the block
             problems.append(f"live fills: reconciliation unavailable ({exc})")
     elif live:

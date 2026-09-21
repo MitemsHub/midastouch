@@ -98,6 +98,52 @@ def test_an_unqueryable_terminal_is_unknown_not_healthy(tmp_path, monkeypatch) -
     assert rec["state"] == wd.LIVE_FILLS_UNREADABLE and rec["healthy"] is False
 
 
+# --------------------------------------------------------------------------- #
+# The first fill: captured once, from all three sources, and never rewritten
+# --------------------------------------------------------------------------- #
+
+def test_no_fill_means_no_record(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(wd, "FIRST_FILL_PATH", str(tmp_path / "first_fill.json"))
+    assert wd.record_first_fill([{"tag": "U25", "ledger": 0, "account": 0}]) is None
+    assert not (tmp_path / "first_fill.json").exists()
+
+
+def test_the_first_fill_records_ledger_account_and_the_eas_own_row(tmp_path, monkeypatch) -> None:
+    """All three at once: while they are the same event, not a later reconstruction."""
+    monkeypatch.setattr(wd, "FIRST_FILL_PATH", str(tmp_path / "first_fill.json"))
+    rec = {"tag": "U25", "state": wd.LIVE_FILLS_MATCHED, "ledger": 1, "account": 2,
+           "first_ledger_row": "LOPEN,1789712100,2048845860,987654321,2048845860,1,4354.0",
+           "first_deal": {"ticket": 2048845860, "price": 4354.085, "volume": 0.10}}
+    out = wd.record_first_fill([rec], now=1789712100.0)
+    assert out["ledger_fills"] == 1 and out["account_identifiers"] == 2
+    assert out["first_ledger_row"].startswith("LOPEN,")
+    assert out["first_account_deal"]["ticket"] == 2048845860
+    assert "recorded_utc" in out
+    assert (tmp_path / "first_fill.json").exists()
+
+
+def test_the_first_fill_is_never_rewritten(tmp_path, monkeypatch) -> None:
+    """An observation, not a state: the second call returns the first record unchanged."""
+    path = tmp_path / "first_fill.json"
+    monkeypatch.setattr(wd, "FIRST_FILL_PATH", str(path))
+    first = wd.record_first_fill([{"tag": "U25", "ledger": 1, "account": 1}], now=1000.0)
+    before = path.read_text(encoding="utf-8")
+    again = wd.record_first_fill([{"tag": "U25", "ledger": 9, "account": 9}], now=2000.0)
+    assert again["ledger_fills"] == first["ledger_fills"] == 1
+    assert path.read_text(encoding="utf-8") == before, "the first fill was overwritten"
+
+
+def test_the_reconciliation_carries_the_evidence_the_record_needs(tmp_path, monkeypatch) -> None:
+    """A matched state must hand over the raw row and the first deal, or the record is a
+    count with nothing behind it."""
+    _fake_mt5(monkeypatch, [_Deal(11, 7825001)])
+    led = _ledger(tmp_path, [11])
+    rec = wd.live_fill_reconciliation(str(led), magic=7825001)
+    assert rec["state"] == wd.LIVE_FILLS_MATCHED
+    assert rec["first_ledger_row"].startswith("LOPEN,")
+    assert rec["first_deal"]["ticket"] == 11
+
+
 def test_only_the_live_pin_is_checked(tmp_path, monkeypatch) -> None:
     """A paper arm is skipped: its ledger is the record by design, and the account has
     (and should have) no deals for it. The decision comes from the PIN the arm runs, not

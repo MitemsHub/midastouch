@@ -170,7 +170,8 @@ def configs() -> list[dict]:
 def simulate(bars: dict, hours: np.ndarray, h1_ok_long: np.ndarray,
              h1_ok_short: np.ndarray, h4_ok_long: np.ndarray,
              h4_ok_short: np.ndarray,
-             atr: np.ndarray, cfg: dict, *, start: int, end: int) -> list[dict]:
+             atr: np.ndarray, cfg: dict, *, start: int, end: int,
+             signal_mask: np.ndarray | None = None) -> list[dict]:
     """Run one configuration over bars[start:end). Returns trade dicts with net R.
 
     Exits, in priority order, checked on each bar *after* entry:
@@ -246,6 +247,14 @@ def simulate(bars: dict, hours: np.ndarray, h1_ok_long: np.ndarray,
                         direction = 1
                     elif dn and h1_ok_short[i] and h4_ok_short[i]:
                         direction = -1
+                    # OPTIONAL SIGNAL MASK (2026-09-21, default None). A state filter has
+                    # to act on the SIGNAL, not on the finished trade list: dropping a
+                    # trade afterwards would free the slot for the next signal and report
+                    # a different sequence than the strategy would have traded. With
+                    # `signal_mask=None` this function is byte-for-byte what it was, which
+                    # the frozen artifact's checks and tests/test_gold_walkforward.py hold.
+                    if signal_mask is not None and not bool(signal_mask[i]):
+                        direction = 0
                     if direction:
                         risk = cfg["stop_mult"] * a
                         entry = float(c[i])

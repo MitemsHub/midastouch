@@ -114,12 +114,14 @@ def live_fill_reconciliation(ledger_path: str, *, magic: int,
     # identifier agrees.
     ledger: dict[str, str] = {}
     rows = 0
+    first_row = ""
     try:
         with open(ledger_path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 parts = line.strip().split(",")
                 if parts and parts[0] == "LOPEN" and len(parts) > 4:
                     rows += 1
+                    first_row = first_row or line.strip()
                     for ident in (parts[2], parts[4]):
                         ledger[ident] = parts[1]
     except OSError as exc:
@@ -139,11 +141,20 @@ def live_fill_reconciliation(ledger_path: str, *, magic: int,
         until = datetime.now(timezone.utc) + timedelta(days=1)
         deals = mt5.history_deals_get(frm, until) or []
         acct: dict[str, float] = {}
+        first_deal: dict | None = None
         for d in deals:
             if getattr(d, "magic", 0) != magic:
                 continue
             if since is not None and float(getattr(d, "time", 0)) < since:
                 continue
+            if not first_deal:
+                first_deal = {"ticket": getattr(d, "ticket", None),
+                              "position_id": getattr(d, "position_id", None),
+                              "time": getattr(d, "time", None),
+                              "price": getattr(d, "price", None),
+                              "volume": getattr(d, "volume", None),
+                              "symbol": getattr(d, "symbol", None),
+                              "type": getattr(d, "type", None)}
             for ident in (getattr(d, "ticket", None), getattr(d, "position_id", None)):
                 if ident:
                     acct[str(ident)] = float(getattr(d, "time", 0) or 0)
@@ -167,7 +178,54 @@ def live_fill_reconciliation(ledger_path: str, *, magic: int,
     return {"state": LIVE_FILLS_MATCHED, "healthy": True, "ledger": rows,
             "account": len(acct),
             "detail": (f"{rows} ledger fill(s) reconciled against {len(acct)} account "
-                       f"identifier(s) for magic {magic}")}
+                       f"identifier(s) for magic {magic}"),
+            "first_ledger_row": first_row, "first_deal": first_deal}
+
+
+#: The durable record of an arm's FIRST real fill — written once, never rewritten.
+#: Built from REPO rather than ART: `ART` is defined further down this module, and a
+#: constant that resolves at import time must not depend on a later definition.
+FIRST_FILL_PATH = os.path.join(REPO, "artifacts", "live", "first_fill.json")
+
+
+def record_first_fill(recs: list[dict], *, now: float | None = None) -> dict | None:
+    """Write the arm's first real fill down, from all three sources at once, ONCE.
+
+    The first live fill is the only moment the ledger, the account's history and the EA's
+    own row can be captured while they are the same event rather than a reconstruction.
+    After it, the ledger is a claim, the account is the record, and reconciling them is
+    batch work; at the moment of the fill the three agree by construction.
+
+    Never overwritten: this is an observation, not a state. A later run either finds it or
+    reports that no fill has arrived yet.
+    """
+    filled = [r for r in recs if (r.get("account") or 0) > 0 or (r.get("ledger") or 0) > 0]
+    if not filled:
+        return None
+    path = FIRST_FILL_PATH
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            pass
+    ts = now if now is not None else time.time()
+    rec = filled[0]
+    out = {
+        "recorded_utc": datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds"),
+        "tag": rec.get("tag", ""),
+        "state": rec.get("state"),
+        "ledger_fills": rec.get("ledger"),
+        "account_identifiers": rec.get("account"),
+        "first_ledger_row": rec.get("first_ledger_row", ""),
+        "first_account_deal": rec.get("first_deal"),
+        "why": ("captured at the first fill, when the ledger, the account's own history and "
+                "the EA's row describe the same event; afterwards the ledger is only a claim"),
+    }
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(out, fh, indent=2)
+    return out
 
 
 def live_fill_problems(arms: list[dict]) -> list[dict]:
@@ -761,11 +819,15 @@ def check(now_s: float | None = None, dry_run: bool = False,
     # not running — and the watchdog may not assume the friendly one. The account's own
     # deal history is the second source; an arm whose ledger is MISSING deals the account
     # holds is a problem, and "silent in both" is recorded as a state, never as health.
-    for rec in live_fill_problems(arms):
+    live_recs = live_fill_problems(arms)
+    for rec in live_recs:
         record.setdefault("live_fills", {})[rec["tag"]] = rec
         if not rec["healthy"]:
             record.setdefault("problems", []).append(
                 f"live fills [{rec['tag']}]: {rec['detail']}")
+    first_fill = record_first_fill(live_recs, now=now_s)
+    if first_fill:
+        record["first_fill"] = first_fill
 
     worst = max((l["mtime_age_min"] or 0.0) for l in ledgers)
     record["ledgers"] = [{k: l[k] for k in ("tag", "exists", "mtime_age_min", "flat")}

@@ -299,10 +299,28 @@ def venue_data(symbol: str, bars: int):
     return B, epoch, n, atr, hours, ok
 
 
-def run_grid(B, hours, ok, atr, cfg: dict, n: int) -> list[dict]:
+def low_vol_mask(atr: np.ndarray, n: int, threshold: float = 0.8) -> np.ndarray:
+    """False on bars whose ATR is below `threshold` x its trailing median.
+
+    Built with the engine's OWN median (`trailing_percentile`, ATR_LOOKBACK / 0.5) so the
+    filter is the same statistic the trigger study called a cell, not a new one. Passed as
+    a signal mask into `simulate`, so a suppressed signal frees its slot exactly as it
+    would live — filtering the finished trade list would report a sequence the EA could
+    not have traded.
+    """
+    med = gw.trailing_percentile(atr, gw.ATR_LOOKBACK, 0.5)
+    mask = np.ones(n, dtype=bool)
+    for i in range(n):
+        a, m = float(atr[i]), float(med[i])
+        mask[i] = bool(a > 0 and m > 0 and a / m >= threshold)
+    return mask
+
+
+def run_grid(B, hours, ok, atr, cfg: dict, n: int,
+             signal_mask: np.ndarray | None = None) -> list[dict]:
     return gw.simulate(B, hours, ok["h1_long"], ok["h1_short"],
                        ok["h4_long"], ok["h4_short"], atr, cfg,
-                       start=gw.WARMUP_BARS, end=n)
+                       start=gw.WARMUP_BARS, end=n, signal_mask=signal_mask)
 
 
 def sweep_grid() -> list[dict]:
@@ -375,9 +393,10 @@ def walk_forward(args, B, epoch, n, atr, hours, ok, rules,
     # it. Declared here, before any number was seen.
     governed: list[dict[int, float]] = [dict() for _ in all_cfgs]
     kept_counts: list[dict[int, int]] = [dict() for _ in all_cfgs]
+    mask = low_vol_mask(atr, n) if getattr(args, "exclude_lowvol", False) else None
     trades_by_cfg: list[list[dict]] = []
     for k, cfg in enumerate(all_cfgs):
-        raw = run_grid(B, hours, ok, atr, cfg, n)
+        raw = run_grid(B, hours, ok, atr, cfg, n, signal_mask=mask)
         trades_by_cfg.append(raw)
         for fi, (_nm, lo, hi) in enumerate(folds):
             inside = [t for t in raw if lo <= t["entry_i"] < hi]
@@ -479,6 +498,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--bars", type=int, default=60000)
     ap.add_argument("--mode", choices=("governed", "sweep", "both"), default="both")
     ap.add_argument("--control-reps", type=int, default=200)
+    ap.add_argument("--exclude-lowvol", action="store_true",
+                    help="suppress signals whose H1 ATR is below 0.8x its trailing median "
+                         "(the -0.35R/trade cell of the trigger study), in-engine")
     ap.add_argument("--governor", choices=("entry", "path"), default="entry",
                     help="entry = mirror PropGovernorBlock() exactly (gates ENTRIES); "
                          "path = the same rules PLUS a day-loss kill switch and a "
@@ -524,6 +546,7 @@ def main(argv: list[str]) -> int:
         else:
             gov, label = govern, "entry-only: mirror of PropGovernorBlock()"
         out["spec"]["governor_mode"] = a.governor
+        out["spec"]["low_vol_filter"] = bool(a.exclude_lowvol)
         out["governed_wfo"] = walk_forward(a, B, epoch, n, atr, hours, ok, rules,
                                            governor=gov, label=label)
 
