@@ -1,3 +1,12 @@
+> ## ⛔ RETIRED — RECORD ONLY (banner added 2026-09-20)
+>
+> This is a pre-draft proposal for an arm of the **closed V75 / Deriv synthetic-indices
+> program**. No arm named here runs, and the tooling it references
+> (`scripts/build_parity.py`, `scripts/verify_go_live_artifacts.py`) no longer exists in
+> this repository. It is kept as a dated record — **not as instructions.** The live
+> surface today is the Upcomers $25,000 evaluation; start at
+> `docs/MIDASTOUCH_HEALTH_GUIDE.md`.
+
 # ARM E FORWARD TEST PROPOSAL — tp2.0 (REVERSE_BOTH, sl2/tp2/h180/r1%)
 
 **STATUS: PRE-DRAFT — NOTHING RUNS.** Written 2026-09-16, before any forward

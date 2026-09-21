@@ -1,3 +1,12 @@
+> ## ⛔ RETIRED — RECORD ONLY (banner added 2026-09-20)
+>
+> This is a frozen pre-registration for an arm of the **closed V75 / Deriv
+> synthetic-indices program**. No arm named here runs, the account it sized against is
+> gone, and the parity tooling it references (`scripts/build_parity.py`) no longer exists
+> in this repository. It is kept as a dated record of a pre-registered decision — **not as
+> instructions.** The live surface today is the Upcomers $25,000 evaluation; start at
+> `docs/MIDASTOUCH_HEALTH_GUIDE.md`.
+
 # ARM A2 RESTART — REVERSE_BOTH tp2.0 AT A $1,000 VIRTUAL BASIS
 
 **STATUS: AUTHORIZED (user decision, 2026-09-16). NOTHING RUNS YET.** The

@@ -1,3 +1,18 @@
+> ## ⛔ RETIRED — DO NOT EXECUTE (banner added 2026-09-20)
+>
+> This checklist belongs to the **closed V75 / Deriv synthetic-indices program**: a $50
+> Deriv account (**140778269**), terminal A, magic `7788075`, and the `MitemshubAI` EA.
+> That account is unfunded, the Deriv terminal is uninstalled, and none of the three
+> tools this document names still exists in the repository:
+> `scripts/verify_go_live_artifacts.py`, `scripts/go_live_rehearsal.py`,
+> `scripts/atr_drift_monitor.py`.
+>
+> It is **kept as a record, not as instructions.** Nothing in it may be followed on the
+> current account. The live surface today is the Upcomers $25,000 evaluation; its
+> go/no-go check is `scripts/live_readiness.py` and its operator documents are
+> `docs/MIDASTOUCH_HEALTH_GUIDE.md`, `docs/MIDASTOUCH_GOLD_PLAYBOOK.md` and
+> `docs/MIDASTOUCH_PROTOCOL.md`.
+
 # GO-LIVE CHECKLIST — $50, terminal A, magic 7788075 (written 2026-09-05, rehearsed read-only)
 
 This is the exact procedure to execute when the pre-registered gate passes
