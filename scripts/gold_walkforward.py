@@ -171,7 +171,8 @@ def simulate(bars: dict, hours: np.ndarray, h1_ok_long: np.ndarray,
              h1_ok_short: np.ndarray, h4_ok_long: np.ndarray,
              h4_ok_short: np.ndarray,
              atr: np.ndarray, cfg: dict, *, start: int, end: int,
-             signal_mask: np.ndarray | None = None) -> list[dict]:
+             signal_mask: np.ndarray | None = None,
+             exit_rule: dict | None = None) -> list[dict]:
     """Run one configuration over bars[start:end). Returns trade dicts with net R.
 
     Exits, in priority order, checked on each bar *after* entry:
@@ -196,26 +197,46 @@ def simulate(bars: dict, hours: np.ndarray, h1_ok_long: np.ndarray,
     def hour_of(idx: int) -> int:
         return int(hours[idx])
 
+    # OPTIONAL EXIT RULE (2026-09-21, default None = the certified geometry, unchanged).
+    # Keys: `tp_mult` (None = no take-profit), `trail` = (activation R, distance R),
+    # `max_bars` (the EA's InpTimeoutMinutes=720 is 48 M15 bars). The exit study showed the
+    # certified target captures 2.6% of the post-signal excursion, so the exit family has to
+    # be testable inside the engine rather than approximated outside it.
+    rule = exit_rule or {}
     while i < end:
         if pos is not None:
             px = None
+            trail = pos.get("trail")
+            if trail:
+                # The trail follows the best CLOSE since entry, activates only after `act`
+                # R of favourable run, and never loosens (the conservative reading: a
+                # tick-level trail would exit earlier and better).
+                run = pos["dir"] * (float(c[i - 1]) - pos["entry"]) / pos["risk"]
+                if run >= trail[0]:
+                    pos["peak"] = (max(pos["peak"], float(c[i - 1])) if pos["dir"] > 0
+                                   else min(pos["peak"], float(c[i - 1])))
+                    moved = pos["peak"] - pos["dir"] * trail[1] * pos["risk"]
+                    pos["stop"] = (max(pos["stop"], moved) if pos["dir"] > 0
+                                   else min(pos["stop"], moved))
             if pos["dir"] > 0:
                 if float(o[i]) <= pos["stop"]:
                     px = float(o[i])
                 elif float(l[i]) <= pos["stop"]:
                     px = pos["stop"]
-                elif float(h[i]) >= pos["target"]:
+                elif pos["target"] is not None and float(h[i]) >= pos["target"]:
                     px = pos["target"]
             else:
                 if float(o[i]) >= pos["stop"]:
                     px = float(o[i])
                 elif float(h[i]) >= pos["stop"]:
                     px = pos["stop"]
-                elif float(l[i]) <= pos["target"]:
+                elif pos["target"] is not None and float(l[i]) <= pos["target"]:
                     px = pos["target"]
             forced = hour_of(i) >= FLAT_BY_UTC_HOUR
             if px is None and forced:
                 px = float(o[i])
+            if px is None and pos.get("max_bars") and (i - pos["i"]) >= pos["max_bars"]:
+                px = float(c[i])
             if px is not None:
                 gross = pos["dir"] * (px - pos["entry"]) / pos["risk"]
                 spread_r = pos["spread_price"] / pos["risk"]
@@ -258,10 +279,17 @@ def simulate(bars: dict, hours: np.ndarray, h1_ok_long: np.ndarray,
                     if direction:
                         risk = cfg["stop_mult"] * a
                         entry = float(c[i])
+                        # `rule.get(k, cfg[k])` evaluates the default eagerly and would
+                        # demand a key of a grid that deliberately does not carry one.
+                        tp_mult = rule["tp_mult"] if "tp_mult" in rule else cfg.get("tp_mult")
                         pos = {
                             "i": i, "dir": direction, "entry": entry, "risk": risk,
                             "stop": entry - direction * risk,
-                            "target": entry + direction * cfg["tp_mult"] * a,
+                            "target": (None if tp_mult is None
+                                       else entry + direction * tp_mult * a),
+                            "trail": rule.get("trail"),
+                            "max_bars": rule.get("max_bars"),
+                            "peak": entry,
                             "spread_price": SPREAD_BPS / 1e4 * entry,
                             "comm_r": COMMISSION_PER_LOT_RT / (risk * USD_PER_UNIT_PER_LOT),
                         }
@@ -270,7 +298,8 @@ def simulate(bars: dict, hours: np.ndarray, h1_ok_long: np.ndarray,
 
 
 def random_control(bars: dict, hours: np.ndarray, atr: np.ndarray, n_trades: int,
-                   cfg: dict, *, start: int, end: int, seed: int) -> list[dict]:
+                   cfg: dict, *, start: int, end: int, seed: int,
+                   exit_rule: dict | None = None) -> list[dict]:
     """Same geometry, same costs, same trade count -- only timing and direction randomised.
 
     This is the test that matters (protocol V4). A positive backtest can come from
@@ -299,27 +328,41 @@ def random_control(bars: dict, hours: np.ndarray, atr: np.ndarray, n_trades: int
         risk = cfg["stop_mult"] * a
         entry = float(c[i])
         stop = entry - direction * risk
-        target = entry + direction * cfg["tp_mult"] * a
+        # The control must trade the SAME exit as the configuration it controls for, or V4
+        # compares two strategies and calls the difference an edge.
+        rule = exit_rule or {}
+        tp_mult = rule["tp_mult"] if "tp_mult" in rule else cfg.get("tp_mult")
+        target = (None if tp_mult is None else entry + direction * tp_mult * a)
+        trail, max_bars, peak = rule.get("trail"), rule.get("max_bars"), entry
         px = None
         j = i + 1
         while j < end:
             hr = int(hours[j])
+            if trail:
+                run = direction * (float(c[j - 1]) - entry) / risk
+                if run >= trail[0]:
+                    peak = max(peak, float(c[j - 1])) if direction > 0 else \
+                        min(peak, float(c[j - 1]))
+                    moved = peak - direction * trail[1] * risk
+                    stop = max(stop, moved) if direction > 0 else min(stop, moved)
             if direction > 0:
                 if float(o[j]) <= stop:
                     px = float(o[j]); break
                 if float(l[j]) <= stop:
                     px = stop; break
-                if float(h[j]) >= target:
+                if target is not None and float(h[j]) >= target:
                     px = target; break
             else:
                 if float(o[j]) >= stop:
                     px = float(o[j]); break
                 if float(h[j]) >= stop:
                     px = stop; break
-                if float(l[j]) <= target:
+                if target is not None and float(l[j]) <= target:
                     px = target; break
             if hr >= FLAT_BY_UTC_HOUR:
                 px = float(o[j]); break
+            if max_bars and (j - i) >= max_bars:
+                px = float(c[j]); break
             j += 1
         if px is None:
             continue
