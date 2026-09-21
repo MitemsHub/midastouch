@@ -410,14 +410,34 @@ def main() -> int:
         blocking=(build_state == "stale"))
 
     # ---- 2. authorisation ------------------------------------------------ #
+    # TWO QUESTIONS, TWO ANSWERS (2026-09-21). `ArmingGate` answers "may the PYTHON
+    # execution path trade?" — it wants a `validation_record.json`, and it is still OFF.
+    # The operator's record answers "has the account holder authorised the EA to trade?"
+    # They were conflated here, and the result was the worst possible report on a live
+    # arm: after the operator override this script printed "NOT AUTHORISED" while the
+    # EA was placing real orders on 1428765. Execution is the operator's; EVIDENCE is
+    # the gate's; each is reported as itself below.
     gate = ArmingGate(arm_path=ARM_PATH, validation_path=VALIDATION_PATH,
                       criteria=GateCriteria())
     arming = gate.evaluate()
-    report["arming"] = {"armed": arming.armed, "reasons": list(arming.reasons)}
-    # The arming switch is reported as an AUTHORISATION state, never as a blocking
-    # machine failure: it is OFF by design, and its being OFF is correct until a
-    # configuration passes the gate. It is excluded from `failures` deliberately.
-    add("arming switch", arming.armed,
+    report["python_execution_gate"] = {"armed": arming.armed,
+                                       "reasons": list(arming.reasons)}
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import mt5_ops  # noqa: PLC0415 — one reader for "are we live?"
+        state = mt5_ops.arming_state(str(ROOT))
+    except Exception as exc:      # pragma: no cover — unreadable record, never a crash
+        state = {"armed": False, "override": False, "arm": "",
+                 "summary": f"arming state unreadable: {exc}"}
+    arming_armed = bool(state["armed"])
+    arming_override = bool(state["override"])
+    report["arming"] = {"armed": arming_armed, "override": arming_override,
+                        "arm": state.get("arm", ""), "summary": state["summary"],
+                        "python_gate": arming.armed}
+    # Authorisation is never a blocking machine failure: a machine cannot be fixed into
+    # being authorised.
+    add("operator authorisation", arming_armed, state["summary"], blocking=False)
+    add("python execution gate", arming.armed,
         "; ".join(arming.reasons)[:180], blocking=False)
     add("operator arming file present", ARM_PATH.is_file(),
         str(ARM_PATH) if ARM_PATH.is_file() else f"absent ({ARM_PATH})",
@@ -433,11 +453,13 @@ def main() -> int:
     report["hours_to_open"] = round(hours, 1)
 
     # ---- verdict ---------------------------------------------------------- #
-    auth_names = {"arming switch", "operator arming file present",
+    auth_names = {"operator authorisation", "python execution gate",
+                  "operator arming file present",
                   "validation record present", "account matches the registry"}
     blocking = [c for c in checks if c[1] is False and c[3]]
     operational_ok = not blocking
-    verdict = ("READY_TO_TRADE" if operational_ok and arming.armed else
+    verdict = (("AUTHORISED_BY_OPERATOR_OVERRIDE" if arming_override else "READY_TO_TRADE")
+               if operational_ok and arming_armed else
                "OPERATIONALLY_READY_BUT_NOT_AUTHORISED" if operational_ok else
                "NOT_READY")
     report["verdict"] = verdict
@@ -452,14 +474,21 @@ def main() -> int:
         if ok:
             mark = "PASS"
         elif not is_blocking:
-            mark = "OFF " if name == "arming switch" else "WARN"
+            mark = "OFF " if name == "python execution gate" else "WARN"
         else:
             mark = "FAIL"
         print(f"  [{mark}] {name:<38} {detail}")
     print()
-    print(f"  authorisation: {'ARMED' if arming.armed else 'NOT ARMED'} — the venue "
-          f"gate is a separate condition from machine readiness, and it is the "
-          f"only one that cannot be fixed by configuring anything.")
+    if arming_override:
+        print(f"  authorisation: ARMED BY OPERATOR OVERRIDE ({state.get('arm', '?')}) — real "
+              f"orders are being placed. NO validation record exists: this is the "
+              f"account holder's decision on a FAILED gate, not a strategy that passed.")
+    elif arming_armed:
+        print("  authorisation: ARMED — a recorded validation plus the operator's act.")
+    else:
+        print("  authorisation: NOT ARMED — the venue gate is a separate condition from "
+              "machine readiness, and it is the only one that cannot be fixed by "
+              "configuring anything.")
     print()
     if hours <= 0.0:
         print(f"  market: OPEN — gold trades Sun 22:00 -> Fri 21:00 UTC "
@@ -468,7 +497,12 @@ def main() -> int:
         print(f"  market: closed — next gold open {nxt:%Y-%m-%d %H:%M} UTC "
               f"({hours:.1f}h away)")
     print()
-    if verdict == "READY_TO_TRADE":
+    if verdict == "AUTHORISED_BY_OPERATOR_OVERRIDE":
+        print("VERDICT: AUTHORISED BY OPERATOR OVERRIDE — TRADING, NOT VALIDATED.")
+        print("  Real orders go out at the preset's declared risk. The walk-forward gate")
+        print("  did not pass and no validation record exists; see artifacts/live/armed.json")
+        print("  for the numbers the override was taken on, and what would retire it.")
+    elif verdict == "READY_TO_TRADE":
         print("VERDICT: READY TO TRADE.")
     elif verdict == "OPERATIONALLY_READY_BUT_NOT_AUTHORISED":
         print("VERDICT: OPERATIONALLY READY, NOT AUTHORISED.")

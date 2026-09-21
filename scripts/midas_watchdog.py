@@ -94,8 +94,18 @@ REPO_PRESET = os.path.join(REPO, "mql5", "MIDASTOUCH", "MidastouchAI_M1_gold.set
 #: kept for callers that want the frozen baseline by name rather than by tag
 
 
-def preset_for_tag(tag: str) -> str:
+def preset_for_tag(tag: str, *, armed: bool = False) -> str:
     """The pinned preset for an arm tag (§14 portfolio).
+
+    `armed=True` selects the LIVE variant of that pin (`<stem>_LIVE.set`), because once an
+    arming record exists, the LIVE preset IS the configuration the arm is meant to run — and
+    a watchdog still pinning the paper one would report the armed arm as drifted, remediate
+    it by re-splicing the paper inputs, and restart the terminal: the supervisor undoing the
+    operator's authorisation every ten minutes. The variant is a separate file, deliberately,
+    so that "which configuration is pinned" is decided by the record and never by the chart.
+
+    The default stays `armed=False`, so a checkout with no arming record behaves exactly as
+    before and no test depends on this machine's arming state.
 
     Resolved by the tag the ARM reports, read out of the presets themselves. The
     file name is not the tag: the account's arm carries `InpArmTag=U25` while its
@@ -121,10 +131,21 @@ def preset_for_tag(tag: str) -> str:
                 for line in f:
                     s = line.strip()
                     if s.startswith("InpArmTag=") and s.split("=", 1)[1].strip() == tag:
-                        return path
+                        return _live_variant(path) if armed else path
         except OSError:
             continue
-    return os.path.join(preset_dir, f"MidastouchAI_{tag}_gold.set")
+    fallback = os.path.join(preset_dir, f"MidastouchAI_{tag}_gold.set")
+    return _live_variant(fallback) if armed else fallback
+
+
+def _live_variant(pin: str) -> str:
+    """`..._gold.set` -> `..._gold_LIVE.set`, falling back to the paper pin when absent.
+
+    The LIVE file does not end in `_gold.set`, which keeps it out of the scan above — one arm,
+    one paper pin and at most one LIVE pin, with no ambiguity about which the tag names.
+    """
+    live = pin[:-len(".set")] + "_LIVE.set"
+    return live if os.path.isfile(live) else pin
 
 ART = os.path.join(REPO, "artifacts")
 STATE_PATH = os.path.join(ART, "midas_watchdog_state.json")
@@ -639,9 +660,12 @@ def check(now_s: float | None = None, dry_run: bool = False,
     drift_arms: list[dict] = []
     try:
         from morning_status import preset_identity
+        arming = R.arming_state(REPO)
+        record["arming"] = {"armed": arming["armed"], "override": arming["override"],
+                            "arm": arming["arm"], "summary": arming["summary"]}
         for a in arms:
             try:
-                pins_src = preset_for_tag(a["tag"])
+                pins_src = preset_for_tag(a["tag"], armed=arming["armed"])
             except FileNotFoundError:
                 continue                       # unpinned arm: observe only (§12)
             try:

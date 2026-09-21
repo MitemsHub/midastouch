@@ -25,6 +25,7 @@ starts.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -41,8 +42,17 @@ from scripts import set_input_edit as sie  # noqa: E402
 #: (`mql5/MITEMSHUB_AI/`) is not ours to guard and does not live here.
 PRESET_DIRS = (ROOT / "mql5" / "MIDASTOUCH",)
 
-#: Both shipped presets, named so that renaming one is a deliberate act.
-SHIPPED = ("MidastouchAI_M1_gold.set", "MidastouchAI_upcomers_gold.set")
+#: The inert presets, named so that renaming one is a deliberate act. The paper mirror
+#: must stay inert FOREVER: its ledger is the arms-length forward record, and a real
+#: order behind it would silently convert the record into something else.
+PAPER = ("MidastouchAI_M1_gold.set", "MidastouchAI_upcomers_gold.set")
+
+#: The one preset that may carry `InpLiveExecution=true`. It exists because the
+#: operator authorised real orders on 2026-09-21 (see `ARTIFACTS/live/armed.json`), and
+#: the test below pins that it is armed ONLY while the record names exactly this file.
+LIVE = "MidastouchAI_upcomers_gold_LIVE.set"
+
+SHIPPED = PAPER + (LIVE,)
 
 
 def discover_presets(root: Path) -> list[Path]:
@@ -116,8 +126,53 @@ def test_every_preset_declares_the_execution_switch() -> None:
     assert not missing, f"presets with no InpLiveExecution key: {missing}"
 
 
-def test_no_preset_is_armed_without_an_arming_record() -> None:
-    """THE rule. Arming is an arming-record event, never an input edit."""
+def test_the_record_says_which_kind_of_authorisation_it_is() -> None:
+    """An override must never be readable as a validation.
+
+    `arming_state()` (scripts/mt5_ops.py) reports `override` from the record's own
+    `override` block; a record that authorises execution on a FAILED gate without one
+    is read by every tool as "armed on a recorded validation" — the exact lie this
+    program refuses to tell.
+    """
+    if not gp.ARMING_RECORD.exists():
+        pytest.skip("no arming record — nothing to describe")
+    rec = json.loads(gp.ARMING_RECORD.read_text(encoding="utf-8"))
+    assert rec.get("armed") is not True or rec.get("validation_record") \
+        or isinstance(rec.get("override"), dict), (
+        "the record authorises execution but cites no validation record, and does not "
+        "declare itself an override — it would be reported as a validated arm")
+    if str(rec.get("gate_result", "")).upper().startswith("FAIL"):
+        ov = rec.get("override")
+        assert isinstance(ov, dict) and ov, (
+            f"gate_result is {rec.get('gate_result')!r} so this is an operator override, "
+            f"but there is no `override` block for the tools to read — it would be "
+            f"reported as a validation pass")
+        assert str(ov.get("gate_result", "")).upper().startswith("FAIL"), (
+            "the override block must carry the gate result it overrides")
+        assert ov.get("authorised_by"), "an override records who authorised it"
+
+
+def test_the_paper_presets_are_inert_by_name() -> None:
+    """A named regression pin: the fact that these two are OFF is asserted
+    individually, so a future edit that arms one fails here and says which."""
+    for name in PAPER:
+        path = ROOT / "mql5" / "MIDASTOUCH" / name
+        assert path.is_file(), f"{name} disappeared — was the edit applied to the wrong tree?"
+        assert keys_of(path)["InpLiveExecution"].strip().lower() == "false", \
+            f"{name} is live-armed"
+
+
+def test_the_armed_set_is_exactly_what_the_record_names() -> None:
+    """THE rule, stated against the record's own `preset` field.
+
+    The previous version of this test asked only "is anything armed while no record
+    exists?". That left the mirror image unguarded, and it is the more expensive one:
+    a record lands (arm), and then an unrelated preset — the paper mirror, or a
+    half-written variant — is armed beside it. Either would put real orders behind a
+    file the record never authorised, and "at least one preset is armed" would still
+    pass. So the armed set must equal `{record["preset"]}` exactly: no extra, and
+    when the record is absent, nothing at all.
+    """
     armed = armed_presets()
     if not gp.ARMING_RECORD.exists():
         assert armed == [], (
@@ -125,20 +180,16 @@ def test_no_preset_is_armed_without_an_arming_record() -> None:
             f"Arming is an arming-record event — a validated configuration plus the "
             f"operator's act — not a value edited into a preset. Disarm them, or "
             f"produce the record first.")
-    else:
-        assert armed, (
-            f"{gp.ARMING_RECORD} exists but no preset is armed — either the record is "
-            f"stale or the arming was reverted without clearing it")
-
-
-def test_the_shipped_presets_are_inert_by_name() -> None:
-    """A named regression pin: the fact that these two are OFF is asserted
-    individually, so a future edit that arms one fails here and says which."""
-    for name in SHIPPED:
-        path = ROOT / "mql5" / "MIDASTOUCH" / name
-        assert path.is_file(), f"{name} disappeared — was the edit applied to the wrong tree?"
-        assert keys_of(path)["InpLiveExecution"].strip().lower() == "false", \
-            f"{name} is live-armed"
+        return
+    rec = json.loads(gp.ARMING_RECORD.read_text(encoding="utf-8"))
+    named = str(rec.get("preset", "")).strip()
+    assert named, (
+        f"{gp.ARMING_RECORD.relative_to(ROOT)} authorises execution without naming the "
+        f"preset it authorises. Without `preset`, no check can tell an intended arm from "
+        f"a preset that was armed beside it.")
+    assert armed == [named], (
+        f"the record names {named!r} but the armed set is {armed!r}. Something is live "
+        f"that the record does not authorise, or the authorised preset is not live.")
 
 
 def test_presets_have_no_duplicate_keys() -> None:

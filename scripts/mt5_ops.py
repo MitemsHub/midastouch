@@ -33,6 +33,7 @@ Reads and process control only: no strategy, no research, no venue rules.
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
 import subprocess
@@ -162,6 +163,51 @@ def stop_terminal(pids: list[int]) -> bool:
 #: `scripts/attach_chart_ea.py --startup-ini`. Named here because the relaunch below is the
 #: step that decides whether an arm survives a restart.
 ATTACH_INI = "midas_attach.ini"
+
+#: The operator's arming record — the ONLY thing that authorises real orders (the EA's own
+#: `InpLiveExecution` input is what places them, but it may only be set true downstream of
+#: this file: see scripts/gold_preset_upcomers.py and scripts/attach_chart_ea.py, which both
+#: refuse a live-enabling preset without it).
+ARMING_RECORD_REL = os.path.join("artifacts", "live", "armed.json")
+
+
+def arming_record(repo_root: str | None = None) -> dict | None:
+    """The arming record as a dict, or None when there is none or it is unreadable.
+
+    One reader for the whole toolchain, because three tools act on this answer — readiness,
+    the watchdog's drift expectation and morning status — and three readings of "are we live?"
+    is how one of them ends up undoing what another one did.
+    """
+    path = os.path.join(repo_root or REPO, ARMING_RECORD_REL)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def arming_state(repo_root: str | None = None) -> dict:
+    """`{armed, override, arm, summary}` — what every tool should report, and in one shape.
+
+    `override` distinguishes the two ways this program can be authorised: a walk-forward pass
+    recorded as a validation, or an operator override taken deliberately on top of one that
+    FAILED. They are not the same thing and the record has to say which, because an override
+    read as a validation is exactly the mistake the record exists to prevent.
+    """
+    rec = arming_record(repo_root)
+    if not rec:
+        return {"armed": False, "override": False, "arm": "",
+                "summary": "no arming record — execution is OFF"}
+    override = bool(rec.get("override"))
+    arm = str(rec.get("arm") or rec.get("tag") or "")
+    if override:
+        gate = (rec.get("override") or {}).get("gate_result", "FAILED")
+        return {"armed": True, "override": True, "arm": arm,
+                "summary": (f"ARMED BY OPERATOR OVERRIDE on {rec.get('armed_utc', '?')} — "
+                            f"the walk-forward gate {gate}; the numbers are in the record")}
+    return {"armed": True, "override": False, "arm": arm,
+            "summary": f"armed on a recorded validation ({rec.get('armed_utc', '?')})"}
 
 
 def attach_ini_path(data_folder: str | None = None) -> str | None:

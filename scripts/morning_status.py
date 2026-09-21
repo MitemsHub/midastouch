@@ -1309,7 +1309,15 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
     sym = sym_m.group(1) if sym_m else "?"
     period = period_m.group(1) if period_m else "?"
     tag = (tag_m.group(1) if tag_m else "") or "M1"
-    is_live = tag == "LV"   # 2026-09-18 go-live: the LV arm is REAL MONEY
+    # REAL MONEY is a property of the CHART, not of a tag history. This used to be
+    # `tag == "LV"`, which was true when the only live arm was called LV; after the
+    # 2026-09-21 arming the live arm is `U25`, and a `tag == "LV"` test would have
+    # printed "paper" for an arm placing real orders — the one display error that must
+    # never happen. `InpLiveExecution` in the chart text is exactly what the EA is
+    # running, so reading it makes the banner and the ledger view follow reality.
+    live_m = re.search(r"^InpLiveExecution=(\S+)", txt, re.M)
+    chart_live = bool(live_m) and live_m.group(1).strip().lower() == "true"
+    is_live = chart_live
     try:
         from midas_watchdog import vps_hosting_active
         vps_era = vps_hosting_active()
@@ -1333,12 +1341,34 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
     # byte-exact against the repo .set. This is the silent-preset-loss guard
     # — the 2026-09-17 drift incidents (mode/session flip, code-defaults
     # reattach) are exactly what it makes impossible to miss again.
+    # One reader for "are we live?" (scripts/mt5_ops.py): the repo root is the module's
+    # own, because morning_status has no REPO of its own to disagree with.
+    arming = R.arming_state(R.REPO)
     try:
         from midas_watchdog import preset_for_tag
-        ppath = preset_for_tag(tag)
+        # The pin follows the RECORD: when an arming record exists, the arm is meant to run the
+        # LIVE preset, and reporting the paper pin's absence as DRIFT would be this report
+        # arguing with the operator's authorisation instead of describing it.
+        ppath = preset_for_tag(tag, armed=arming["armed"])
     except ImportError:
         ppath = None
     ident = preset_identity(txt, ppath)
+    armed_arm = arming["armed"] and arming["arm"] == tag
+    if armed_arm:
+        print(paint(f"  ARMED: {arming['summary']}", "r" if arming["override"] else "g"))
+    # Two mismatches between the record and the chart, both silent in the other
+    # direction and both worth a PROBLEM line: real orders with nothing authorising
+    # them, and an authorisation naming an arm that is still inert.
+    if chart_live and not armed_arm:
+        problems.append(
+            "chart declares InpLiveExecution=true but the arming record "
+            + (f"names {arming['arm']!r}, not {tag!r}" if arming["armed"]
+               else "does not exist (" + str(R.ARMING_RECORD_REL) + ")")
+            + " — orders would be placed with no authorisation on file")
+    if armed_arm and not chart_live:
+        problems.append(
+            f"the arming record names this arm ({tag}) but its chart is INERT "
+            f"(InpLiveExecution=false) — no real orders are being placed")
     if ident.get("deferred"):
         print(paint(f"  preset: OK ({ident['n_keys']} inputs) — "
                     f"deferred pin(s): {', '.join(ident['deferred'])} "

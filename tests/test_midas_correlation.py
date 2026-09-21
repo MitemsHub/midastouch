@@ -14,6 +14,7 @@ are certified individually — a correlated fill is information, not drift).
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
@@ -39,13 +40,14 @@ ACCOUNT_ARM = "U25"
 SYMBOL = "XAUUSD"
 
 
-def _chart_text(tag: str) -> str:
+def _chart_text(tag: str, armed: bool = False) -> str:
     """A realistic pinned .chr body for one arm, from that ARM'S OWN repo `.set`
     pins (building a chart from another arm's pins is fixture drift, and [3b]
-    correctly flags that as preset DRIFT)."""
+    correctly flags that as preset DRIFT). `armed=True` builds it from the LIVE pin,
+    which is the configuration a chart actually carries once a record exists."""
     lines = ["; chart", "MidastouchAI", f"symbol={SYMBOL}", "period_size=15",
              "==== Strategy (frozen protocol defaults) ===="]
-    with open(preset_for_tag(tag), encoding="utf-8") as f:
+    with open(preset_for_tag(tag, armed=armed), encoding="utf-8") as f:
         for ln in f:
             ln = ln.strip()
             if ln.startswith("Inp"):
@@ -67,7 +69,7 @@ def _ledger(rows: list[str]) -> str:
 BAR = 1789657200  # one M15 signal bar (epoch seconds)
 
 
-def _portfolio(tmp_path, arms: dict[str, list[str]]) -> str:
+def _portfolio(tmp_path, arms: dict[str, list[str]], armed: bool = False) -> str:
     """A fake terminal tree: one chart + one ledger per arm tag."""
     term_root = os.path.join(str(tmp_path), "Term")
     d = os.path.join(term_root, "FAKEHASH", "MQL5", "Profiles", "Charts", "Default")
@@ -76,7 +78,7 @@ def _portfolio(tmp_path, arms: dict[str, list[str]]) -> str:
     os.makedirs(fd, exist_ok=True)
     for tag, rows in arms.items():
         with open(os.path.join(d, f"chart_{tag}.chr"), "w", encoding="utf-16") as f:
-            f.write(_chart_text(tag))
+            f.write(_chart_text(tag, armed=armed))
         with open(os.path.join(fd, f"MIDASTOUCH_paper_{SYMBOL}_{tag}.csv"), "w") as f:
             f.write(_ledger(rows))
     return term_root
@@ -169,6 +171,22 @@ def test_collect_skips_missing_and_corrupt(tmp_path, capsys):
 
 # --- the [3b] section: displayed, never a health verdict ---------------------------
 
+def _paper_world(monkeypatch) -> None:
+    """Pin the [3b] section into the world these display tests describe: no arming record.
+
+    THE FIXTURES ARE PINNED TO THE PAPER PRESET, and that is only the correct pin while
+    nothing is armed. Once `artifacts/live/armed.json` exists, `preset_for_tag("U25")`
+    resolves to the LIVE variant by design — so a fixture chart built from the paper pin
+    becomes DRIFT, and these tests would flip from "clean" to "unhealthy" the moment the
+    operator arms the account. That is a test depending on this machine's arming state,
+    which is exactly what `preset_for_tag(armed=...)` set out to avoid. So the paper-world
+    tests say which world they are in, and `test_armed_world_*` below covers the other one.
+    """
+    monkeypatch.setattr(ms.R, "arming_state",
+                        lambda *a, **k: {"armed": False, "override": False, "arm": "",
+                                         "summary": "no arming record — execution is OFF"})
+
+
 def _charts_of(term_root: str) -> list[tuple[str, str]]:
     """(terminal_dir, chart_text) pairs, mirroring how print_midas_section
     discovers charts under TERM_ROOT."""
@@ -192,6 +210,7 @@ def test_section_prints_cluster_for_same_bar_fills(tmp_path, monkeypatch, capsys
         LIVE_ARM: [_open_row(BAR, 111, 1, LIVE_ARM)],
         ACCOUNT_ARM: [_open_row(BAR + 60, 211, 1, ACCOUNT_ARM)],
     })
+    _paper_world(monkeypatch)
     monkeypatch.setattr(ms, "TERM_ROOT", term_root)
     healthy = ms.print_midas_section()
     out = capsys.readouterr().out
@@ -207,6 +226,7 @@ def test_section_quiet_when_flat_or_opposed(tmp_path, monkeypatch, capsys):
         LIVE_ARM: [_open_row(BAR, 111, 1, LIVE_ARM)],
         ACCOUNT_ARM: [_open_row(BAR, 211, -1, ACCOUNT_ARM)],  # opposite: not one exposure
     })
+    _paper_world(monkeypatch)
     monkeypatch.setattr(ms, "TERM_ROOT", term_root)
     healthy = ms.print_midas_section()
     out = capsys.readouterr().out
@@ -214,8 +234,64 @@ def test_section_quiet_when_flat_or_opposed(tmp_path, monkeypatch, capsys):
     assert healthy is False
 
 
+# --- the [3b] section in the ARMED world (2026-09-21 operator override) -------------
+
+def _armed_world(monkeypatch) -> None:
+    """The record names the U25 arm and says, in its own field, that it is an override."""
+    monkeypatch.setattr(ms.R, "arming_state", lambda *a, **k: {
+        "armed": True, "override": True, "arm": ACCOUNT_ARM,
+        "summary": "ARMED BY OPERATOR OVERRIDE — the walk-forward gate FAILED"})
+
+
+def test_armed_world_marks_the_live_arm_live_and_the_paper_arm_paper(tmp_path, monkeypatch, capsys):
+    """The banner follows the CHART, and the ARMED line follows the RECORD's own arm.
+
+    Both halves are the failure mode this pins: the live marker used to be `tag == "LV"`,
+    so the account's own live arm would have printed "paper" while placing real orders,
+    and the override notice used to print on every arm block, which reads as "this paper
+    arm is armed" on the one branch whose ledger is meant to be arms-length.
+    """
+    term_root = _portfolio(tmp_path, {
+        LIVE_ARM: [_open_row(BAR, 111, 1, LIVE_ARM)],
+        ACCOUNT_ARM: [_open_row(BAR, 211, 1, ACCOUNT_ARM)],
+    }, armed=True)
+    _armed_world(monkeypatch)
+    monkeypatch.setattr(ms, "TERM_ROOT", term_root)
+    healthy = ms.print_midas_section()
+    out = capsys.readouterr().out
+    blocks: dict[str, str] = {}
+    for blk in re.split(r"\[3b\] MIDASTOUCH GOLD ARM", out)[1:]:
+        m = re.search(r"tag (\S+)", blk)
+        blocks[m.group(1)] = blk
+    assert set(blocks) == {LIVE_ARM, ACCOUNT_ARM}, out
+    assert "LIVE $$$" in blocks[ACCOUNT_ARM].splitlines()[0], blocks[ACCOUNT_ARM]
+    assert "paper" in blocks[LIVE_ARM].splitlines()[0], blocks[LIVE_ARM]
+    assert "ARMED:" in blocks[ACCOUNT_ARM], "the armed arm's block does not say it is armed"
+    assert "ARMED:" not in blocks[LIVE_ARM], "the paper arm's block claims the override"
+    assert healthy is False, f"the armed world's own pins must be clean:\n{out}"
+
+
+def test_armed_record_with_an_arm_still_on_the_paper_pin_is_drift(tmp_path, monkeypatch, capsys):
+    """The go-live guard: an arm left on the paper preset while the record is armed.
+
+    This is the mistake that would silently halve a deployment — the record says real
+    orders, the chart still runs `InpLiveExecution=false`, and every tool that only
+    asked "is a record present?" would report a healthy live arm that places nothing.
+    """
+    term_root = _portfolio(tmp_path, {  # note: NOT `armed=True` — the stale chart
+        ACCOUNT_ARM: [_open_row(BAR, 211, 1, ACCOUNT_ARM)],
+    })
+    _armed_world(monkeypatch)
+    monkeypatch.setattr(ms, "TERM_ROOT", term_root)
+    healthy = ms.print_midas_section()
+    out = capsys.readouterr().out
+    assert healthy is True, f"a stale paper pin under an armed record is unhealthy:\n{out}"
+    assert "CHART IS INERT" in out.upper() or "inert" in out, out
+
+
 def test_section_flat_portfolio_has_no_correlation_block(tmp_path, monkeypatch, capsys):
     term_root = _portfolio(tmp_path, {LIVE_ARM: [], ACCOUNT_ARM: []})
+    _paper_world(monkeypatch)
     monkeypatch.setattr(ms, "TERM_ROOT", term_root)
     ms.print_midas_section()
     out = capsys.readouterr().out

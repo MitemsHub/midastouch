@@ -19,6 +19,7 @@ quietly editing presets.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -119,8 +120,28 @@ def test_collapse_removes_agreeing_duplicates_and_refuses_disagreeing_ones(prese
         gp.collapse_duplicate_keys(bad)
 
 
-def test_no_shipped_preset_still_arms_live_trading():
-    """The whole point: nothing on disk may send real orders without a gate record."""
-    for p in sorted(gp.PRESET_DIR.glob("*.set")):
-        _c, keys, _d = gp.read_set(p)
-        assert str(keys.get("InpLiveExecution", "false")).lower() != "true", p.name
+def test_only_the_preset_the_arming_record_names_may_be_live():
+    """Nothing on disk may send real orders without the record naming exactly that file.
+
+    This used to assert that NO shipped preset was live, which was the right rule while
+    nothing was armed. It is now the stronger, still-falsifiable form: a live-enabling
+    preset is allowed only when `artifacts/live/armed.json` names it, and the inert ones
+    (the paper mirror's own file and the frozen baseline) must stay inert regardless —
+    their ledgers are the arms-length forward record, so real orders behind them would
+    change what that record is.
+    """
+    record = None
+    if gp.ARMING_RECORD.exists():
+        record = json.loads(gp.ARMING_RECORD.read_text(encoding="utf-8"))
+    named = str((record or {}).get("preset", "")).strip()
+    live = [p.name for p in sorted(gp.PRESET_DIR.glob("*.set"))
+            if str(gp.read_set(p)[1].get("InpLiveExecution", "false")).lower() == "true"]
+    if record is None:
+        assert live == [], f"{live} are live with no arming record on disk"
+        return
+    assert live == [named], (
+        f"the arming record names {named!r} but the live presets are {live!r} — a preset "
+        f"is armed that the record does not authorise, or the authorised one is not live")
+    assert gp.TARGET.name != named, (
+        f"{gp.TARGET.name} is the paper mirror's pin and must never be the live one")
+
