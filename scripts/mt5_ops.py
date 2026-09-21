@@ -173,6 +173,80 @@ def attach_ini_path(data_folder: str | None = None) -> str | None:
     return ini if os.path.isfile(ini) else None
 
 
+def startup_attached_arms(data_folder: str | None = None) -> list[dict]:
+    """The arms a `/config` `[StartUp]` launch attaches — which no profile will ever hold.
+
+    MEASURED 2026-09-21, and it is the difference between supervision and the appearance of
+    it. MT5 does not save a start-up chart: its own documentation says "during the next start
+    of the platform without the configuration file, this chart will not be opened". So the
+    arm that is attached this way — the only one that survives an unattended relaunch, i.e.
+    exactly what a VPS runs — has **no** `MQL5\\Profiles\\Charts\\*\\*.chr` entry. A
+    discovery that scans only profiles therefore reports "no chart attached" while the EA is
+    running and its ledger is being written: a dead-arm report that reads like a quiet
+    market, which is the failure mode this repository keeps paying for.
+
+    So the evidence read here is the evidence that exists:
+      * `config/midas_attach.ini` — the `[StartUp]` section (Symbol/Period/ExpertParameters),
+      * the preset it names, staged in `MQL5\\Presets\\` (the file the EA actually loads —
+        absent means the EA came up on CODE DEFAULTS under a certified name),
+      * the arm's own ledger name, which carries the symbol and the tag. The tag is READ,
+        never assumed: an arm that lost its preset still has a ledger, and guessing a tag
+        would look up the wrong book.
+
+    Returns one dict per arm: ``data_folder, symbol, period, tag, ledger, preset_name,
+    staged_preset, staged_present``. Returns `[]` when there is no attach config, which is
+    the honest answer for a machine whose arm is attached some other way.
+    """
+    data = data_folder or data_folder_for_terminal()
+    if not data:
+        return []
+    ini = os.path.join(data, "config", ATTACH_INI)
+    try:
+        ini_txt = open(ini, encoding="ascii", errors="replace").read()
+    except OSError:
+        return []
+    if "MidastouchAI" not in ini_txt:
+        return []
+    params = re.search(r"(?m)^\s*ExpertParameters\s*=\s*(\S+)", ini_txt)
+    if not params:
+        return []
+    sym_m = re.search(r"(?m)^\s*Symbol\s*=\s*(\S+)", ini_txt)
+    per_m = re.search(r"(?m)^\s*Period\s*=\s*(\S+)", ini_txt)
+    sym = sym_m.group(1) if sym_m else "XAUUSD"
+    staged = os.path.join(data, "MQL5", "Presets", params.group(1))
+    out: list[dict] = []
+    for lp in sorted(glob.glob(os.path.join(data, "MQL5", "Files",
+                                           f"MIDASTOUCH_paper_{sym}_*.csv"))):
+        tag = os.path.basename(lp)[len("MIDASTOUCH_paper_"):-len(".csv")]
+        tag = tag[len(sym) + 1:] if tag.startswith(sym + "_") else tag
+        out.append({"data_folder": data, "symbol": sym,
+                    "period": per_m.group(1) if per_m else "?",
+                    "tag": tag, "ledger": lp, "preset_name": params.group(1),
+                    "staged_preset": staged, "staged_present": os.path.isfile(staged)})
+    return out
+
+
+def chart_like_text(arm: dict) -> str:
+    """A start-up-config arm's inputs, shaped exactly like a saved chart body.
+
+    WHY SHAPED RATHER THAN READ. Every consumer of "what inputs is this arm running?"
+    (`morning_status.preset_identity`, the watchdog's drift check) takes the text of a
+    `MQL5\\Profiles\\Charts\\*.chr` and greps `key=value` lines out of it. A start-up-config arm
+    has no `.chr` — the file the EA actually loads is the staged preset in `MQL5\\Presets\\` —
+    so this presents that preset in the same shape (`symbol=`, the preset's own lines,
+    `InpArmTag=`). One shaper, two routes, so a drift verdict cannot depend on HOW the arm was
+    attached, and a missing staged preset yields an empty body: preset identity then reports
+    every repo pin missing, which is the honest verdict for an EA running code defaults.
+    """
+    body = ""
+    if arm.get("staged_present"):
+        try:
+            body = open(arm["staged_preset"], encoding="utf-8-sig", errors="replace").read()
+        except OSError:
+            body = ""
+    return f"symbol={arm['symbol']}\n{body}\nInpArmTag={arm['tag']}\n"
+
+
 def relaunch_terminal() -> None:
     """Relaunch the live terminal detached — WITH the attach config when one exists.
 

@@ -452,7 +452,8 @@ def write_config_ini(filename: str, text: str) -> Path:
 def run_pass(tag: str, tester_inputs: dict[str, str], timeout_s: int = PASS_TIMEOUT_S,
              dates: tuple[str, str] = ("2026.07.01", "2026.09.10"),
              expert: str = r"V75MacroEngine\V75MacroEngine",
-             wait_for_research_line: bool = False) -> dict:
+             wait_for_research_line: bool = False,
+             model: str | None = None) -> dict:
     """Run one tester pass and return (report, journal) metrics.
 
     `expert` selects the compiled EA (relative to MQL5\\Experts) and defaults to this
@@ -460,12 +461,20 @@ def run_pass(tag: str, tester_inputs: dict[str, str], timeout_s: int = PASS_TIME
     explicitly (`midas_parity` does). Everything else comes from `_BASE_TESTER_INI`, so a
     caller that overrides nothing gets THIS venue on THIS account's basis — see the note
     there for why that is a requirement and not a convenience.
+
+    `model` overrides the tick model for a pass that is deliberately NOT certifying
+    intrabar fills — a bar-replay comparison on a window the venue has no real ticks for.
+    It is passed through rather than made quiet, because `assert_declared_tick_model`
+    below judges the pass against what it declared: a caller that re-declares the model is
+    stating what the pass is evidence for, and the artifact keeps saying it.
     """
     assert tester_inputs, "explicit [TesterInputs] required (input-cache gotcha)"
     assert_live_terminal()
     base = {**_BASE_TESTER_INI, "Expert": expert,
             "FromDate": dates[0], "ToDate": dates[1],
             "Report": f"V75_regress_{tag}"}
+    if model is not None:
+        base["Model"] = str(model)
     lines = ["[Tester]"]
     lines += [f"{k}={v}" for k, v in base.items()]
     lines += ["", "[TesterInputs]"] + [f"{k}={v}" for k, v in tester_inputs.items()]

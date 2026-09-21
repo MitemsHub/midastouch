@@ -464,3 +464,39 @@ python regen of record is n=151 / +1.474R on WF with vetoed=0 — every
 certified number stands — and `tests/test_midas_minlot_veto.py` enforces
 that regression law permanently. The veto exists for the corner the
 certified corpus never visits: small basis, runaway stop.
+
+## 16. Amendment 7 — the data of record is re-based to the venue's own series
+##      (2026-09-21, appended after the fact; §1 is superseded, not edited)
+
+**§1's paths no longer exist, and that is deliberate.** The two series in
+`data/forex/xauusd/` were not the same market: the files §1 names were fetched
+from the DERIV install on 2026-09-17, while the funded account trades Upcomers,
+whose own XAUUSD history begins **2026-01-12 11:15 UTC**. Inside the tick-covered
+window the two disagree about **21 bars** (3 only in the research series, 18 only
+at the venue) and about the units of their `spread` column (dollars vs points,
+which let a staged spread file hand the EA a flat $0.15 where the engine of record
+charged $0.42 — a constant $0.135 per fill that moved a stop's touch 105 minutes).
+
+Changed, all of it on 2026-09-21:
+
+- **Data of record = the venue's own series**: `XAUUSD_{M15,H1,D1}_upcomers.csv`
+  in `data/forex/xauusd/`, the terminal's history for account 1428765.
+  `scripts/midas_fetch_history.py --suffix _upcomers` is the fetch of record.
+- **The research series is RETIRED, not deleted**, to a hash-pinned archive:
+  `archive/frozen_corpus/` + `configs/frozen_corpus.json`, readable only through
+  `midas_sweep.frozen_bars()`, which refuses a file that does not match its pinned
+  SHA-256. Kept because §9-§15's certified arithmetic (n=151 / +1.474R, the sweep
+  anchors) is stated on those bytes — re-running the sweep on 2026-09-21
+  reproduces **32 of 32** anchors exactly.
+- **Every window declares its corpus and there is no default.** Parity's four
+  comparison windows declare `venue`; `wf`/`oos` declare `frozen`, because the
+  venue cannot serve them (`wf`: 7,752 of its bars exist only in the archive).
+- **What this means for the certification, plainly**: the walk-forward verdict
+  (fold-mean t = +0.52) is a **venue-corpus** number — `gold_walkforward.py` reads
+  the terminal, not the archive — so the re-basing did not move it. But §4's
+  window cannot be walked on the venue's own bars before 2026-01-12, and the
+  venue's real ticks begin 2026-09-04, so the only window this venue can certify
+  per-tick is the one since 2026-09-04.
+
+Full record and measurements: `docs/FROZEN_CORPUS_20260921.md` and
+`docs/PARITY_ENTRY_SIGNALS_20260921.md` §5c.

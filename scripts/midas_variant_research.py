@@ -27,8 +27,10 @@ RSI_BANDS = [(70, 30), (75, 25), (80, 20), (65, 35)]
 
 
 def build_data() -> dict:
-    h1 = ms.load_bars(os.path.join(DATA_DIR, "XAUUSD_H1.csv"))
-    m15 = ms.load_bars(os.path.join(DATA_DIR, "XAUUSD_M15.csv"))
+    # The RETIRED corpus, hash-verified (ms.frozen_bars): this study's grid is a frozen
+    # artifact's arithmetic, so it is defined on the frozen series and on nothing else.
+    h1 = ms.frozen_bars("XAUUSD_H1")
+    m15 = ms.frozen_bars("XAUUSD_M15")
     h4 = ms.h4_series(h1)
     return {
         "h1": h1, "m15": m15, "h4": h4,

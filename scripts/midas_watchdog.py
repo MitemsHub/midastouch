@@ -72,7 +72,8 @@ from datetime import datetime, timezone
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "scripts"))
 
-from mt5_ops import (  # noqa: E402  (the LIVE install, by account identity)
+import mt5_ops as R  # noqa: E402  (the LIVE install, by account identity)
+from mt5_ops import (  # noqa: E402
     MT5OpsUnavailable, data_folder_for_terminal, relaunch_terminal, stop_terminal,
     terminal_exe_or_unknown, terminal_pids_exact)
 
@@ -195,6 +196,49 @@ def release_instance_lock(fd: int) -> None:
 # --- discovery ----------------------------------------------------------------
 
 def midas_arms(data_folder: str | None) -> list[dict]:
+    """EVERY arm on this terminal: saved-profile charts AND start-up-config attaches.
+
+    MEASURED 2026-09-21. This used to scan `MQL5\\Profiles\\Charts\\*\\*.chr` only, and on
+    the live install that returned nothing while the gold arm was RUNNING — its start-up line
+    in the journal, its ledger advancing — because MT5 does not save a start-up chart. The
+    watchdog's whole job is to notice a dead arm, and it was blind to the arm configuration
+    that survives a reboot; worse, the failure read `no MidastouchAI chart found ... is the
+    arm attached?` at action NONE, i.e. it observed rather than remediated.
+
+    The profile scan stays first (a saved chart is the stronger evidence: it carries the EA
+    and its inputs), and the start-up config is the fallback, parsed once in `mt5_ops` so
+    this module and `morning_status` cannot disagree about what is attached. Deduped by
+    ledger, so a chart that is both saved and config-attached is one arm.
+    """
+    arms = _profile_arms(data_folder)
+    seen = {os.path.normcase(a["ledger"]) for a in arms}
+    if data_folder:
+        for a in R.startup_attached_arms(data_folder):
+            if os.path.normcase(a["ledger"]) in seen:
+                continue
+            arms.append({"chart": os.path.join(a["data_folder"], "config", R.ATTACH_INI),
+                         "chart_kind": "startup", "startup": a,
+                         "symbol": a["symbol"], "tag": a["tag"], "ledger": a["ledger"]})
+            seen.add(os.path.normcase(a["ledger"]))
+    return arms
+
+
+def arm_chart_text(arm: dict) -> str:
+    """The arm's inputs as text, HOWEVER it was attached — the drift check's one input.
+
+    A saved profile chart is a UTF-16 `.chr`; a start-up-config arm has no `.chr`, and reading
+    its config path as one is what made the whole pin check throw ("utf-16 codec can't decode")
+    and report `pin_check_error — observing, not acting`, i.e. the drift guard silently off on
+    the very configuration a VPS runs. Same shaper as `morning_status` (in `mt5_ops`, so there
+    is one definition of what an arm's inputs look like), for the same reason: the verdict must
+    not depend on the attach route.
+    """
+    if arm.get("chart_kind") == "startup":
+        return R.chart_like_text(arm["startup"])
+    return open(arm["chart"], encoding="utf-16", errors="replace").read()
+
+
+def _profile_arms(data_folder: str | None) -> list[dict]:
     """All gold arms on the terminal (§14 portfolio): every chart .chr
     mentioning MidastouchAI -> its own ledger path
     MIDASTOUCH_paper_<sym>_<tag>.csv. Discovery is tag-driven, so adding an
@@ -224,27 +268,9 @@ def midas_arms(data_folder: str | None) -> list[dict]:
 
 def midas_arm(data_folder: str | None) -> dict | None:
     """Single-arm discovery (§13-era, kept for compatibility and tests):
-    the first MidastouchAI chart found."""
-    if not data_folder:
-        return None
-    for chr_f in sorted(glob.glob(os.path.join(data_folder, "MQL5", "Profiles",
-                                               "Charts", "*", "*.chr"))):
-        try:
-            txt = open(chr_f, encoding="utf-16", errors="replace").read()
-        except OSError:
-            continue
-        if "MidastouchAI" not in txt:
-            continue
-        sym_m = re.search(r"^symbol=(\S+)", txt, re.M)
-        tag_m = re.search(r"^InpArmTag=(\S*)\s*$", txt, re.M)
-        sym = sym_m.group(1) if sym_m else ""
-        tag = (tag_m.group(1) if tag_m else "") or "M1"
-        return {"chart": chr_f,
-                "symbol": sym,
-                "tag": tag,
-                "ledger": os.path.join(data_folder, "MQL5", "Files",
-                                       f"MIDASTOUCH_paper_{sym}_{tag}.csv")}
-    return None
+    the first MidastouchAI arm found, profile or start-up config."""
+    arms = midas_arms(data_folder)
+    return arms[0] if arms else None
 
 
 def ledger_health(ledger: str, now_s: float) -> dict:
@@ -374,9 +400,28 @@ def resplice_pins(arm: dict, pins_src: str | None = None) -> str | None:
     The preset is the ARM's own (§14: preset_for_tag), not a shared file.
     """
     import set_chart_preset as scp
-    vals = scp.parse_preset(pins_src or preset_for_tag(arm["tag"]))
+    src = pins_src or preset_for_tag(arm["tag"])
+    vals = scp.parse_preset(src)
     if not vals:
         return None
+    if arm.get("chart_kind") == "startup":
+        # A start-up arm has no chart to splice: the file the EA loads on launch is the
+        # STAGED PRESET, so that is the file the remedy rewrites. Written from the arm's own
+        # repo preset (the same source the chart route splices from), with a backup and a
+        # re-parse verify, and refused when the destination is missing — a preset path that
+        # does not exist is a report about the wrong file.
+        dst = arm["startup"]["staged_preset"]
+        if not os.path.exists(dst):
+            return None
+        import shutil
+        bak = f"{dst}.bak_watchdog_{datetime.now():%Y%m%d_%H%M%S}"
+        shutil.copyfile(dst, bak)
+        shutil.copyfile(src, dst)
+        got = scp.parse_preset(dst)
+        if any(got.get(k, "").strip() != v for k, v in vals.items()):
+            shutil.copyfile(bak, dst)
+            return None
+        return bak
     cpath = arm["chart"]
     if not os.path.exists(cpath):
         return None
@@ -600,7 +645,7 @@ def check(now_s: float | None = None, dry_run: bool = False,
             except FileNotFoundError:
                 continue                       # unpinned arm: observe only (§12)
             try:
-                chart_txt = open(a["chart"], encoding="utf-16", errors="replace").read()
+                chart_txt = arm_chart_text(a)
             except OSError as e:
                 pin_err = f"chart unreadable for [{a['tag']}]: {e} — observing"
                 continue

@@ -79,12 +79,19 @@ def test_certified_wf_regen_unchanged_by_the_amendment():
     """n=151 / +1.474R is certificate …_1258's python leg (engine of record,
     pre-amendment). At the frozen 15% cap the veto must never fire on the
     certified corpus — if it ever does, the amendment's corpus-neutrality
-    claim is false and this suite fails."""
+    claim is false and this suite fails.
+
+    `corpus='frozen'` — deliberately, and it is the ONLY test that asks for it: those 151
+    trades are the frozen certificate's arithmetic, computed on the research series that is
+    now archived (archive/frozen_corpus/, hash-pinned) because it is not the market the EA
+    trades. It skips when the archive is not restored rather than quietly re-running on the
+    venue's bars, which would silently compare two different certificates."""
     import midas_parity as P
-    if not os.path.exists(os.path.join(P.M.DATA_DIR, "XAUUSD_H1.csv")):
+    try:
+        data = P.python_build_data(corpus="frozen")
+    except SystemExit as exc:
         from pytest import skip
-        skip("certified corpus data not present on this checkout")
-    data = P.python_build_data()
+        skip(f"the frozen corpus is not restored on this checkout: {exc}")
     rr = P.M.run_mode(P.MODE, P.T0, P.T1, data)
     assert len(rr.trades) == 151
     assert abs(sum(t["r"] for t in rr.trades) - 1.474) < 5e-4

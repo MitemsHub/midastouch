@@ -378,6 +378,99 @@ def test_midas_arms_finds_whole_portfolio(tmp_path: Path) -> None:
     assert wd.midas_arm(str(tmp_path))["tag"] == "M1"   # legacy single-arm view
 
 
+# --- the attach route a VPS runs: the start-up config, which has no .chr -----------------
+
+def _seed_startup_arm(tmp: Path, tag: str = "U25", symbol: str = "XAUUSD",
+                      preset_body: str = "InpMode=0\nInpLiveExecution=false\n") -> str:
+    """A terminal whose arm exists ONLY as a `/config` [StartUp] attach.
+
+    This is the measured live configuration (2026-09-21): MT5 does not save a start-up chart,
+    so there is no `.chr` anywhere in this directory, exactly as on the real install.
+    """
+    (tmp / "config").mkdir(parents=True, exist_ok=True)
+    (tmp / "MQL5" / "Presets").mkdir(parents=True, exist_ok=True)
+    (tmp / "MQL5" / "Files").mkdir(parents=True, exist_ok=True)
+    (tmp / "config" / "midas_attach.ini").write_text(
+        "[StartUp]\nSymbol=XAUUSD\nPeriod=H1\nExpert=MIDASTOUCH\\MidastouchAI\n"
+        "ExpertParameters=MidastouchAI_upcomers_gold.set\n", encoding="ascii")
+    staged = tmp / "MQL5" / "Presets" / "MidastouchAI_upcomers_gold.set"
+    staged.write_text(preset_body, encoding="utf-8")
+    led = tmp / "MQL5" / "Files" / f"MIDASTOUCH_paper_{symbol}_{tag}.csv"
+    led.write_text("\n".join(FLAT) + "\n", encoding="utf-8")
+    return str(led)
+
+
+def test_a_start_up_attached_arm_is_discovered_with_no_profile_chart(tmp_path: Path) -> None:
+    """THE DEFECT, pinned. On the live install this returned NOTHING while the EA was running
+    and its ledger advancing, because the arm is attached by the start-up config and MT5 never
+    writes a `.chr` for one. The watchdog reported `no MidastouchAI chart found ... is the arm
+    attached?` at action NONE — a dead-arm report that reads like a quiet market, which is
+    exactly the failure this file exists to prevent. It must now see the arm, its tag from the
+    ledger (never assumed) and its symbol from the config.
+    """
+    led = _seed_startup_arm(tmp_path)
+    assert list((tmp_path / "MQL5" / "Profiles").glob("**/*.chr")) == [], (
+        "the fixture must have no saved chart, or it does not test the start-up route")
+    arms = wd.midas_arms(str(tmp_path))
+    assert len(arms) == 1
+    assert arms[0]["tag"] == "U25" and arms[0]["symbol"] == "XAUUSD"
+    assert arms[0]["chart_kind"] == "startup"
+    assert os.path.normcase(arms[0]["ledger"]) == os.path.normcase(led)
+    assert wd.midas_arm(str(tmp_path))["tag"] == "U25"      # the single-arm view agrees
+
+
+def test_the_drift_check_reads_a_start_up_arm_instead_of_throwing(tmp_path: Path) -> None:
+    """The pin check must run on the route a VPS uses. Measured live: reading the config path
+    as a UTF-16 chart threw `'utf-16' codec can't decode bytes in position 0-1`, which aborted
+    the whole drift guard into `pin_check_error — observing, not acting`. A guard that is off on
+    exactly the arms that survive a reboot is not a guard.
+    """
+    _seed_startup_arm(tmp_path, preset_body="InpMode=0\nInpArmTag=U25\n")
+    arm = wd.midas_arms(str(tmp_path))[0]
+    txt = wd.arm_chart_text(arm)                    # must not raise
+    assert "InpMode=0" in txt and "InpArmTag=U25" in txt
+    assert txt.startswith("symbol=XAUUSD"), "shaped like a chart body, so the checks are shared"
+
+
+def test_a_start_up_arm_with_no_staged_preset_reports_defaults_not_health(tmp_path: Path) -> None:
+    """Absent staged preset = the EA came up on CODE DEFAULTS under a certified name — the
+    silent-preset-loss signature the watchdog found live on 2026-09-17. The shaped body is then
+    empty, so preset identity reports every repo pin missing rather than passing quietly.
+    """
+    _seed_startup_arm(tmp_path)
+    (tmp_path / "MQL5" / "Presets" / "MidastouchAI_upcomers_gold.set").unlink()
+    arm = wd.midas_arms(str(tmp_path))[0]
+    assert arm["startup"]["staged_present"] is False
+    txt = wd.arm_chart_text(arm)
+    assert "InpMode" not in txt and txt.startswith("symbol=XAUUSD")
+
+
+def test_resplicing_a_start_up_arm_rewrites_the_staged_preset_it_loads(tmp_path: Path,
+                                                                      monkeypatch) -> None:
+    """The remedy has to match the route. A start-up arm has no chart to splice: the file the
+    EA loads on launch is the staged preset, so that is the file the fix rewrites — from the
+    arm's own repo preset, with a backup, verified by re-parse, and refused if the destination
+    is missing. Splicing a `<inputs>` block into the config would be a write that changes
+    nothing and reports success.
+    """
+    from pathlib import Path as _P
+    repo_preset = _P(wd.REPO) / "mql5" / "MIDASTOUCH" / "MidastouchAI_upcomers_gold.set"
+    monkeypatch.setattr(wd, "preset_for_tag", lambda tag: str(repo_preset))
+    _seed_startup_arm(tmp_path, preset_body="InpMode=9\nInpArmTag=U25\n")
+    arm = wd.midas_arms(str(tmp_path))[0]
+    staged = _P(arm["startup"]["staged_preset"])
+    assert "InpMode=9" in staged.read_text(encoding="utf-8-sig")
+    bak = wd.resplice_pins(arm)
+    assert bak and _P(bak).exists(), "a backup is written before the rewrite"
+    assert "InpMode=9" in _P(bak).read_text(encoding="utf-8-sig")     # the old bytes survive
+    got = staged.read_text(encoding="utf-8-sig")
+    assert "InpMode=9" not in got, "the staged preset was not rewritten — the remedy no-ops"
+    assert "InpLiveExecution=false" in got, "rewritten FROM the arm's own repo preset"
+    # a destination that does not exist is refused, not invented
+    staged.unlink()
+    assert wd.resplice_pins(arm) is None
+
+
 def test_preset_for_tag_maps_the_portfolio() -> None:
     assert wd.preset_for_tag("M1").endswith("MidastouchAI_M1_gold.set")
     # the tag/file divergence this repo actually has: the account's arm reports U25

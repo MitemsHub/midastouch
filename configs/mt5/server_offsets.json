@@ -1,0 +1,26 @@
+{
+ "what": "The venue server's offset from UTC, by ERA. Read by midas_parity.measure_server_offset_min(), which turns any window into one clock before a parity pass is allowed to run.",
+ "why_this_is_a_record_and_not_a_measurement": [
+  "The venue's own bars cannot supply the offset. They are stamped in the SERVER's local clock, and nothing in them is UTC-referenced: MT5 aligns every timeframe to server midnight, and the one observable event in the series - gold's daily maintenance break - follows US Eastern (17:00 ET), so its UTC hour moves with US DST while this server's offset moves on the EU calendar.",
+  "Measured 2026-09-21: between them the two shifts CANCEL. The break sits at server 23:00 in EVERY month of 2026, while the offset underneath it goes 60 -> 120. A break-based estimate therefore reports +120 for January - a full hour wrong, and wrong in a way that reads as a clean measurement.",
+  "A first attempt to recover the offset from the break alone was written, run, and RETIRED on this evidence (its own answers disagreed with the measurement it was replacing for Jan/Feb/Mar). It survives as a VERIFIER: where a month's break position is unanimous it must agree with the era pinned below, and a unanimous disagreement is a hard refusal, not a warning.",
+  "So the era pins are records of measurements, each naming what produced it. They are also VALIDATED FORWARD, which is the strongest evidence here: a window whose era pin is an hour wrong cannot reproduce the EA's keys at all."
+ ],
+ "eras": [
+  {
+   "from": "2026-01-12",
+   "to": "2026-03-31",
+   "server_offset_min": 60,
+   "first_measured_by": "two-series close alignment: the median |close disagreement| between the venue's series and the then-current UTC-stamped research series (retired 2026-09-21, archived at archive/frozen_corpus/ and hash-pinned in configs/frozen_corpus.json) is minimised at +60 for Jan, Feb and Mar. Recorded while that series was still the reference, which is why this is a record and not a guess.",
+   "validated_forward_by": "the wfv parity pass (2026-01-12..03-31, venue corpus): 53 of 53 trades with every key - open_ct, close_ct and side - agreeing and max|dR| 0.0005 (artifacts/midas_parity_result_20260921_1140.json). An hour of clock error moves the H4 grid, the session gate and every key with it."
+  },
+  {
+   "from": "2026-04-01",
+   "to": null,
+   "server_offset_min": 120,
+   "first_measured_by": "the same two-series alignment (April onward), and the venue's own daily-break position agrees with it in every month from April to September.",
+   "validated_forward_by": "the oosc parity pass (2026-04-01..09-16, venue corpus): 107 of 107 trades, every key agreeing, max|dR| 0.0005 (artifacts/midas_parity_result_20260921_1141.json); the tickcov pass on real ticks: 9 of 9 (midas_parity_result_20260921_1107.json); and the live terminal's own clock on 2026-09-21: server - GMT = +2 h 00 min."
+  }
+ ],
+ "open_discrepancy": "2026-03-09 and 03-10 imply +120 from the break position alone while the rest of March implies +60, and 2026-03-11..03-27 carry TWO-hour gaps (server 22:00 AND 23:00) that are uninformative. The month's break evidence is split 5 / 4 / 13, so it cannot arbitrate, and the era pin follows the 53/53 key match instead. Recorded rather than smoothed over: if a later window in March ever fails to reproduce keys, this is the first thing to re-examine."
+}

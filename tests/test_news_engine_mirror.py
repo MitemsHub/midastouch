@@ -41,7 +41,12 @@ T0, T1 = WINDOW["t0"], WINDOW["t1"]
 
 @pytest.fixture(scope="module")
 def data() -> dict:
-    """The corpus the engine of record actually runs on (repo-local CSVs).
+    """The corpus the engine of record actually runs on: the VENUE's own bars.
+
+    `corpus` is passed explicitly and has no default (see `python_build_data`): the retired
+    research series is not a fallback, because a caller who merely forgot must not get a
+    silently different market. This module runs on the window it names (`tickcov`), so it runs
+    on that window's own data of record.
 
     The basis is SAVED AND RESTORED around this module on purpose: the research engine's
     basis is process-global, and a test module that left it at the account size would
@@ -51,7 +56,7 @@ def data() -> dict:
     previous = M._BASIS
     M.use_basis(P.ACCOUNT_BASIS_USD)
     try:
-        yield P.python_build_data()
+        yield P.python_build_data(offset_min=P.assert_server_offset(WINDOW), corpus="venue")
     finally:
         M._BASIS = previous
 

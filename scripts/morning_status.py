@@ -58,6 +58,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import era  # era classification for the gate clock (scripts/era.py)
+import mt5_ops as R  # one parser for "what is attached" — see config_attached_arms()
 
 LEDGER = "MitemshubAI_paper_Volatility_75_Index.csv"
 TELEM = "MitemshubAI_v23_telemetry_Volatility_75_Index.jsonl"
@@ -1107,44 +1108,23 @@ def config_attached_arms() -> list[tuple[str, str, str]]:
     carries the symbol and the tag. Returns `(terminal_data_folder, chart_like_text,
     note)`; the text is shaped exactly like a `.chr` so the same arm body, preset-identity
     and ledger checks apply unchanged.
+
+    THE PARSING LIVES IN `mt5_ops.startup_attached_arms()` — one implementation, because the
+    watchdog needs the same facts, and a second copy of "what counts as attached" is how two
+    tools end up disagreeing about whether the arm is running. Measured on 2026-09-21: the
+    watchdog reported `no MidastouchAI chart found` at action NONE while this section
+    reported the arm attached and its ledger advancing. This function only SHAPES those
+    facts for the `.chr`-like consumers below.
     """
     out: list[tuple[str, str, str]] = []
     for td in sorted(glob.glob(os.path.join(TERM_ROOT, "*"))):
         if not os.path.isdir(td):
             continue
-        try:
-            ini_txt = open(os.path.join(td, "config", "midas_attach.ini"),
-                           encoding="ascii", errors="replace").read()
-        except OSError:
-            continue
-        if "MidastouchAI" not in ini_txt:
-            continue
-        params = re.search(r"(?m)^\s*ExpertParameters\s*=\s*(\S+)", ini_txt)
-        sym_m = re.search(r"(?m)^\s*Symbol\s*=\s*(\S+)", ini_txt)
-        per_m = re.search(r"(?m)^\s*Period\s*=\s*(\S+)", ini_txt)
-        if not params:
-            continue
-        sym = sym_m.group(1) if sym_m else "XAUUSD"
-        period = per_m.group(1) if per_m else "?"
-        staged = os.path.join(td, "MQL5", "Presets", params.group(1))
-        try:
-            staged_txt = open(staged, encoding="utf-8-sig", errors="replace").read()
-            have_staged = True
-        except OSError:
-            # No staged preset means the EA came up on CODE DEFAULTS under a certified
-            # name — the silent-preset-loss signature. An empty body makes preset
-            # identity report every repo pin missing (DRIFT), which is the honest verdict.
-            staged_txt, have_staged = "", False
-        note = (f"{period} start-up chart (attach config, no saved profile"
-                + (", staged preset present)" if have_staged
-                   else ", NO STAGED PRESET - RUNNING CODE DEFAULTS)"))
-        # The tag is read from the LEDGER the EA writes, never assumed: an arm that lost
-        # its preset still has a ledger, and guessing a tag would look up the wrong one.
-        ledgers = glob.glob(os.path.join(td, "MQL5", "Files", f"MIDASTOUCH_paper_{sym}_*.csv"))
-        for lp in sorted(ledgers):
-            tag = os.path.basename(lp)[len("MIDASTOUCH_paper_"):-len(".csv")]
-            tag = tag[len(sym) + 1:] if tag.startswith(sym + "_") else tag
-            out.append((td, f"symbol={sym}\n{staged_txt}\nInpArmTag={tag}\n", note))
+        for arm in R.startup_attached_arms(td):
+            note = (f"{arm['period']} start-up chart (attach config, no saved profile"
+                    + (", staged preset present)" if arm["staged_present"]
+                       else ", NO STAGED PRESET - RUNNING CODE DEFAULTS)"))
+            out.append((td, R.chart_like_text(arm), note))
     return out
 
 

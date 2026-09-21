@@ -168,3 +168,45 @@ family above is a *reasonable* family, not a promising one, and gold's measured 
 0.0247R against a best-ever measured edge of +0.027R. **The most likely outcome is REJECTED
 or NO EDGE**, and that outcome is a useful result: it is the difference between "we have not
 looked" and "we looked and there is nothing there."
+
+---
+
+## 8. The news stand-down is NOT part of the certified contract (decided 2026-09-21)
+
+The rule exists and both engines apply it identically (`midas_prop.risk.news_calendar`, one
+file, one vocabulary, one judged instant). The question this section settles is narrower: is
+it part of *this* contract — the frozen walk-forward that certified the strategy — or an
+amendment that must be certified on its own terms?
+
+**It is an amendment. The certified contract is news-OFF, and every preset ships it OFF.**
+
+The evidence, all of it reproducible from this repo:
+
+1. **It changes what the walk-forward SELECTS, not only what it takes.** Applying the veto
+   during selection on the frozen window (2026-01-12 → 2026-09-18, 16,224 M15 bars, 31 folds)
+   re-selects the grid's configuration in **F04**. A pre-registered run
+   (`scripts/gold_news_sensitivity.py --preregister`, expectation and decision rule written
+   to `artifacts/gold_news_preregistration.json` *before* either leg ran) judges that against
+   P1 — "no fold's selected configuration changes" — and returns **REJECTED**. The
+   configuration a strategy is certified with cannot be re-chosen by an amendment and still
+   be the certified one.
+2. **The delta is one eight-day fold.** Veto ON is +3.36R on +20.67R (568 → 559 trades, t
+   +0.524 → +0.618), and the leave-one-fold-out attribution puts **112% of it in F04**:
+   drop that fold and the total is **−0.41R**. Three folds of thirty moved at all.
+3. **The effect the rule exists to avoid is not measurable at its own width.** With a
+   horizon- and hour-matched baseline, gold's move across a ±15-minute HIGH blackout is
+   **1.02× ordinary**, and 10% of releases beat the same-horizon p90 — exactly the rate a
+   no-effect window produces (`docs/GOLD_NEWS_WIDTH_20260921.md`). The lag sweep is flat from
+   −60 to +60 minutes, which rules out the calendar sitting off the venue's bars as the
+   explanation.
+4. **Its cost is real.** 398 of 16,224 corpus bars (2.45%) are inside a blackout, and 122 of
+   them are bars where the engine of record's own entry conditions held inside the session —
+   opportunities the rule removes to protect against a 1.02× move.
+
+**What follows, and what does not.** The frozen window stays news-OFF and its artifacts are
+not re-run. Any decision to trade with the gate on is a *new* strategy claim: it needs its own
+pre-registered walk-forward and its own certification, which is what the amendment's
+measurement is for. Nothing here licenses enabling it — and nothing here forbids measuring it
+again on a new window. The rule itself stays in the EA and in the engine of record, shipping
+off, because a rule that can only be enabled by a registered amendment must remain
+replayable on both sides.

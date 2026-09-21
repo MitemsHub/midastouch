@@ -2,7 +2,14 @@
 """MIDASTOUCH Step 4 — gold research sweep (XAUUSD, frozen protocol).
 
 Implements docs/MIDASTOUCH_PROTOCOL.md exactly:
-  - data of record: data/forex/xauusd/XAUUSD_{H1,M15}.csv
+  - DATA OF RECORD: data/forex/xauusd/XAUUSD_{H1,M15}_upcomers.csv — the terminal's own
+    history for the account the EA trades (scripts/midas_fetch_history.py --suffix _upcomers).
+    This module's own arithmetic, however, is DEFINED on the RETIRED research series (the
+    50,000-bar true-UTC corpus this program was certified on), which since 2026-09-21 lives
+    in a hash-pinned archive and is readable only through frozen_bars() below. That is a
+    deliberate exception for the reproduction path, not a default: see
+    docs/FROZEN_CORPUS_20260921.md for why the duplicate was retired and what would make a
+    number cited from it stop describing it.
   - macro filter on closed H4+H1 (close[1] vs EMA20[1], V75-family rule)
   - M15 trigger: BB(20,2) band-touch-with-close-back-inside, or RSI(14) 70/30
   - 8 registry modes, frozen exits (SL=2xATR_H1, TP=2R, timeout 48 M15 bars)
@@ -20,14 +27,21 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import os
 import sys
 from bisect import bisect_right
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 DATA_DIR = os.path.join("data", "forex", "xauusd")
+#: The venue server's offset from UTC, per era, with the measurement that produced each pin.
+#: It lives HERE, beside the corpus paths, because it is data-of-record metadata: "what clock
+#: is this epoch on" is a property of the venue's bars, and two copies of the DST rules would
+#: be two sources of truth for a frame — the failure this program already paid for once when
+#: it kept two bar series (see docs/FROZEN_CORPUS_20260921.md).
+SERVER_OFFSET_MANIFEST = os.path.join("configs", "mt5", "server_offsets.json")
 ART = "artifacts"
 POINT = 0.01
 TICK_VALUE_PER_LOT = 100.0        # $ per 1.0 price unit per 1.0 lot (100 oz)
@@ -149,6 +163,99 @@ MODES = ["ORIGINAL", "REVERSE_DIRECTION", "REVERSE_TRIGGER", "REVERSE_BOTH",
 
 
 # ── data ────────────────────────────────────────────────────────────────────
+# ── THE RETIRED CORPUS, AND WHY NOTHING MAY REACH IT BY DEFAULT ───────────────
+#: `data/forex/xauusd/` is the DATA OF RECORD and holds the venue's own series only. The
+#: 50,000-bar series this program was researched on (`XAUUSD_M15.csv` and its H1/D1 siblings,
+#: fetched 2026-09-17, stamped in true UTC) was removed from there on 2026-09-21 and moved to
+#: the archive below. It is a DIFFERENT MARKET from the venue's own history — measured: the
+#: two disagree about 21 bars inside the tick-covered window, and even about the units of
+#: their spread column — and having two series both answer to "the gold bars" is what made a
+#: data-source change read as a clock fault for a day.
+#:
+#: The bytes are KEPT, and kept committed, for exactly one reason: the frozen certification
+#: was computed on them (the sweep artifact that `midas_parity` reads as SWEEP_ANCHOR —
+#: `artifacts/midas_sweep_20260917.json`, REVERSE_DIRECTION/wf = n=151 / +1.474R — and the
+#: regression law in tests/test_midas_minlot_veto.py that pins the same numbers). Reproducing
+#: the program's central evidence needs them. NOT `artifacts/gold_wfo.json`: that one is
+#: written by scripts/gold_walkforward.py, which reads the TERMINAL's own history at run time
+#: (mt5_data.load_m5, i.e. the venue corpus) — measured 2026-09-21, its data block reports the
+#: venue's span, so the walk-forward verdict never depended on this archive. So they live in an archive that no default path, no window
+#: spec and no `load_bars(...)` call site reaches: `frozen_bars()` is the only reader, it
+#: names its own path, and it refuses any file whose SHA-256 is not the pinned one.
+FROZEN_DIR = os.path.join("archive", "frozen_corpus")
+FROZEN_MANIFEST = os.path.join("configs", "frozen_corpus.json")
+
+
+def server_offset_manifest() -> dict:
+    """The recorded era table. Refuses rather than defaulting: a guessed clock mis-aligns
+    every epoch-derived key with no visible symptom.
+    """
+    try:
+        with open(SERVER_OFFSET_MANIFEST) as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            f"cannot read the server-offset manifest {SERVER_OFFSET_MANIFEST}: {exc}\n"
+            f"      -> it is the record of every measured era. Without it no epoch can be put\n"
+            f"         on a clock, and a server-stamped epoch read as UTC is a silent grid\n"
+            f"         error of one whole offset.")
+
+
+def server_offset_for_month(month: str, manifest: dict | None = None) -> int | None:
+    """The pinned offset (minutes, server - UTC) for one 'YYYY-MM', or None when a DST step
+    falls inside that month.
+
+    `None` is a real answer and a caller must refuse on it: it means the month contains a
+    change, so a single offset cannot convert an epoch in it. Returning 0 here instead is how
+    a +120-server ledger gets graded against a UTC session rule and looks plausible.
+    """
+    table = manifest if manifest is not None else server_offset_manifest()
+    first = date.fromisoformat(f"{month}-01")
+    last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    hits: set[int] = set()
+    for era in table["eras"]:
+        start = date.fromisoformat(era["from"])
+        end = date.fromisoformat(era["to"]) if era.get("to") else date.max
+        if first <= end and start <= last:
+            hits.add(int(era["server_offset_min"]))
+    return hits.pop() if len(hits) == 1 else None
+
+
+def frozen_bars(stem: str) -> list[dict]:
+    """The RETIRED research series, hash-verified. Never reachable by default.
+
+    `stem` is 'XAUUSD_M15' / 'XAUUSD_H1' / 'XAUUSD_D1' — the names they had as the data of
+    record, kept so the manifest and the archive stay diffable against history. The hash pin
+    is the point: a frozen series that can be edited is not a frozen series, and every figure
+    cited from it (`gold_wfo.json`, the sweep anchors, the 151-trade regression law) is only
+    reproducible while these bytes are exactly the ones it was computed from.
+    """
+    path = os.path.join(FROZEN_DIR, f"{stem}.csv")
+    try:
+        with open(FROZEN_MANIFEST) as fh:
+            pinned = json.load(fh)["files"][f"{stem}.csv"]["sha256"]
+    except (OSError, KeyError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"cannot read the frozen-corpus manifest {FROZEN_MANIFEST}: {exc}")
+    if not os.path.isfile(path):
+        raise SystemExit(
+            f"the frozen corpus is not present: {path} is missing.\n"
+            f"      -> it is the RETIRED research series, and the only input that can reproduce\n"
+            f"         the sweep anchor (artifacts/midas_sweep_20260917.json: REVERSE_DIRECTION/wf\n"
+            f"         = n 151 / +1.474R) and the certified regression law. It is NOT the\n"
+            f"         data of record: no window spec and no default may use it. Name it\n"
+            f"         explicitly (corpus='frozen') when reproducing the frozen numbers, and see\n"
+            f"         docs/FROZEN_CORPUS_20260921.md for where it came from and what it is not.")
+    with open(path, "rb") as fh:
+        got = hashlib.sha256(fh.read()).hexdigest()
+    if got != pinned:
+        raise SystemExit(
+            f"frozen corpus file {path} does not match its pinned hash.\n"
+            f"      pinned {pinned}\n      found  {got}\n"
+            f"      -> every number cited from this file was computed on the pinned bytes; if\n"
+            f"         it has been edited, those citations no longer describe it.")
+    return load_bars(path)
+
+
 def load_bars(path: str) -> list[dict]:
     rows = []
     with open(path) as fh:
@@ -241,12 +348,34 @@ def bb_touch(closes: list[float], i: int, n: int = 20, k: float = 2.0) -> int:
     return 0
 
 
-def h4_series(h1: list[dict]) -> list[dict]:
+def h4_series(h1: list[dict], offset_min: int = 0) -> list[dict]:
+    """Derive H4 bars from H1, bucketed on the VENUE's 4-hour grid.
+
+    THE BOUNDARY IS THE VENUE'S DAY, NOT THE UNIX EPOCH'S, AND GETTING THIS WRONG COSTS
+    EVERY ENTRY THE MACRO GATE TOUCHES. `t0 = t - (t % 14400)` buckets a UTC-stamped series
+    at 00:00/04:00/08:00/12:00/16:00/20:00 UTC, but an MT5 broker aligns H4 to the SERVER
+    day: the venue's own H4 bars begin at 02:00/06:00/10:00/14:00/18:00/22:00 UTC on this
+    account. That is a two-hour offset, so *every* H4 bar is a different bar — different
+    close, different EMA20, and therefore a different macro state wherever the two H1/H4
+    EMA20 comparisons disagree.
+
+    Measured on the tick-covered window (2026-09-04..09-16): the epoch-aligned derivation
+    matches 6 of the EA's 9 keys with 2 python-only and 3 EA-only entries; the venue-aligned
+    one matches **9 of 9, with nothing left over in either direction**. The derivation is
+    faithful — its closes equal the venue's own H4 closes on 397 of 397 overlapping bars.
+
+    `offset_min` is the venue server's offset from UTC for the era of the series (the
+    boundary in server time is always 00:00, so in UTC it moves at DST: 22:00 at +120, 23:00
+    at +60). The default of 0 reproduces the old epoch-aligned behaviour for a series with
+    no known venue frame — that is what the pre-2026-09 legacy consumers were computed on,
+    and it is why they are not silently re-based.
+    """
     out: list[dict] = []
     cur = None
     cur_t0 = None
+    grid = offset_min * 60
     for b in h1:
-        t0 = b["time"] - (b["time"] % 14400)
+        t0 = b["time"] - ((b["time"] + grid) % 14400)
         if cur_t0 != t0:
             if cur:
                 out.append(cur)
@@ -614,8 +743,8 @@ def main() -> int:
     if args.selftest:
         return selftest()
 
-    h1 = load_bars(os.path.join(DATA_DIR, "XAUUSD_H1.csv"))
-    m15 = load_bars(os.path.join(DATA_DIR, "XAUUSD_M15.csv"))
+    h1 = frozen_bars("XAUUSD_H1")            # the retired corpus, hash-verified: the
+    m15 = frozen_bars("XAUUSD_M15")           # sweep's arithmetic is defined on it
     h4 = h4_series(h1)
     data = {
         "h1": h1, "m15": m15, "h4": h4,

@@ -1,0 +1,65 @@
+{
+  "what": "The RETIRED research series for XAUUSD — the 50,000-bar corpus this program was researched and certified on. It is NOT the market the funded EA trades.",
+  "status": "retired",
+  "retired_on": "2026-09-21",
+  "was": "data/forex/xauusd/XAUUSD_{M15,H1,D1}.csv (the data of record until 2026-09-21)",
+  "now": "archive/frozen_corpus/XAUUSD_{M15,H1,D1}.csv — read ONLY by scripts/midas_sweep.py:frozen_bars(), which verifies the sha256 below and refuses anything else",
+  "superseded_by": "data/forex/xauusd/XAUUSD_{M15,H1}_upcomers.csv — the terminal's own history, i.e. the bars the EA actually trades (see scripts/midas_parity.py:venue_bars_utc)",
+  "superseded_by_note": "Fetched from the Upcomers terminal that resolves account 1428765. Its own XAUUSD history BEGINS 2026-01-12 13:15 UTC, which is why 7,752 bars of the frozen `wf` window exist only in this archive and no EA side can be compared there.",
+  "why_kept": [
+    "artifacts/midas_sweep_20260917.json — the sweep artifact scripts/midas_parity.py reads as SWEEP_ANCHOR. Its REVERSE_DIRECTION/wf anchor (n=151, net_r +1.474) is a number on these bytes.",
+    "tests/test_midas_minlot_veto.py pins that regression law as a literal (n=151, +1.474R); reproducing it requires this exact series.",
+    "The certificate's python leg: `python_build_data(corpus='frozen')` reproduces the 151 frozen trades the certified artifact is stated in.",
+    "scripts/midas_variant_research.py, whose grid is frozen on this series.",
+    "A retirement that deletes the evidence is not a retirement — it is an unfalsifiable claim."
+  ],
+  "why_kept_note": "NOT KEPT FOR artifacts/gold_wfo.json OR docs/GOLD_WFO_VERDICT_20260919.md. Those come from scripts/gold_walkforward.py, which reads the terminal's own history at run time (mt5_data.load_m5 -> the venue's bars), so the walk-forward verdict is a VENUE-corpus number and is unaffected by this retirement. Verified 2026-09-21 by re-running it: its data block reports the venue's span (2026-01-12 13:15 onward), not this archive's 2024-08 start.",
+  "what_it_is_not": [
+    "Not a market. Read against the venue's own series inside the tick-covered window, the two disagree about 21 bars — 3 only here, 18 only at the venue — and the divergence is at the venue's daily break, which is where the first mis-traced parity trade closed.",
+    "Not the same units. This series' spread column is DOLLARS; the venue's is POINTS (42 -> $0.42). Two silently interchangeable costs is what let a stale staged spread file charge the EA $0.135 less per fill than the engine of record.",
+    "Not true UTC in the same sense as the venue's. This one is stamped in true UTC; the venue's is server wall clock, so a server->UTC conversion is required for it and must not be for this."
+  ],
+  "rules": [
+    "No default may reach this corpus. There is no default: parity windows declare `corpus` explicitly, and scripts/midas_parity.py refuses a pass whose declaration names neither `frozen` nor `venue`.",
+    "The python engine's sweep arithmetic (scripts/midas_sweep.py:main) is DEFINED on this series and still runs on it. That is a deliberate exception: it is the reproduction path, not a forward-looking one.",
+    "Any new research must read the venue series. Adding a reader of this corpus is a change to the certified path and needs to be argued as one."
+  ],
+  "files": {
+    "XAUUSD_M15.csv": {
+      "sha256": "8a9a42b8b866f0f299a9b8cb3f4060fb51b4346fe22572a7f8be4d4ab5fa869d",
+      "bytes": 3860456,
+      "bars": 50000,
+      "first_utc": "2024-08-02T17:30:00Z",
+      "last_utc": "2026-09-16T20:45:00Z",
+      "spread_unit": "dollars",
+      "fetched": "2026-09-17",
+      "fetched_from": "the DERIV terminal install on this machine (via scripts/midas_fetch_history.py), for an account that no longer trades this symbol"
+    },
+    "XAUUSD_H1.csv": {
+      "sha256": "c2dc795925d361479dd7c18607463821026d9beb66a1ade94be4772aaba8c975",
+      "bytes": 1117658,
+      "bars": 14414,
+      "first_utc": "2024-04-10T13:00:00Z",
+      "last_utc": "2026-09-16T20:00:00Z",
+      "spread_unit": "dollars",
+      "fetched": "2026-09-17",
+      "fetched_from": "the DERIV terminal install on this machine (via scripts/midas_fetch_history.py)"
+    },
+    "XAUUSD_D1.csv": {
+      "sha256": "c08153b1960cdc6a82a44dd311108550e8a73532615828b7319f45f83a3b5208",
+      "bytes": 63150,
+      "bars": 800,
+      "first_utc": "2023-11-06T00:00:00Z",
+      "last_utc": "2026-09-16T00:00:00Z",
+      "spread_unit": "dollars",
+      "fetched": "2026-09-17",
+      "fetched_from": "the DERIV terminal install on this machine (via scripts/midas_fetch_history.py)"
+    }
+  },
+  "reproduce_the_frozen_numbers": [
+    "python scripts/midas_sweep.py  -> writes artifacts/midas_sweep_<date>.json; compare REVERSE_DIRECTION/wf against the anchor n=151, net_r +1.474",
+    "python scripts/midas_parity.py --window wf|oos --corpus frozen",
+    "python -m pytest tests/test_midas_minlot_veto.py -q  -> the 151-trade regression law",
+    "NOT scripts/gold_walkforward.py: it reads the terminal (the venue corpus), not this archive"
+  ]
+}
