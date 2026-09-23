@@ -69,6 +69,44 @@ python scripts/midas_vps_migration.py clear-era                          # when 
   ledgers remain visible to them; the EA on the MetaTrader VPS trades unmonitored by
   anything but MT5 itself. That trade-off is the operator's to accept knowingly.
 
+## 0c. Built-in MT5 VPS vs a real Windows VPS — the comparison that decides the arm's home
+
+Both are "a VPS that never sleeps". They are not the same product, and the difference
+is exactly the evidence layer.
+
+| | MetaTrader built-in VPS (the one rented: 6911490, $15/mo) | A real Windows VPS |
+|---|---|---|
+| Execution 24/7 | ✅ managed by MetaQuotes, auto-restarts the terminal, 5.5 ms ping (measured; the laptop's route to the venue was 164.6 ms the same hour) | ✅ but self-managed (our S4U task path) |
+| Runs the EA | ✅ after a correct migration (§0b's carrier-chart fix) | ✅ |
+| Runs the repo's python evidence layer | ❌ **no file system access, no python, no scheduled tasks** | ✅ everything: watchdog, coverage, census, parity, morning report |
+| The ledger | written to the VPS's own Files, **unreadable by our tools** | local to the host, every tool reads it |
+| Paper gate (≥30 closed trades) | **cannot be counted automatically** — VPS-era closes are invisible to the local tally until a reconciliation pass ingests them | counts natively, as today |
+| Gap alarms / supervision | none — a blind EA is exactly as loud as a quiet market | the whole point of the supervision layer |
+| Double-execution guard | **built-in and measured**: EA transfer auto-disables local algo trading (verify-after pins the journal line) | **procedural only**: the cutover order (stop local terminal before the VPS one starts) is discipline, not a mechanism |
+| Migration mechanics | one-click, but only saved-profile charts with EAs (§0b's measured failure) | manual copy per §3, verified by continuity proof |
+
+**The blind-EA problem, stated as a gate consequence.** The arming record's path to
+size runs through the 30-trade forward tally and the supervision gates. An EA on the
+built-in VPS trades correctly but writes its record where none of our tools can read:
+no census reconciliation, no veto audit, no pace comparison, no coverage PASS — the
+arm would be *executing* while everything that certifies it goes dark. That is a
+trade the operator may choose, but only with eyes open: it re-creates, permanently,
+the exact "quiet market" illusion the supervision layer was built to end.
+
+**The one-terminal rule, in both worlds.** Two platforms on one hedging account is
+the forbidden state. On the built-in VPS, MT5 enforces it mechanically (the local
+algo lock) — but only at migration time, so after any *local* re-arm or preset edit,
+re-run `verify-after` rather than assuming the lock still holds. On a Windows VPS,
+nothing enforces it: the runbook's cutover order (pause local watchdog → kill the
+local terminal → start the VPS terminal) is the only guard, and §8's decommission is
+what makes the move one-way instead of a standing double-exposure.
+
+**Where this leaves the decision.** The built-in VPS is a *execution-site* rental,
+not an *arm-home* rental. It can hold a rehearsal, a redundant EA, or a deliberately
+blind execution era. The arm's home — the thing the five gates certify — is a Windows
+host (§1–§8). Until one is provisioned, the laptop (hibernation disabled, S4U
+supervisor, one measured night pending) remains the trading host of record.
+
 ## 1. Provision the VPS
 
 * Windows Server 2019+ (the MT5 GUI and the watchdog's stop-and-relaunch need a desktop

@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-09-23 22:00Z - THE HOST EVENTS ARE ON THE ARMING RECORD; THE LAPTOP ENTERS ITS CERTIFICATION NIGHT
+
+- **Amendment 11 (artifacts/live/armed.json)** records the day's host events: the
+hibernation gap (cause, fix, and the measured evidence), the empty MT5-VPS migration
+(journal-quoted mechanism), and which host actually traded (this laptop; all 3 fills,
+VPS executed nothing). The record can now answer "which machine was the arm on, and
+what did each host do, on 2026-09-23".
+- **Runbook §0c** compares the MetaTrader built-in VPS against a real Windows VPS:
+execution-site vs arm-home, the blind-EA problem (the 30-trade tally and the
+certification gates cannot read a VPS-side ledger), the one-terminal rule (mechanical
+on MT5-VPS via the migration-time algo lock; procedural on a Windows host), and the
+decision it leaves the operator, stated rather than implied.
+- **Pre-night posture measured**: Hibernate absent from powercfg -a; both supervisor
+tasks (S4U + legacy interactive) at LastTaskResult 0 / 0 missed with runs current;
+ledger beating; readiness verdict unchanged (operator override — trading, not
+validated). Tonight 22:00Z -> 08:00Z is the first measured night under the fixed
+posture; per the pre-registration in docs/UNATTENDED_OPERATION_20260922.md, the
+certifier is `python scripts/live_coverage.py` returning PASS over the night window
+with an empty alarm — nothing else promotes the host.
+
 ## 2026-09-23 20:15Z - THE HOST HIBERNATED UNDER THE LIVE ARM; HIBERNATION DISABLED, S4U SUPERVISOR CONFIRMED, VPS RUNBOOK WRITTEN
 
 - **Measured failure**: 2026-09-23 15:28→18:35Z (186.3 min) no supervision pass ran AND the EA's
