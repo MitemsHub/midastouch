@@ -59,6 +59,11 @@ __all__ = [
     "TradeDecision",
     "evaluate_trade",
     "BlockCode",
+    "EaSizing",
+    "size_like_ea",
+    "BEST_DAY_HEADROOM",
+    "BEST_DAY_CAP_REACHED",
+    "BEST_DAY_NO_PROFIT_YET",
     "ValidationRecord",
     "GateCriteria",
     "ArmingDecision",
@@ -328,6 +333,166 @@ def size_position(
 
 
 # --------------------------------------------------------------------------- #
+# What the EA will actually send
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class EaSizing:
+    """What the deployed EA's OWN sizing site would send, mirrored step for step.
+
+    WHY THIS IS NOT :class:`Sizing`. The two answer different questions, and on
+    2026-09-21 an operator read one as the other: `size_position` sizes to the PROP
+    RULES (a fraction of the 3% daily limit), while the EA sizes to ``InpRiskPercent``
+    of account equity. On the U25 arm those are 0.11 lots and 0.01 lots for the same
+    stop width — a ten-fold difference, printed under one heading.
+
+    Mirrored from ``MidastouchAI.mq5`` → ``LiveSendOrder()`` (the only path that can
+    reach the venue; the paper path at ``OpenPaperPosition()`` is the same arithmetic
+    on ``PaperEquity()`` instead of ``ACCOUNT_EQUITY``):
+
+    1. ``risk_usd = equity * InpRiskPercent / 100.0``
+    2. ``lots = risk_usd / (stop_price_distance * usd_per_unit_per_lot)``
+    3. if below the venue minimum, VETO when
+       ``stop * dpu * min_lot > equity * InpMaxRiskPct / 100.0`` (amendment 6 — the
+       min lot is a veto, never a floor to round up to), else take the minimum
+    4. floor to the venue's lot step, then re-apply the minimum
+
+    ``tests/test_ea_sizing_mirror.py`` pins every one of those steps against the MQL5
+    source text, so this mirror cannot drift from the EA without a test failing.
+    """
+
+    lots: float
+    risk_usd: float
+    budget_usd: float
+    """``equity * risk_percent / 100`` — the risk the EA intended, before lot quantisation."""
+    equity: float
+    risk_percent: float
+    max_risk_pct: float
+    stop_distance_price: float
+    floored: bool = False
+    """The EA's own flag: the raw size fell below the venue minimum, so it took the
+    minimum. Note it does NOT mark a size floored down to the lot step — the EA's
+    ``MathFloor(lots / vstep)`` branch sets no flag (measured against the source)."""
+    vetoed: bool = False
+    veto_reason: str = ""
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        """False only when the EA would refuse the order. A small number is not a refusal."""
+        return not self.vetoed
+
+    @property
+    def risk_pct_of_equity(self) -> float:
+        if self.equity <= 0:
+            return float("nan")
+        return self.risk_usd / self.equity
+
+    @property
+    def quantised_down(self) -> bool:
+        """True when the venue's lot step left the configured budget unspent.
+
+        Derived from the numbers rather than from ``floored``, because the case that
+        matters most is invisible to that flag: on the U25 arm the 0.25% budget is
+        $62.50 and the venue's 0.01 step gives $31.84 — the arm trades HALF its
+        configured risk, and the EA's log says nothing about it.
+        """
+        return not self.vetoed and self.risk_usd < self.budget_usd - POS_2CM
+
+    @property
+    def over_budget(self) -> bool:
+        """The venue's minimum lot forces MORE risk than the configured percentage.
+
+        The mirror image of :attr:`quantised_down`, and the one that matters for
+        survival: on a small arm the minimum lot is the smallest order the venue
+        accepts, so ``InpRiskPercent`` is not a setting the EA can honour. It is not
+        the amendment-6 veto (that is when even this is above ``InpMaxRiskPct``).
+        """
+        return not self.vetoed and self.risk_usd > self.budget_usd + POS_2CM
+
+    def note(self) -> str:
+        """One sentence saying what the numbers mean — never left to the reader."""
+        if self.vetoed:
+            return self.veto_reason
+        head = (f"{self.risk_percent:g}% of ${self.equity:,.2f} equity = "
+                f"${self.budget_usd:,.2f} budget; {self.lots:g} lots risks "
+                f"${self.risk_usd:,.2f} ({self.risk_pct_of_equity:.3%} of equity)")
+        if self.over_budget:
+            return (f"{head} — OVER BUDGET: {self.lots:g} lots is the smallest order "
+                    f"the venue accepts, and it risks "
+                    f"{self.risk_usd / self.budget_usd:.2f}x the configured budget — "
+                    f"InpRiskPercent {self.risk_percent:g}% cannot be honoured here")
+        if not self.quantised_down:
+            return head
+        return (f"{head} — QUANTISED DOWN: the venue's lot step cannot express the "
+                f"${self.budget_usd:,.2f} budget at this stop width, leaving "
+                f"${self.budget_usd - self.risk_usd:,.2f} of it unspent"
+                + (" (the size is the venue's minimum lot)" if self.floored else ""))
+
+
+def size_like_ea(
+    spec: ContractSpec,
+    *,
+    equity: float,
+    risk_percent: float,
+    max_risk_pct: float,
+    stop_distance_price: float,
+) -> EaSizing:
+    """Mirror the EA's live sizing arithmetic. See :class:`EaSizing` for the steps.
+
+    Malformed inputs raise rather than returning a refusal: a non-positive stop or
+    equity is a caller asking a question the EA's code path cannot be reached with,
+    not the EA declining a trade. The EA's own refusals are reported as ``vetoed``.
+    """
+    if equity <= 0:
+        raise ValueError("equity must be positive")
+    if risk_percent <= 0:
+        raise ValueError("risk_percent must be positive")
+    if max_risk_pct <= 0:
+        raise ValueError("max_risk_pct must be positive")
+    if stop_distance_price <= 0:
+        raise ValueError("stop_distance_price must be positive")
+
+    dpu = spec.usd_per_unit_per_lot
+    budget = equity * risk_percent / 100.0
+    raw = budget / (stop_distance_price * dpu)
+    min_risk = stop_distance_price * dpu * spec.min_lot
+    cap = equity * max_risk_pct / 100.0
+
+    if raw < spec.min_lot and min_risk > cap + POS_2CM:
+        return EaSizing(
+            lots=0.0, risk_usd=0.0, budget_usd=budget, equity=equity,
+            risk_percent=risk_percent, max_risk_pct=max_risk_pct,
+            stop_distance_price=stop_distance_price, vetoed=True,
+            veto_reason=(f"the EA REFUSES this order: the venue's {spec.min_lot:g} "
+                         f"minimum risks ${min_risk:,.2f}, above InpMaxRiskPct "
+                         f"{max_risk_pct:g}% of equity (${cap:,.2f}) — amendment 6"))
+
+    lots = raw
+    floored = False
+    if lots < spec.min_lot:
+        lots, floored = spec.min_lot, True
+    lots = spec.floor_lots(lots)
+    if lots < spec.min_lot - POS_2CM:
+        lots, floored = spec.min_lot, True
+
+    warnings: list[str] = []
+    if lots > spec.max_lot + POS_2CM:
+        # The EA does NOT clamp here (it never reads volume_max), so this is not
+        # corrected — it is reported, because the venue would reject the order.
+        warnings.append(
+            f"the EA does not clamp to max_lot: {lots:g} exceeds the symbol's "
+            f"{spec.max_lot:g} — the venue would reject this order")
+
+    return EaSizing(
+        lots=lots, risk_usd=stop_distance_price * dpu * lots, budget_usd=budget,
+        equity=equity, risk_percent=risk_percent, max_risk_pct=max_risk_pct,
+        stop_distance_price=stop_distance_price, floored=floored,
+        warnings=tuple(warnings))
+
+
+# --------------------------------------------------------------------------- #
 # Best Day: a profit ceiling, not a loss limit
 # --------------------------------------------------------------------------- #
 
@@ -380,6 +545,17 @@ def best_day_days_required(rules: ThunderboltClassicRules,
     if not 0 < rules.best_day_pct < 100:
         raise ValueError("best_day_pct must be strictly between 0 and 100")
     return int(math.ceil(100.0 / rules.best_day_pct))
+
+
+#: WHY an allowance reads what it reads. The number alone is ambiguous, and the
+#: ambiguity has already been misread once by an operator tool: the allowance is
+#: ``$0.00`` both when today's ceiling is REACHED (a refusal, ``cap_reached``) and
+#: when no profit exists yet to take a share of (``no_profit_yet`` — the day's
+#: first trade is always allowed). Only the basis separates them, so it travels
+#: with the number everywhere the number is printed.
+BEST_DAY_HEADROOM = "headroom"
+BEST_DAY_CAP_REACHED = "cap_reached"
+BEST_DAY_NO_PROFIT_YET = "no_profit_yet"
 
 
 # --------------------------------------------------------------------------- #
@@ -441,8 +617,21 @@ class TradeDecision:
     day_profit_cap_usd: float = 0.0
     """Most today may earn in total before today exceeds the Best Day share."""
 
+    best_day_basis: str = BEST_DAY_HEADROOM
+    """One of the ``BEST_DAY_*`` constants: why the allowance reads what it reads.
+
+    ``$0.00`` under :data:`BEST_DAY_CAP_REACHED` is a refusal; ``$0.00`` under
+    :data:`BEST_DAY_NO_PROFIT_YET` is not one. Both are ``$0.00``.
+    """
+
+    best_day_note: str = ""
+    """That basis as a sentence, so no renderer has to infer a refusal from a number."""
+
     def explain(self) -> str:
-        head = "ALLOW" if self.allowed else "BLOCK"
+        # The header names the block CODES, not just the word BLOCK. "BLOCK" on its
+        # own is what let an operator read the Best Day allowance line as the cause
+        # when the cause was the arming switch three lines further down.
+        head = "ALLOW" if self.allowed else "BLOCK (" + ", ".join(self.block_codes) + ")"
         lines = [f"{head}"]
         if self.sizing is not None and self.sizing.ok:
             lines.append(f"  lots={self.sizing.lots:g} "
@@ -450,7 +639,11 @@ class TradeDecision:
                          f"budget=${self.sizing.budget_usd:,.2f} "
                          f"({self.sizing.budget_note})")
         lines.append(f"  Best Day: today's cap ${self.day_profit_cap_usd:,.2f}, "
-                     f"remaining allowance ${self.best_day_allowance_usd:,.2f}")
+                     f"remaining allowance ${self.best_day_allowance_usd:,.2f}"
+                     + (f" [{self.best_day_basis}]" if self.best_day_basis
+                        != BEST_DAY_HEADROOM else ""))
+        if self.best_day_note:
+            lines.append(f"    {self.best_day_note}")
         for r in self.reasons:
             lines.append(f"  BLOCKED: {r}")
         for w in self.warnings:
@@ -505,6 +698,13 @@ def evaluate_trade(
     Note what ``"cap"`` deliberately does NOT do: it does not refuse the day's
     FIRST trade. Before any profit exists today there is no breach to deepen, and
     a rule that forbids starting is not a constraint, it is a deadlock.
+
+    Because of that, ``best_day_allowance_usd`` is ``$0.00`` in two states that
+    mean opposite things, and the decision carries :attr:`TradeDecision.best_day_basis`
+    and :attr:`TradeDecision.best_day_note` to say WHICH — a caller that prints the
+    bare number next to a verdict is printing an ambiguity (that is what
+    ``scripts/verify_sizing_live.py`` did, and why it looked like the venue was
+    refusing trades on a flat account).
     """
     if best_day_mode not in ("cap", "advise"):
         raise ValueError("best_day_mode must be 'cap' or 'advise'")
@@ -549,6 +749,11 @@ def evaluate_trade(
     cap_today = allowance + max(state.today_profit, 0.0)
     rest = sum(p for p in state.other_days_profit if p > 0)
     if allowance <= POS_2CM and state.today_profit > POS_2CM:
+        basis = BEST_DAY_CAP_REACHED
+        note = (f"today has reached its ${cap_today:,.2f} ceiling, so no further "
+                f"profit may be carried today"
+                + ("" if best_day_mode == "cap"
+                   else " — 'advise' mode, so this does not block"))
         if best_day_mode == "cap":
             blocks.append(BlockCode.BEST_DAY_EXHAUSTED)
             reasons.append(
@@ -561,12 +766,26 @@ def evaluate_trade(
                 f"Best Day cap reached (today ${state.today_profit:,.2f} of "
                 f"${cap_today:,.2f}) — 'advise' mode, not blocking")
     elif allowance <= POS_2CM:
+        # The $0.00 that looks like a refusal and is not one. Nothing is banked, so
+        # the share is undefined at zero and the rule cannot bind on an entry at
+        # all — it binds on the first profitable CLOSE (see best_day_budget_usd).
+        basis = BEST_DAY_NO_PROFIT_YET
+        note = (f"no profit is banked yet, so the {rules.best_day_pct:g}% share is "
+                f"undefined at zero and the allowance reads $0.00 — NOT a refusal: "
+                f"the day's FIRST trade is always allowed, and this rule binds on "
+                f"the first profitable close, not on the entry")
         warnings.append(
             f"Best Day: nothing banked on other days, so today's cap is "
             f"${cap_today:,.2f} — any profit today is 100% of total profit, so "
             f"the first profitable close ends the day. The "
             f"{rules.profit_target_pct:g}% target needs >= "
             f"{best_day_days_required(rules)} profitable days.")
+    else:
+        basis = BEST_DAY_HEADROOM
+        note = (f"${allowance:,.2f} of today's ${cap_today:,.2f} ceiling remains; "
+                f"the ceiling is {rules.best_day_pct:g}% of total profit and it takes "
+                f">= {best_day_days_required(rules)} profitable days to bank the "
+                f"{rules.profit_target_pct:g}% target without breaching it")
 
     # --- venue minimum hold ------------------------------------------------ #
     since = state.seconds_since_last_close
@@ -613,7 +832,9 @@ def evaluate_trade(
         reasons=tuple(reasons),
         warnings=tuple(warnings),
         best_day_allowance_usd=allowance,
-        day_profit_cap_usd=cap_today)
+        day_profit_cap_usd=cap_today,
+        best_day_basis=basis,
+        best_day_note=note)
 
 
 # --------------------------------------------------------------------------- #

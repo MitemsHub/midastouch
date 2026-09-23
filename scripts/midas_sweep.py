@@ -33,6 +33,7 @@ import math
 import os
 import sys
 from bisect import bisect_right
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 DATA_DIR = os.path.join("data", "forex", "xauusd")
@@ -425,6 +426,86 @@ def macro_state(h1_close: float, h1_ema: float,
     if not h1_up and not h4_up:
         return -1
     return 0
+
+
+# ── the Asian-range sweep family ────────────────────────────────────────────
+# MOVED HERE 2026-09-22 from `scripts/midas_asia_sweep.py`, which now imports them.
+# There was one definition and one caller; the forward shadow recorder
+# (`MIDAS1.28` + `scripts/midas_sweep_shadow.py`) makes two callers, and two copies
+# of a mechanism is how a program ends up certifying one rule and recording another.
+# The move is inert by construction and the published artifact
+# (`artifacts/midas_asia_sweep_20260922.json`) must still reproduce digit for digit:
+# `tests/test_sweep_shadow.py` pins the secondary-window numbers against it.
+#: The bars whose OPEN falls in these UTC hours form the range (00:00-06:45).
+ASIAN_RANGE_HOURS = range(0, 7)
+#: The hours after the range is known. The sweep cannot exist before 07:00 UTC, and 18
+#: is where `docs/ASIA_SWEEP_PREREG_20260922.md`'s SECONDARY window ends. This coincides
+#: with the arm's own live gate (`InpSessionStartHour/EndHour` = 06/20 against broker-server
+#: hours, i.e. UTC 04-18), so the shadow needs no frame normalisation for eligibility.
+SWEEP_WINDOW = (7, 18)
+SWEEP_VARIANTS = ("SWEEP_CONT", "SWEEP_FADE", "RECLAIM_REV")
+
+
+def asian_ranges(m15: list[dict]) -> dict:
+    """{utc_day: (range_high, range_low)} from the bars opening 00:00-06:45 UTC.
+
+    `utc_day` is the ISO date of the bar's own OPEN time, so the range is keyed by the
+    day it belongs to rather than by when it became known. Bars must already be in true
+    UTC (`midas_parity.python_build_data` shifts the venue's series by the window's own
+    asserted offset; a caller that hands raw server-stamped epochs here silently shifts
+    every range by the offset).
+    """
+    acc = defaultdict(lambda: [float("-inf"), float("inf"), 0])
+    for b in m15:
+        t = datetime.fromtimestamp(b["time"], tz=timezone.utc)
+        if t.hour in ASIAN_RANGE_HOURS:
+            key = t.date().isoformat()
+            acc[key][0] = max(acc[key][0], b["high"])
+            acc[key][1] = min(acc[key][1], b["low"])
+            acc[key][2] += 1
+    return {k: (v[0], v[1]) for k, v in acc.items() if v[2] > 0}
+
+
+def sweep_signals(m15: list[dict]) -> dict:
+    """The three variant arrays, one entry per M15 bar, using only that bar's own closed data.
+
+    NON-REPAINTING: entry `i` reads `m15[i]`'s own high/low/close plus a range built from bars
+    that all closed before it, so perturbing a LATER bar cannot move an earlier value. That is
+    not a comment, it is a pinned test (`tests/test_sweep_shadow.py`) — the cross-asset study
+    found exactly this defect class here once, when its context leg read open times while its
+    signal leg read closes and gave the context one bar of lookahead.
+
+    `SWEEP_CONT` fires WITH the break (the reading three independent external sweep mechanisms
+    agreed on, and the only one of the three with a positive number on the venue's own bars).
+    `SWEEP_FADE` is its mirror and `RECLAIM_REV` is the textbook reversal read, which the
+    external series reports runs backwards; both are recorded so the direction can be checked
+    forward, not to be traded.
+    """
+    rng = asian_ranges(m15)
+    fired = set()                      # (day, side) already swept
+    out = {v: [0] * len(m15) for v in SWEEP_VARIANTS}
+    for i, b in enumerate(m15):
+        t = datetime.fromtimestamp(b["time"], tz=timezone.utc)
+        key = t.date().isoformat()
+        if t.hour < SWEEP_WINDOW[0] or key not in rng:
+            continue
+        rh, rl = rng[key]
+        up = b["high"] > rh
+        dn = b["low"] < rl
+        if up and (key, 1) not in fired:
+            fired.add((key, 1))
+            out["SWEEP_CONT"][i] = 1
+            out["SWEEP_FADE"][i] = -1
+        if dn and (key, -1) not in fired:
+            fired.add((key, -1))
+            out["SWEEP_CONT"][i] = -1
+            out["SWEEP_FADE"][i] = 1
+        # reclaim: traded beyond and closed back inside -> textbook reversal read, so fade the break
+        if up and b["close"] < rh:
+            out["RECLAIM_REV"][i] = -1
+        elif dn and b["close"] > rl:
+            out["RECLAIM_REV"][i] = 1
+    return out
 
 
 # ── engine ──────────────────────────────────────────────────────────────────

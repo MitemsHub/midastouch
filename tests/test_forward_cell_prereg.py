@@ -373,14 +373,27 @@ def test_the_forward_mask_reproduces_the_studys_own_cell():
     the numbers `artifacts/gold_persistence_state.json` published. Nothing here is re-derived from
     the artifact: the expected values are literals, so this fails if the mask, the frame conversion
     or the axes move.
+
+    v2 (2026-09-23, measured repair): THE STUDY'S OWN FRAME, NOT THE CORPUS'S MOVING TAIL.
+    This pin used to assert 658 entries from whatever the venue corpus held at run time, so
+    every data refresh broke it (measured: 662 == 658 + 4 after the 09-23 fetch, the new
+    entries 09-22 08:00/10:30/10:45/18:15Z). The study's artifact declares its own window
+    (`window[1]` = 2026-09-21 16:15Z); entries inside it are immutable history and reproduce
+    the published cell exactly, and the tail is FUTURE data for this study. The count now
+    runs inside the declared frame, so a corpus refresh can never rewrite what the study
+    said — and a corpus SHRINK below the window still fails the 658 assert, as it must:
+    the frame would no longer be reproducible.
     """
     import gold_exit_capture as ge
     import gold_prereg_no_target as pn
 
     B, epoch, n, atr, hours, ok = gg.venue_data(gw.SYMBOL, 60000)
     entries = gg.run_grid(B, hours, ok, atr, pn.entry_config((6, 20)), n)
-    trades = ge.simulate_policy(B, entries, atr, stop_mult=1.0, tp=None, trail=None,
-                                time_bars=None)
+    trades_all = ge.simulate_policy(B, entries, atr, stop_mult=1.0, tp=None, trail=None,
+                                    time_bars=None)
+    declared = json.loads((ROOT / "artifacts" / "gold_persistence_state.json").read_text())
+    w_end = int(datetime.fromisoformat(declared["window"][1]).timestamp())
+    trades = [t for t in trades_all if int(epoch[t["entry_i"]]) < w_end]
     assert len(trades) == 658
 
     offsets: dict[str, int | None] = {}
@@ -393,14 +406,19 @@ def test_the_forward_mask_reproduces_the_studys_own_cell():
         rows.append({"open_ct": sig_utc + off * 60 + fw.FILL_LAG, "net_r": t["net_r"],
                      "close_ct": sig_utc + off * 60 + 4 * 3600, "pnl": 0.0, "ticket": str(t["entry_i"])})
 
-    labelled, meta = fw.label_rows(rows, fw.build_axes(gw.SYMBOL, 60000))
+    # v2: calendar freshness is judged AT the declared window end, not at the corpus tail
+    # (a frozen snapshot always ages past a moving tail; the judged question is whether the
+    # calendar was current for the window being labelled).
+    labelled, meta = fw.label_rows(rows, fw.build_axes(gw.SYMBOL, 60000, as_of=w_end))
     assert len(labelled) == 658 and meta["excluded"] == {}
     assert meta["news_axis_measurable"] is True
 
     cell = [r for r in labelled if r["cell"] == fw.CELL_PRIMARY]
     assert len(cell) == 199
-    first, last = float(epoch[gw.WARMUP_BARS]), float(epoch[n - 1])
-    mid = first + (last - first) / 2.0
+    # v2: the split uses the artifact's OWN published midpoint (2026-05-22 09:52:30Z), not
+    # one recomputed from the corpus's last bar — a recomputation moves with every fetch,
+    # which is the same tail-dependence this pin was just repaired for.
+    mid = int(datetime.fromisoformat(declared["midpoint"]).timestamp())
     h1 = [r["net_r"] for r in cell if r["sig_open_utc"] < mid]
     h2 = [r["net_r"] for r in cell if r["sig_open_utc"] >= mid]
     assert (len(h1), len(h2)) == (92, 107)

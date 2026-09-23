@@ -1,5 +1,1550 @@
 # Changelog
 
+## 2026-09-23 11:15Z - THE SPREAD CAP WAS TIGHTER THAN THE CERTIFIED STRATEGY; FIXED AND DEPLOYED (amendment 10)
+
+- **Measured before anything changed**: the certified engine of record's own entry costs on the
+130 held-out fills (oos, venue corpus, UTC 04-18) are mean 0.0080R, p90 0.0141R, p99 0.0184R,
+max 0.0193R — so the old `InpSpreadCapPctStop=1.5` (0.015R of stop) sat INSIDE the certified
+trade set's own cost distribution and would have refused 7 of the 130 certified fills,
+discarding +1.133R of the certified set's own expectancy. The live arm hit that floor on
+2026-09-23: venue spread $0.49–0.50 against a ~$25 stop put the cap at ~$0.37 and 4 of the 5
+accepted signals since arming were vetoed at the gate.
+- **`InpSpreadCapPctStop 1.5 -> 2.5`** on the whole Upcomers family (paper, LIVE, M1 control),
+on the engine-of-record input builder (`midas_parity.build_inputs`), and in the go-live
+grammar pin — one contract, all surfaces together. The acceptance rule was pre-registered
+before the presets were regenerated: 0/130 certified fills refused (measured TRUE), live
+regime covered (0.0188–0.0200R < 0.025R), and the cap stays a quarter of the engine's own G7
+0.10R ceiling. No trigger, stop, target, session, mode or sizing key moved. Recorded as
+amendment 10 in `artifacts/live/armed.json`.
+- **Deployed through the sanctioned restart path** (`mt5_ops.stop_terminal` +
+`relaunch_terminal` with the attach config, book flat, backup + verify): the 12:13 init banner
+reads `spreadcap=2.5%stop | execution=LIVE | mode=1`, census and tally restored, and
+`midas_spread_watch` now reports the gate **OPEN** — spread $0.47 vs cap $0.54, $0.07
+headroom. The next accepted signal executes.
+
+## 2026-09-23 08:15Z - SHADOW COUNTER IN THE MORNING REPORT; THE "MISSING JOURNAL" DECODED
+
+- **`morning_status` [3b.1] now carries the sweep-shadow forward record** as a standing
+line: verdict word, N of 60, EA rows/in-window/coverage/disagreements/unmatched, artifact
+age. Design constraint honored: it quotes `artifacts/sweep_shadow_forward.json` and
+**imports nothing from the research layer** (`midas_sweep_shadow` stays residue; surface
+audit DANGLING = none). Missing/corrupt artifact reads as "no forward record published
+yet" — normal before rows exist, never an arm-health verdict. Pinned in
+`tests/test_morning_status_preset.py::TestShadowRecordSection` (3 tests).
+- **The "today's terminal journal is missing" caveat was a misnomer — both log files
+exist.** The real event, measured: both the terminal journal and the EA log froze at
+**22:12Z Sep 22** (last write mid-line), stayed frozen ~4.6h while the ledger kept its
+cadence all night, and logging **resumed 02:50Z** with a venue reconnect scan. The
+v1.29 deploy's two EA inits (00:06:24Z, 00:11:11Z) left ERA rows but their journal lines
+fell inside the frozen window — hence `journal_retention_guard`'s "ERA today, no journal
+line" alert. Its wording ("rewritten/rotated **or logging stopped**; treat as partial")
+proved exactly right; no code change. 6 venue reconnects today (03:50–08:14 local), each
+re-authorized in ~1s with 0 positions/0 orders; ledger cadence never broke. The EA log's
+only content is the 04:11Z news-calendar refresh (332 events, 46 HIGH, 0 unresolvable).
+- **Shadow state at 08:09Z:** 4 EA rows (07:00–07:45Z), all matched, coverage 1.0,
+disagreements 0. The engine's 07:00Z sweep-short is still OPEN (fills at 07:15Z; 48-bar
+timeout resolves it by ~19:00Z at latest) — N=0 is correct, not a stall. The mirrored
+FADE book resolved −1.8022R: the direction check reads negative, where the pre-reg wants
+it. Verdict: ACCUMULATING — N=0 of 60.
+
+## 2026-09-23 07:50Z - FIRST SHADOW ROWS: TWO FRAME DEFECTS FOUND AND FIXED AT THE ROOT
+
+- **The first EA-vs-engine pairing ran on live blind data and immediately earned its
+existence.** Two defects, both in `scripts/midas_sweep_shadow.py`, both in the server-wall
+vs true-UTC frame class:
+  * *Lookup keyed on the raw stamp.* `check_rows_against_engine` converted the EA's
+  server-stamped `sig_open` for the UTC-hour eligibility check but keyed the series lookup
+  on the raw stamp — the series is UTC-keyed (corpus via `venue_bars_utc`, terminal via
+  `live_bars`), so every live row would have read `unmatched` forever and no agreement
+  would ever have been computed. Fixed: convert once with the row's own `off_min`, use for
+  both lookup and hour check. Pins updated to the full contract (UTC-keyed series, row
+  carries the server stamp); a wrong frame now reads as `unmatched`, the live failure mode.
+  * *Forming bar in the resolve input.* `live_bars` pulled `copy_rates_from_pos(..., 0, n)`
+  with no close test, so the still-forming M15/H1 bar entered the series and a resolve run
+  mid-bar produced an outcome (SWEEP_CONT −1.92R) that no longer existed 8 minutes later —
+  n flipped 1→0 between runs. Fixed: closed bars only, close time in UTC (`utc_open +
+  tf_sec <= now`). The first cut of that filter compared the raw server-wall epoch against
+  true-UTC now and silently dropped the newest two hours of closed bars; that was measured
+  and fixed in the same hour.
+- **Post-fix state (07:45Z):** 3 EA rows, all matched, coverage 1.0, disagreements 0,
+unmatched 0; both corpus laws reproduce exactly (wfv 56/+15.9352R; oos sweep 152/+0.1955R,
+t +2.208). N=0 resolved outcomes is correct — the engine's 07:00Z fill is still open. All
+15 sweep-shadow pins pass. Read-only: EA, preset, arming record untouched.
+
+## 2026-09-23 (morning) - CORPUS REFRESH AND THE TAIL-CREEP REPAIRS IT FORCED
+
+- **Why the corpus looked stale.** `data/forex/xauusd/*_upcomers.csv` is fetched, not
+self-updating: last fetch Sun 09-20 20:35 (market closed → tail Fri 09-18). Re-ran
+`scripts/midas_fetch_history.py --suffix _upcomers` through the live terminal: all V1–V4
+checks PASS, M15 16,429 bars and H1 4,115 through **2026-09-23 05:00Z**
+(`artifacts/midas_history_20260923-upcomers.json`). The data of record now covers the week
+the arm just traded.
+- **The suite went 2→0→2→0 while the tail moved, and every failure was one defect class:**
+a pin or fixture frozen to a corpus *vintage*, breaking when the tail grew. Repaired at the
+root, each measured first:
+  * `test_forward_cell_prereg` (the long-standing "environmental" failure — never
+  environmental, just three days stale): the pin now counts the study's cell **inside the
+  study's own declared window** (`window[1]` = 09-21 16:15Z, read from
+  `gold_persistence_state.json`), splits at the artifact's own published midpoint, and
+  judges calendar freshness **as-of the judged window** (`news_axis(..., as_of=)` — a
+  frozen snapshot always ages past a moving tail; the question is whether it was current
+  for the window, with coverage still refusing honestly). 662 == 658 + 4 future-dated
+  entries (09-22, all stopped, −1.05R each — the persistence cell went 0-for on them).
+  * `test_first_fills_audit`: the compliant-ledger fixture DERIVES its stops from the
+  corpus through the audit's own `expected_stop` (the old literal stop 10.0 now reads as a
+  70% geometry violation against crash-week ATR); PnL = r×risk keeps the +20/−10 shape.
+  * `gold_reversal_into_close --forward`: the DECLARED forward run (protocol §Declared
+  forward primary) — and it exposed a harness defect: the forward append bypassed the
+  declared shape filter, admitting 09-22 (final stamp 22:45 > 22:30) into the primary rows
+  against the run's own selector. Fixed to one selector; 09-23 stays primary, 09-22 sits
+  auxiliary. Forward primary: n=22, net −0.0224R/day, t −0.58 — **UNDECIDED AT THIS N**,
+  recorded as such.
+- **Frozen corpus touched and returned:** restored from pinned commit 248db66 for the
+SESSION24 `oos` leg (all three SHA-256s verified OK), bytes removed again after the run —
+per `docs/FROZEN_CORPUS_20260921.md` §5.
+- **Gates:** suite **1637 passed, 10 skipped, 0 failed** (first fully green run since the
+corpus-tail pins appeared); surface closure 32 / residue 66 / **0 dangling**. Live EA,
+preset, and arming record untouched.
+
+## 2026-09-23 (early) - SESSION24: THE 24-HOUR REQUEST, PRE-REGISTERED, MEASURED, AND REFUSED
+
+- **What was asked.** "Can the EA actually be intelligent enough to trade the full 24 hours
+session — if yes, implement now." It can mechanically (the window is two preset inputs);
+whether it can *intelligently* is an empirical question, so the full protocol was run:
+pre-registration first (`docs/SESSION24_PREREG_20260923.md`, pass rule fixed before any
+number), then `scripts/midas_second_session.py` (corpus-law self-check: wfv n=56
++15.9352R exactly), then the measurement (`artifacts/midas_session24_20260923.json`).
+- **The verdict is FAIL, 3 of 5 pre-registered checks.** Held out (`oos`, frozen corpus
+restored from pinned commit 248db66 for this leg): incumbent 04–18Z **+10.26R** (n=129,
+mean +0.0796R, dd 5.24R) vs 24H **+5.56R** (n=178, mean +0.0312R, dd 9.49R) — the 24-hour
+book gives up −4.71R to gain 49 fills, at +4.25R more drawdown, with per-trade edge that
+clears nothing. The evening complement (18–04Z alone) made +4.46R/74 fills but at t = 0.52,
+far under the family bar (t ≥ 1.96) fixed in advance — on the selection span it showed
++14.18R (t 2.42), the exact in-sample-attraction shape this repository exists to refuse.
+The incumbent window stays; the request is retired until the evidence base changes (forward
+shadow verdict or a new corpus era). No re-run with a different threshold — that is the
+pre-registration's own wording.
+- **A structural finding the engine forced:** it holds ONE position, so widening the window
+is not additive — on `oos` the 24H book LOST 53 certified fills to slot displacement, GAINED
+28 new day fills, shared 76. Any future evening design must be measured as a full-path
+candidate against the incumbent (as this study measured it), never as an overlay. The
+partition definition, verdict arithmetic (FAIL re-derivable from the artifact; a genuinely
+better book IS a PASS), and the corpus-law refusal gate are pinned in
+`tests/test_second_session.py` (8 tests).
+- The same night, the operator's session-gate question got its measured answer on the data
+of record: the gate's skipped hours earn **−0.001R/trade** held out (dead nothing) while
+buying **−2.9R of drawdown** (5.24R vs 9.49R is the 24H book; the gate's own share per the
+session-compat frame). Activity was never the missing ingredient; edge was.
+
+## 2026-09-22 (night) - MIM: THE WITH-TREND BASKET, PRE-REGISTERED, MEASURED, AND REFUSED
+
+- **What was asked for, and what was measured instead.** The operator's complaint (the arm
+"declining" a visible recovery) was taken as an engineering requirement, not argued away:
+a second basket, with-trend, that can join a sustained move. The census
+(`scripts/midas_evening_census.py`) first corrected the premise with counts: the day was
+net **−4.68 pts** (high 4375.88 @00:00Z, crash to 4291.39 @08:30Z); the afternoon recovery
+began **in-gate** (15:00–18:00Z: +22.87 pts inside the 04–18Z window) and the armed trigger
+never fired on it; the evening's +16.46-pt run off the 18:00Z low is entirely outside the
+gate, where the arm is structurally blind. The ledger shows **zero safety refusals today** —
+nothing was vetoed; the triggers were not there.
+- **The pre-registration came before the numbers.** `docs/MIM_PREREG_20260922.md` fixes the
+mechanism (market intraday momentum — the same asset's first half of session predicting its
+second half; Gao/Han/Li/Zhou JFE 2018, replicated on commodity ETFs and Chinese futures —
+a with-trend family with published OOS evidence, and a *different hypothesis* from the
+cross-sectional momentum the Mahadzva series measured to be uniformly negative), the spans
+(the repository's pinned `wf`/`oos` split, venue corpus), the family (6 cells: 3 ATR
+thresholds × {MOM, REV}), the primary cell (`MOM_0`), the pass rule (t ≥ 2.4, n ≥ 30,
+≥ 0.30 fills/day, mean > 0, same sign on `wf`, no REV twin beating its MOM twin), and the
+verdict wording — with three dated clarifications made before running. The engine is
+unchanged: signals ride `run_mode` as `m15_bb`, TRIGGER_ONLY, certified geometry, and the
+signal is nonzero only on each day's 10:45Z bar (one decision per day, filled at the
+11:00Z bar's open; `thr` reads the last H1 bar CLOSED before the decision — the lookahead
+pin holds that line).
+- **The verdict is FAIL, and the failure is the answer.** `scripts/midas_mim.py` reproduced
+the pinned corpus law before anything else was computed. Held-out (`oos`): `MOM_0` took
+**182 trades at 1.08 fills/day** — nearly the exact activity the operator asked for — and
+earned **+0.0136R per trade, t = 0.17** (bar: 2.4). **0/3** MOM cells clear the t-bar
+anywhere. The descriptive regression shows the decay: `beta` 0.464 (t 2.30) on the
+selection span → **0.103 (t 0.76) held out**. Every `REV_*` direction twin lost held out
+(−0.059…−0.092R), so the *sign* is right and the *magnitude* is a null — a real effect,
+one order of magnitude too small for this clock and cost structure. The activity was
+measured, and the activity is not where the money is. Artifact:
+`artifacts/midas_mim_20260922.json`; verdict doc: `docs/MIM_VERDICT_20260922.md`.
+- **Nothing armed, disarmed, or re-risked.** The EA, preset, and arming record are
+untouched. The sweep-continuation family remains the strongest frequency upgrade on the
+table (held-out 152 trades, +0.1955R, t +2.21) and its forward shadow recorder is running
+(v1.28 `SWEEPSHADOW`; first rows due with the next 07:00Z window). Re-testing this family
+with a different threshold is the multiple-testing drift this program refuses.
+- **One defect found on first live use, fixed:** `midas_sweep_shadow.live_bars` called
+`.get()` on numpy structured scalars — the shadow resolver's first real morning would have
+crashed; the evening census caught it and the fix is exercised live.
+
+## 2026-09-22 - MIDAS1.29: THE EXIT REASON WORD, AND A FLAT GATE THAT CAN NO LONGER PASS VACUOUSLY
+
+- **The gap, prescribed by the same evening's exit audit.** The arm's first live fill was
+closed by a MOBILE order and the ledger's word for it was `EXTERNAL` — the same word a
+server-side stop-out gets — because the external-adoption path in `LiveCheckExits()` read
+the OUT deal's PRICE only and never `DEAL_REASON` or `DEAL_MAGIC`. v1.29 (`+exit-reason`
+in the ERA note) makes the adoption scan name the close: `SL`/`TP`/`SO` from the platform's
+reason family (a server-side exit even though the EA did not place the closing order);
+`EXPERT` when the closing deal bears our magic (the EA's own path — WHO answers before
+WHAT); `MANUAL-CLIENT`/`MANUAL-WEB`/`MANUAL-MOBILE` for the platform's manual family; and
+`EXTERNAL-UNKNOWN` only when nothing is known — a row must never render a guessed word as
+known. Measured toolchain limit: this `ENUM_DEAL_REASON` has no OTHER member (error 256 on
+`DEAL_REASON_OTHER`), so unnamed reasons stay `EXTERNAL-UNKNOWN` by design. Record-only:
+no decision function reads the vocabulary (pinned), the LCLOSE reason slot merely widens
+its vocabulary, and parity on the tick-covered window is PASS on the same nine trades
+(`artifacts/midas_parity_result_20260922_2311.json`, max|dR| 0.0004, 0 over tolerance).
+- **The flat gate the exit audit found vacuous is closed on both witnesses.** Measured
+this afternoon: `midas_parity`'s pre-stop gate discovered arms from chart PROFILES only,
+and the live arm is start-up-attached — so on the one machine that matters the inventory
+came up empty, `verify_all_flat([])` returned vacuous truth, and two certification runs
+stopped the live terminal while the venue held the arm's OPEN position. The gate now
+discovers books the way the watchdog does (profiles PLUS the attach config, deduped by
+ledger), refuses when an arming record names an arm but zero books are discovered ("no
+books" is not "flat"), and asks the VENUE as the second witness:
+`mt5_ops.venue_open_position_count()` counts open positions attributed by the same
+rule the EA was corrected to (a position is ours iff its position id has an IN deal
+bearing our magic — this venue stamps closing deals magic 0). Ledger-flat-but-venue-open
+refuses; an unanswerable venue refuses (fail-closed — silence is exactly what the old
+gate passed on); an agreeing venue is said out loud. The gate block itself is exercised
+as written by `tests/test_parity_flat_gate_startup.py` (12 pins) so structure drift, not
+just copy drift, fails.
+- **The spread-flatness premise now has its falsification harness.**
+`scripts/midas_spread_flatness.py` compares the corpus's per-hour spread (hours from the
+file's own `iso` declaration — no era-pin inheritance) against the arm's live SPREADHOUR
+rows, judged in the SESSION hours the gate trades (04–18Z), never the rollover hours.
+Measured on the corpus side tonight: in-session 23.94–28.01 pts, **ratio 1.17 — flat, as
+the premise assumes** (all-hours ratio 8.69, driven by 21–23Z rollover, which is the
+reason a session gate exists). Live verdict **PENDING** until SPREADHOUR rows accumulate
+(they roll at each UTC day boundary; first evaluation after ≥ 6 hours carry ≥ 10 samples).
+Verdicts, stated before the numbers exist: FLATNESS HOLDS (live ratio ≤ 3.0 and level
+within 2× the corpus), FLATNESS VIOLATED (the premise is false live), PREMISE MISALIGNED
+(flat but at a different level — corpus cost models understate the venue).
+- **Deployed and running.** Compiled 0/0 (`source=3ea31314 ex5=b1956658`, both copies
+hash-checked), the terminal stopped (flat, venue 0 positions — the new cross-check ran
+first), relaunched with the attach config, and the ledger's own
+`ERA,MIDAS1.29,1790121984,…+sweep-shadow+exit-reason` row proves the chart runs it; both
+`live_readiness` build legs PASS. Suite **1623 passed, 10 skipped, 1 failed** (the
+pre-existing environmental `test_forward_cell_prereg`); 13 new pins in
+`tests/test_midas_v129_record.py`, 12 in `tests/test_parity_flat_gate_startup.py`, 10 in
+`tests/test_spread_flatness.py`. Surface: closure 32 (23 entry points), residue 63 (the
+new harness), 0 dangling. Nothing armed, disarmed, or re-risked; preset untouched.
+
+## 2026-09-22 - MIDAS1.28: THE SWEEP SHADOW - THE STRONGEST MEASURED NUMBER IS RECORDED FORWARD WITH NO ORDER PATH
+
+- **What the day demanded and what the day got.** The operator asked for activity; the day
+  answered with counts (`docs/ENTRY_STRUCTURE_AUDIT_20260922.md`): 84 evaluated bars, **82.1 %
+  of in-session bars carried no trigger**, the armed mode fired eight shorts into a rally, and
+  the engine-of-record counterfactual says the armed rule would have lost **-3.258R** taking
+  both of its signals while the real book sits at +0.104R. On today's data, activity was what
+  cost money. The honest response to "be more active" is therefore not a loosened gate - the
+  census again read `session=0 friday=0 spread=0 riskcap=0 breaker=0 news=0` all day - but to
+  put the strongest measured *active* candidate on the record so evidence, not impatience,
+  decides whether it ever trades.
+- **The candidate.** `docs/ASIA_SWEEP_PREREG_20260922.md` REFUSED to port the Asian-range
+  sweep family (its pre-registered primary window failed on all three variants) and the same
+  run reported the strongest number in this program on its SECONDARY window: oos UTC 07-18,
+  **152 held-out trades, +0.1955R, pf 1.499, t +2.21**, mirror -0.1584R, textbook reversal
+  read -0.1425R. Its prescribed next step was a forward shadow recorder, not a trader. That
+  recorder is build **MIDAS1.28** (`+sweep-shadow` in the ERA note): one `SWEEPSHADOW` row per
+  evaluated bar inside UTC 07:00-18:00 carrying the setup (the day's Asian range, sweep side,
+  first-of-side flag, reclaim flag, the certified stop distance) and **never an outcome** - the
+  EA cannot know the future and a row claiming an R its writer could not have measured is not
+  evidence. `scripts/midas_sweep_shadow.py` resolves the rows through the engine of record's
+  own `run_mode`, so the arithmetic is not re-implemented on either side. The block reads no
+  order state, consults no governor, increments no census counter, and is called from exactly
+  one place - all pinned by 18 tests in `tests/test_midas_v128_record.py` plus
+  `tests/test_sweep_shadow.py`.
+- **The rule it will be judged by was written BEFORE any row existed**
+  (`docs/ASIA_SWEEP_FORWARD_PREREG_20260922.md`): ACCUMULATING below 60 resolved outcomes and
+  no interim number is quotable; then evaluate once - PASS requires t >= 2.4, n >= 60,
+  >= 0.30 fills/day, mean forward R > 0, AND both direction checks still negative; FAIL names
+  which test failed; VOID invalidates the RECORDER (EA rows vs independently rebuilt signals
+  disagree on a bar, or a direction check turned positive forward). The arming record carries
+  the block (`artifacts/live/armed.json` `sweep_shadow_forward`), `morning_status` reads the
+  tail ("no rows yet - the shadow starts on the next evaluated bar inside UTC 07-18"), and the
+  first rows arrive with tomorrow's window.
+- **The gates, after the build.** Compiled **0 errors / 0 warnings**, deployed
+  (`source=8bf3ab7c ex5=7de8d002`, both copies hash-checked) and the terminal relaunched onto
+  it: the ledger's own `ERA,MIDAS1.28,1790116945,…,+sweep-shadow` row at 20:42:25Z is the
+  proof the chart runs it (both `live_readiness` build legs PASS - the second leg exists
+  because of yesterday's file-vs-chart lesson). Parity on the tick-covered window:
+  `artifacts/midas_parity_result_20260922_2134.json` **PASS** - **the same nine trades**
+  (python 9 / +0.2699R vs EA 9 / +0.271R, `max|dR| 0.0004`, 0 over tolerance), which is how a
+  record-only change proves it changed nothing that decides. Suite: **1588 passed, 10
+  skipped, 1 failed** - the pre-existing environmental `test_forward_cell_prereg` (662 vs 658
+  corpus entries, on no changed path). Surface audit: closure **32 (23 entry points)**,
+  residue 62 (the new resolver), **0 dangling**. The preset stayed byte-identical to the
+  repo `.set` (44 inputs); nothing was armed, disarmed, or re-risked.
+- **One day-counter restart to expect, by design.** The 13-field census floor
+  (`DiagRestoreFromLedger`) deliberately does not read the v1.26-format snapshot, so the
+  running day's counters restarted at the 20:42Z init (`signal=6, no_trigger=5, mismatch=1`
+  so far) - refuse rather than restore a confident zero; the day's full counts live in the
+  `NOFILL` rows already on the ledger. And `SWEEPSHADOW`/`SPREADHOUR` rows accumulate only
+  inside their windows (UTC 07-18 and the daily roll respectively).
+- **Also recorded today** (unchanged here, documented in their own entries): the exit audit
+  (`docs/LIVE_EXIT_AUDIT_20260922.md` - the mobile close, the vacuous flat gate), the entry
+  structure audit (`docs/ENTRY_STRUCTURE_AUDIT_20260922.md`), and the two-engine education
+  (`docs/WHY_TWO_ENGINES.md`).
+
+## 2026-09-22 - WHAT CLOSED THE FIRST LIVE FILL: A MOBILE ORDER, AND TWO GATES THAT COULD NOT SEE THE ARM
+
+- **The venue's own record answered it, and the answer is not the EA.** Entry deal ticket 18137411:
+  sell 0.01 @ 4333.07, `magic 7825001`, `reason 3 = EXPERT`, comment `MIDAS` — that is what this
+  EA's orders look like. Exit deal ticket 18138688: buy 0.01 @ 4328.76, **`magic 0`, `reason 1 =
+  DEAL_REASON_MOBILE`, empty comment** — an order placed from the MetaTrader **mobile** application,
+  six minutes and thirty-seven seconds later, for **+$4.31 / +0.104R**. The EA's own stop and target
+  **were** on the venue (`sl=4374.38 tp=4250.77` on the position's order) and **neither was touched**:
+  the close at 4328.76 is inside both by 45.62 and 77.99 points, i.e. the SL was 0.95 % of price away
+  and the TP 1.90 %.
+- **Why no EA exit was ever in the running.** The arm owns exactly three exits — the server-side
+  SL/TP placed at entry, the `InpTimeoutMinutes = 720` close on real UTC (expiry **02:00Z the next
+  morning**), and `LiveFridayFlatCheck()` (a Tuesday) — and the governor is **not** one of them:
+  `PropGovernorBlock()` is consulted on the ENTRY path only, so the daily cap and the shield refuse the
+  *next* trade and have no path that closes an open one. Meeting the EA required a 0.95 % adverse or
+  1.90 % favourable move, or twelve hours; the position lived 6 min 37 s.
+- **What it would take, stated so it can be watched for:** (1) nothing external closes it first — the
+  venue accepts a mobile/web/desktop order on this account and **the EA has no veto**, it can only
+  reconcile (which it did, within the same second); (2) the position reaches one of the three exits;
+  (3) for the two the EA executes, the chart must be up with AutoTrading and `InpLiveExecution` — the
+  SL/TP exits need none of that, which is the entire point of placing them at the venue; and (4) the
+  record can say *which* of them happened, which today it cannot (next bullet). Nothing here is
+  measured yet for an EA-initiated or SL/TP close: no such exit has happened on this arm, and what
+  would measure it is the first one — the `--live-stance` tester pass exercises the code path but
+  produces no venue attribution.
+- **A record gap, named: `EXTERNAL` is two different events.** `LiveCheckExits()` reads the OUT deal's
+  **price** and writes a fixed word — it never reads `DEAL_REASON` or `DEAL_MAGIC`. So "my stop was
+  hit" and "a human tapped Close on their phone" produce the **same row**, and the distinction lives
+  only in the venue's history, outside the artifact this program keeps as evidence. The additive fix
+  (next build): write the reason word — `SL`/`TP`/`SO`/`EXPERT`/`MANUAL-mobile|web|desktop` — and
+  whether the magic was ours.
+- **And the safety finding that came out of asking: a certification run stopped the live terminal with
+  the position OPEN.** `artifacts/midas_parity_result_20260922_1502.json` (`ts 14:02:45Z`, **PASS**)
+  was produced by a session that started at 14:01:40Z — **1 min 40 s after the fill** — from
+  `config\v75_regress_midas_tickcov_rd_rd.ini` (`Expert=MIDASTOUCH_parity\MidastouchAI`,
+  `ShutdownTerminal=1`), with the account reporting **1 position**; the same thing happened again at
+  14:25:29Z (artifact `…_1526`). The position survived because the SL/TP are server-side and the EA
+  **re-adopts** the venue's state on re-init (measured: `LIVE RECOVERED ticket=18874164 … SL=4374.38
+  TP=4250.77` after the first one). What the arm did **not** have for those ~67 seconds is the only
+  thing it executes itself: the timeout and the Friday-flat flatten. The gate that exists to prevent
+  exactly this is vacuous here — `midas_parity.py` inventories **chart profiles**, this arm is
+  **start-up-attached**, so the inventory is empty, `verify_all_flat([])` returns `(True, [])` and the
+  run prints `flat-check OK (0 gold arm book(s) on the terminal)`: an honest count of the books it
+  could see and a false statement about the books that exist. `verify_all_flat`'s own docstring names
+  the trap — *"an EMPTY arm list returns (True, []) … callers must treat 'no arms inventoried' as its
+  own finding"*; the watchdog does, this caller does not. **Nothing was changed to close it** — it
+  moves a certification gate, so it is recorded with its one-line direction (discover arms the way
+  every other tool does, and refuse on an empty inventory) and left for a deliberate decision.
+- **Recorded in `docs/LIVE_EXIT_AUDIT_20260922.md`**, with §7 stating what is **not** claimed: not
+  whose hands placed the mobile order (the account's authorization log shows one client address for the
+  whole morning and a second only from ~15:37Z, so the close came from the same public address the
+  desktop terminal used — exactly what a phone on the same network looks like), not that the close was
+  a mistake, not that the tester touched the live account (it cannot, and it ran
+  `InpLiveExecution=false` with its own magic), and **not** that any of it is a strategy result: one
+  fill closed by hand says nothing about expectancy, which stays **NOT VALIDATED**. Docs and a README
+  correction only — no code, no build, no arming change. Suite **1556 passed, 10 skipped, 1 failed**
+  (the pre-existing environmental `test_forward_cell_prereg`).
+
+## 2026-09-22 - A GREEN BUILD LEG IS NOT A CHART: READINESS NOW READS WHAT THE EXPERT IS RUNNING
+
+- **The hole this closes was measured, not imagined.** `live_readiness`'s `deployed EA build
+  matches its source` leg asks whether the binary a chart *would* load is the one the source
+  produces — and on 2026-09-22 it went **PASS** (`0 errors / 0 warnings`, `source 6a2c9455`, both
+  copies hash-checked) while the arm's own ledger still said **`ERA,MIDAS1.26,…`**. Replacing the
+  `.ex5` did **not** re-initialise a start-up-attached expert: no re-init line in the terminal
+  journal, no new `ERA` row, fifteen minutes, market open. So the go/no-go command could be green
+  while the chart traded a binary nobody certified. The reload needed a terminal relaunch, after
+  which the ledger wrote `ERA,MIDAS1.27,1790112181,…` — and *that* row is the thing no leg was
+  reading.
+- **The new leg reads the chart's own statement and BLOCKS on disagreement:**
+  `the CHART runs the deployed build` compares the `ERA` row the EA appends at every init against
+  the `APP_VERSION` the source defines (`tests/test_midas_hud.py` already pins
+  `#property version == APP_VERSION`, so both ends are one word written by one program). The
+  ledger it reads is **derived from the arming record's tag**
+  (`MIDASTOUCH_paper_<symbol>_<tag>.csv`), never globbed: a retired arm's leftover book, or the
+  parity harness's own tagged file, sits in `MQL5\Files` for the rest of the program's life and a
+  glob would fail this leg forever over a chart nobody started. On this machine it reads
+  `MIDASTOUCH_paper_XAUUSD_U25` and passes: `is running MIDAS1.27 (last init 09-22 19:23Z, 6 min
+  ago (server +120min))`.
+- **Three states, and the third one is the point.** `ok` (a chart names the source's build),
+  `stale` (**blocking FAIL**, naming both builds, the init time and the remedy — re-initialise the
+  expert by relaunching the terminal *with its attach config*), and `unconfirmed` (**WARN**, never
+  a pass, never a block) for every way the question cannot be answered: no running terminal, no arm
+  named anywhere, a ledger with no `ERA` row yet, or a source that states no version at all. A
+  stopped terminal must not block on a leg about a chart, and an unasked question must not read as
+  green — the same rule this report applies to a scheduled task it could not query.
+- **Two smaller disciplines carried into the reader.** The LAST complete `ERA` row decides, and a
+  short row is skipped rather than parsed generously (a bare `ERA` line parsed as `""` would compare
+  two empty strings and pass); and the row's epoch is rendered **in UTC with the venue offset
+  applied**, printed beside `server +120min`, because ledger epochs are *server*-stamped and reading
+  one as UTC is a plausible two-hour lie this repo has already paid for once.
+- **AND THE OTHER DIRECTION, which the version comparison cannot see: the file replaced AFTER the
+  init.** A chart can be initialised into the right version and still not be the file on disk,
+  because the `.ex5` was written afterwards — and the case that hides here is real: *source edited
+  and redeployed **without a version bump***, which the pins cannot enforce. The arm's `ERA` row
+  covers the binary that existed at its init and nothing later, so when the file a chart loads was
+  written after that init, the version leg is reading a fact about a file nobody is running. That is
+  now a **blocking FAIL** (`the chart is not running the binary that exists: … initialised into
+  MIDAS1.27 at 19:23Z, but the binary a chart loads was written at 19:33Z — after that init`), and it
+  says what is *proven* rather than what is not: **the ordering**, not that behaviour differs.
+- **The frame is the ARM's, not today's.** Ledger epochs are server-stamped, so the comparison needs
+  an offset — and using TODAY'S chosen offset is an hour wrong across a DST step, which is exactly
+  the width of the case being caught. So the offset is read off the arm's own `STATE` row, which has
+  carried `off_min` (its own `TimeTradeServer() - TimeGMT()`) since v1.27, with the measured one as
+  the fallback for a ledger that predates the tail, and `STATE_OFF_UNKNOWN` (-9999) treated as the
+  assertion of *not knowing* that it is — never as a number, which would put a 166-hour error into
+  every conversion. The margin is **60 s**, not an hour: the measured finding was a deploy ~4 minutes
+  after the init, and a tolerance wide enough to swallow that would swallow the finding.
+- **Two stamps, and the later of them, because each is blind to a different case.** `--deploy` copies
+  with `shutil.copy2`, so the deployed file carries the **scratch build's** mtime: a compile that
+  finished before a chart's init but was copied after it would read as *older* than the init — as in
+  step — while the file was really replaced underneath a running expert. The build record's `utc`,
+  written after the copies, sees that case; a **hand** copy that never touches the script is seen
+  only by the mtime. So the ordering uses the LATER of the two, and neither is treated as identity —
+  that stays the hash leg's job.
+- **Suite 1556 passed, 10 skipped, 1 failed** (the same pre-existing environmental
+  `test_forward_cell_prereg`, 662 vs 658 entries, on no changed file's path) — **15 new pins** in
+  `tests/test_build_provenance.py`, the file that already owns this leg's contract, including the
+  two traps: a same-minute deploy-then-relaunch must NOT fire (the measured gap was 4 minutes, so a
+  loose tolerance defeats the leg), and a DST-shifted frame must not refuse a chart that is in step.
+  Live surface
+  audit unchanged: closure **32 (23 entry points)**, residue 61, **0 dangling**. `live_readiness`
+  now reports **no FAIL leg** on this machine, and the verdict is unmoved:
+  **AUTHORISED BY OPERATOR OVERRIDE — TRADING, NOT VALIDATED**.
+
+## 2026-09-22 - THE BUILD THAT NAMES ITS REFUSALS, SHIPPED (v1.27): A GREEN BUILD LEG IS NOT A CHART
+
+- **Four refusals in the live evaluation path said nothing, and now they name themselves.** Measured
+  2026-09-22 by reading this arm's own ledger against its own `TrackFreshM15Bar`: the session gate
+  and the Friday cutoff incremented the census and returned **without** setting `g_last_action`, so
+  the chart's `last:` line still showed the *previous* bar's action - the HUD said "SIGNAL BUY
+  evaluated" for a bar that had been refused - and the two pricing guards (`atr <= 0`, `stop <= 0`)
+  returned before the census at all, so a bar the engine could not price was neither counted nor
+  named. All four are now on the record.
+- **The pricing guards get their OWN counter, and that is the point of the change.** `nodata` is
+  appended to the census; it is never folded into `signal`/`spread`/`riskcap`/… because nothing about
+  the arm refused those bars - the engine could not price them - and inflating the refusal census
+  with them would be a false statement about the venue. The pin reads the two branches themselves
+  (`tests/test_midas_v127_record.py`) and asserts no refusal counter inside them, and the HUD's `V:`
+  line carries `nodata` next to the vetoes so the chart answers the question without a second reader.
+- **The `STATE` row now carries the same bar context the `OPEN` row has carried since v1.19e.** The
+  row that is written for **every** evaluated bar had no `StateAppend()` tail while the row written
+  for a *fill* had one, so the bars this arm refuses - the large majority of them - were exactly the
+  ones with no `sig_ct`/`hour_utc`/`vol_ratio`/`news`/`off_min` on the record. One `StateAppend()`,
+  one parser, two row types; the keyed `cfg=` token stays LAST so every positional reader is
+  untouched, and `na`/`-1` sentinels render as *unasserted*, never as midnight or "no news".
+- **And the arm now measures its own spread by UTC hour** (`SPREADHOUR`): sampled on the live tick
+  path, gated out of the tester AND out of BAR mode, rolled **before** the daily counter zeroing, and
+  read by **nothing** in the EA - it exists because the session finding this arm's research rests on
+  assumes the venue's spread is flat across hours, and that assumption had only ever been read off
+  the data of record, never off the live feed.
+- **The load-bearing property is pinned, not asserted: none of it can move a trade.** Every v1.27
+  write sits on a path gated out of `MQL_TESTER` and out of `InpBarModel` (the certified parity
+  replay), so the certified ledgers cannot move, and no entry, exit, size, veto or protective rule
+  reads a spread hour or a bar-context field.
+- **Compiled, deployed, certified.** Compile **0 errors / 0 warnings**,
+  `source=6a2c9455 ex5=ce733866`, hash-verified copies to the repo and to the terminal's
+  `Experts/MIDASTOUCH` - which flipped `live_readiness`'s build leg from **FAIL** (*"the deployed
+  build belongs to a DIFFERENT source"*) to **PASS** (*source == the source the deployed binary was
+  built from*). `artifacts/midas_parity_result_20260922_2007.json`: **PARITY PASS** on real ticks -
+  python 9tr / +0.2699R vs EA 9tr / +0.271R, `max|dR| 0.0004`, 0 trades over tolerance - the same
+  nine trades as v1.24/v1.25/v1.26, which is how a record-only build is measured; plus **SIZING
+  PASS** (7 closed fills, every one sized as declared at the equity it had, 5 floored to the venue's
+  min lot) and **GOVERNED-PASS** at the arm's own 3 % cap on a `--breaker-stress` leg whose derived
+  6.18 %/trade risk forces the refusal path to bind (the mirror predicted 1 refusal on 2026-09-11
+  from 07:15Z; the governed EA took none of them and all 6 it said would survive).
+- **THE PART WORTH KEEPING: the copy went green while the chart stayed a build behind.** After the
+  certified `.ex5` was written to both destinations, `live_readiness`'s
+  `deployed build matches its source` leg PASSed - and the arm's own ledger still said
+  `ERA,MIDAS1.26,…`. Replacing the binary was **not observed** to re-initialise a
+  **start-up-attached** expert (no re-init line in the terminal journal, no new `ERA` row, ~15 min,
+  market open), because that leg reads the **files** and not the chart: a green leg and a chart one
+  build behind are two different facts, and only the second one is a chart trading the wrong binary.
+  The reload needed a terminal relaunch (`mt5_ops.relaunch_terminal()`, run **with** the attach
+  config - which is also the thing that means the arm survives a relaunch at all), taken while the
+  arm was **flat** and **outside session** (the gate is 06-20 *server*, so nothing was expected to
+  be evaluated inside the window). It came back on the new build, and the ledger's own row proves it:
+  `ERA,MIDAS1.27,1790112181,pertick-fills+…+acct-eq+census10+state-ctx+spread-hour`. Nothing was
+  armed, disarmed or re-configured: the arm is still ARMED BY OPERATOR OVERRIDE, flat, 44 preset
+  inputs byte-identical to the repo `.set`, and `live_readiness` now reports **no FAIL leg** - only
+  the two WARNs that are WARNs on purpose (an overnight-wake claim that no `powercfg` reading can
+  settle, and the absent validation record).
+- **One consequence of the census change, named before it is mistaken for a fault.** `nodata` is
+  counter **10** and the row is append-only, so `DiagRestoreFromLedger` now requires **13 fields** and
+  a **v1.26** `NOFILLSUM` snapshot is deliberately *not* read as one - restoring a missing 10th counter
+  as a confident zero is the exact class of sign this program keeps paying for. So the arm's first init
+  on v1.27 logs exactly what it did (`NOFILL census: no snapshot row yet, counting from zero`) and the
+  **in-progress** day's refusal census starts again from zero on the new build. The earlier counts are
+  not lost: they are the `NOFILLSUM` rows already in the ledger, which the readers total over their own
+  window (`morning_status`: `no-fill (24h): signal=17, no_trigger=17`). The LIVE fill census restored
+  normally (`closed=1 wins=1 cumR=+0.104`), and the init journal carries **no error or failure line**.
+- **Where the arm stands:** alive and evaluating (H4 up / H1 up -> BULLISH, `trigger none`,
+  **outside session** - the gate classifies *server* bar epochs, 06-20 server - so no entry is due
+  until 06:00 server), flat, day +$4.31 of the $250 cap, floor $23,504, min-lot risk $42.02 of the
+  $62.50 configured and quantised down, 1 closed fill reconciled against the account.
+- **Suite 1541 passed, 10 skipped, 1 failed** - the pre-existing environmental
+  `test_forward_cell_prereg` (the venue corpus has grown to 662 entries against the study's pinned
+  658), on no changed file's path. Surface audit: live closure **32 (23 entry points)**, residue 61,
+  **0 dangling**.
+
+## 2026-09-22 - THE ONE EXTERNAL LEAD, TESTED AND CLOSED: gold-vs-AUD structural divergence FAILS here
+
+- **The outside research's single surviving result was tested on the venue's own bars at the first
+  opportunity, and it does not transfer.** Pre-registered in
+  `docs/CROSS_ASSET_DIVERGENCE_PREREG_20260922.md` before the run; harness
+  `scripts/midas_cross_asset.py`; artifact `artifacts/midas_cross_asset_20260922.json`; pins
+  `tests/test_cross_asset.py`. Verdict against the rule fixed in advance (t >= 2.4 for a 3-variant
+  family, n >= 30, >= 0.30 fills/day) on the held-out window:
+  `DIVERGE FAIL t=-0.347 | FADE FAIL t=-0.140 | ALIGN FAIL t=-0.385` - **all three fail on the t
+  test and only that test**, with 164-203 fills at ~1.0/day. This is not an underpower problem: the
+  sign is wrong on more than enough trades, and every variant is negative in BOTH spans (`wf`
+  `DIVERGE` -0.1598, n=77, t -1.41). The signal fires on ~10 % of bars, so rarity was never the
+  issue - it is simply the wrong signal here.
+- **New data of record, fetched for it and recorded:** `AUDUSD H1 4,316 bars / M15 17,250 bars,
+  2026-01-12 -> 2026-09-22` from the SAME terminal and account as gold
+  (`C:\Program Files\MetaTrader 5` build 6204, account 1428765 @ Upcomers-Server), all validation
+  checks PASS, provenance in `artifacts/midas_history_20260922-upcomers.json`. `--symbols` was ADDED
+  to `midas_fetch_history.py`; **`SYMBOLS` still contains only `XAUUSD`**, so no existing artifact's
+  provenance becomes ambiguous (`symbols_default_unchanged=false` is recorded in the new artifact).
+- **A real defect found during verification, before anything was reported.** The first run expressed
+  the CONTEXT series in bar **open** times while the gold leg used close times, giving the AUD leg's
+  swings **one H1 bar of lookahead**. Caught by reading the code against its own claim, fixed, and
+  now pinned by a direct **repaint test**: perturbing a future bar's high must not move a single
+  earlier signal. The verdict is negative either way, and the window-scoped signal counts were
+  corrected in the same pass (they had printed the whole corpus twice).
+- **The signal is non-repainting by construction and that is asserted, not assumed:** a swing needs
+  `high[i] > high[i+-1]` and `> high[i+-2]`, so it is confirmed only at the CLOSE of `i+2`; the
+  structure direction uses only swings confirmed at or before the moment being priced; and only H1
+  bars whose close is `<= ct` are visible - the same rule `run_mode` uses for its own macro state.
+- **Nothing was ported to MQL5 and no EA build was touched** - the pre-registration said a port
+  happens only on a pass, and there was none. Suite **1529 passed, 10 skipped, 1 failed** (the
+  pre-existing environmental `test_forward_cell_prereg`, on no changed file's path).
+
+## 2026-09-22 - THE OUTSIDE WORLD, RECONCILED: A 10-PAPER 2026 SERIES AGAINST THIS ARM'S NUMBERS
+
+- **A "Deflated Alpha Series" (S. Mahadzva, 2026, SSRN working papers 1-10) was read against our own
+  measurements**, and the reading is on the record in
+  `docs/EXTERNAL_LITERATURE_RECONCILIATION_20260922.md`. Provenance and limits, stated first: the
+  series is **preprints, single author, not peer-reviewed**; the full texts are **unreachable from
+  this machine** (SSRN 403s automated fetch, a reader proxy returns the bot challenge, and a real
+  browser tab did not clear Cloudflare), so **the whole reconciliation is abstract-level**, obtained
+  through Crossref metadata (`api.crossref.org/works?filter=orcid:0009-0001-1754-4472`, 9 items).
+  Nothing in it may be cited as evidence in a gate; it is a reason to pre-register tests.
+- **The one result that matters most is a corroboration at a scale we will never reach.** Their
+  matched free-direction **Bollinger** rule: **+0.022R over 2,231 OOS trades** and -0.044R on
+  holdout, DSR ~0.00. Ours: **+0.0355R over 127**. Different instruments, different programs, same
+  conclusion - this rule family is a null at intraday resolution - and our small sample is
+  consistent with their large one, which is the strongest external support available for this arm's
+  "insufficient evidence" verdict.
+- **Four of the 30-phase request's directions are contradicted by measurement, not by taste.**
+  Confluence/evidence-combination and rare-condition filters **degraded** the signal they were added
+  to (+0.041R -> -0.054R, p 0.754; rare conditions winning folds on lucky trades) - Phases 9/10.
+  Opening-range breakouts lost on every combination; VWAP/EMA pullback near-misses reversed on
+  holdout; cross-sectional momentum was uniformly negative and worse at faster timeframes - Phase 11
+  paths A and C. ICT/SMC as taught: no evidence, with three sweep mechanisms agreeing 65 of 66
+  folds that a swept level predicts **continuation**, not reversal - Phases 6/8. And their calendar
+  paper names the exact trap of adding a free walk-forward dimension (a weekday filter made an
+  optimiser "discover" Monday, the worst weekday in the honest sample) - which is why our own two
+  moved dimensions (session window, trigger k) were pre-registered and split before measurement.
+- **Two things they add that we have never tested, both worth a pre-registration and neither run:**
+  (1) their program's **only surviving result** is **gold-vs-AUD structural divergence** (clears
+  permutation, max post-correction DSR, survives a 100x cost increase, fails their
+  walk-forward-efficiency gate, short-history fragile) - one signal that adds INFORMATION rather than
+  parameters; (2) a **cost-based minimum stop-distance floor**, their repair for an R edge smaller
+  than the per-lot commission a tight stop forces, which sits directly beside our own min-lot
+  arithmetic ($41.31 = 0.165 % of equity, not the declared 0.25 %) and our tight-stop study's
+  `POSITIVE, UNDERPOWERED | does not clear the program-wide hurdle`.
+- **One methodological import and one operational one.** Their **walk-forward-efficiency band**
+  (~1.0-1.6 acceptable, 2.08 fragile, >2.5 rejected) is a check this repo lacks and it caught results
+  their p-values passed, including their own flagship - cheap to add beside V1-V7, and it would have
+  flagged our `LONG_ONLY` `wf`/`oos` flip before a human did. And their implementation bug **invisible
+  to every statistical gate, caught by a human looking at a chart** is external support for treating
+  the HUD and `STATE` rows as validation artifacts - the method that found our v1.21-v1.26 defects.
+- **No EA build was touched, nothing was armed or disarmed, and every certificate stands.** Suite
+  **1525 passed, 10 skipped, 1 failed** (the pre-existing environmental `test_forward_cell_prereg`, on
+  no changed file's path). Docs and a review packet only: `docs/EA_REVIEW_PACKET_20260922.md` is the
+  paste-ready brief for any external reviewer.
+
+## 2026-09-22 - DECISION ENGINE AUDIT: WHICH LEG OF THE ENTRY CONJUNCTION EARNS ITS KEEP
+
+- **The question was "is the trading logic structurally too rigid", and it is now answered with
+  counts instead of adjectives.** The armed mode is ONE setup family: a BB(20, k) touch-back / RSI
+  extreme on M15, entered only where the H1+H4 EMA20 regime is ANTI-aligned with that trigger, and
+  only inside the session window. New harness `scripts/midas_decision_attribution.py` (pre-registered
+  in `docs/DECISION_ATTRIBUTION_PREREG_20260922.md`) walks every evaluable bar and classifies it by
+  the pair the engine itself branches on, then ablates the legs through the engine's own 8 modes on
+  the repo's pre-registered split. Both self-checks are binding and both passed: the pinned
+  venue-corpus law `wfv = 56 / +15.9352R` reproduced, and the census agreed with the engine on
+  **every trade of all 8 modes on both spans** (0 disagreements).
+- **The trigger is the rarity, by design: 82.66 % of in-session evaluable bars produce NO trigger**
+  (5,516 of 6,673 on the held-out window). The armed class occurred 503 times and filled 127. The
+  per-hour table is flat (380-420 of every 480 bars per hour) and the ATR(H1) terciles differ by
+  little. The live arm's own ledger says the same thing from its `STATE` rows: of 50 distinct signal
+  bars evaluated, 35 (70 %) had no trigger, 5 (10 %) were the armed class, 10 (20 %) were outside
+  the window. Nothing protective is refusing anything: `session/friday/spread/riskcap/brk/news = 0`.
+- **The macro-alignment leg COSTS WITHOUT MEASURABLY PAYING - and buys drawdown.** Removing it takes
+  fills from 0.75 to **1.28/day** and zero-entry days from 41.4 % to **29.0 %**, for **-0.0243R** of
+  held-out expectancy at **Welch t = +0.21** (unmeasurable), while max drawdown goes **6.3R ->
+  13.3R**. Against the pre-registered 0.05R bar it fails; against a drawdown criterion it is the
+  most valuable rule in the file. The reversal premise itself is **not established**: the armed mode
+  beats its mirror image (`ORIGINAL`, macro agreeing) by **+0.0249R, t = +0.19**, and its support
+  comes from `wf` - the span the configuration family was searched on. `REVERSE_BOTH` is measured
+  HARMFUL (-0.0941R, 28.6R DD, negative in both spans) and must never be enabled.
+- **The finding that governs everything else: the constraint is DATA, not design.** The venue corpus
+  is 2026-01-12 -> 2026-09-18, 16,224 M15 bars, 8 months, two clock eras. At the armed
+  configuration's own frequency, deciding its expectancy at t >= 1.5 needs **1,931 trades = ~7.0
+  years of this market**; `TRIGGER_ONLY` needs ~43, `MACRO_ONLY` ~79; the most decidable cell
+  (`SHORT_ONLY`) needs ~1.7. A six-family / seven-regime / confidence-scored engine would multiply
+  the hypotheses searched against those same eight months, so it is **not** proposed - the report
+  says which items on that list are blocked and what would unblock them.
+- **`docs/DECISION_ENGINE_AUDIT_20260922.md`** is the resulting Phase-30 report: the architecture map
+  with line numbers, the complete veto inventory (9 counted classes, plus 4 `return` sites that
+  refuse SILENTLY and are named), per-component verdicts, the ranked list of what the evidence
+  supports, the proposed one-seam architecture (a setup LIST + an evidence gate that can say
+  "insufficient evidence"), the testing plan, the measured frequency change, the risks, and the
+  exact files/functions that would change. **No EA build was touched: the deployed v1.26 binary is
+  unchanged** and no signal, size, protective rule or ledger writer moved.
+- **Counts:** suite **1525 passed, 10 skipped, 1 failed** (the pre-existing environmental
+  `test_forward_cell_prereg`, on no changed file's path); surface audit **0 dangling**. The parity
+  certificate, the arming record and the live arm are untouched by this work.
+
+## 2026-09-22 - THE SHIPPING 3% DAILY CAP IS CERTIFIED AT A DERIVED RISK, ON THE PASS'S OWN CLOCK
+
+- **The gap this closes, in one sentence.** The governor had a certificate at a threshold *derived
+  to bind* (0.11 %) and none at the number the arm actually runs (3 %), so the shipping leg could
+  only ever say **VACUOUS** — honest, and not a certificate. The lever is now the **risk per trade**
+  instead of the cap, because a daily-loss cap is a percentage of the day's opening equity and a
+  3 % day is only reachable on this window if one trade is worth more of it.
+- **Why a construction, measured.** On the tick-covered window (the only span the venue serves real
+  ticks for) the live path makes **7** closed fills, no day holds more than two, and the largest day
+  drawdown still followed by an entry is **0.583R** — **0.14 %** of the day's opening equity at the
+  arm's own realised risk, so a 3 % day would take **~19 consecutive full stops inside one UTC day**.
+  The window cannot be widened (everything outside the real-tick span is demoted to REFUSED), and
+  **R is risk-invariant**, so raising the risk moves *when* the rule binds and the order of nothing:
+  the certified path took **exactly** the shipping stance's entries.
+- **The certificate: `--live-stance --breaker-stress`, GOVERNED-PASS at the arm's own 3 %.** Derived
+  risk **6.18 %/trade** (3 % over the 0.583R day, carried at a declared 1.2 margin for the venue's
+  lot step). Two passes on the same window and tick model — `BSU` with the governor OFF (the path
+  the prediction is read from) and `BSG` with it ON at the **shipping 3 %** — and the verification is
+  the four-way disagreement test: `refused_as_predicted 1 / refused_but_taken 0 /
+  survived_as_predicted 6 / lost_without_prediction 0 / unexpected_entries 0`. The refusal is
+  attributed by the pass's own record: the governed ledger has **6** closed fills against the
+  ungoverned **7** (shas `0098144c` vs `737cf121`), the missing row is exactly the predicted
+  `LOPEN,1789142400,...` (2026-09-11 14:00Z), and the EA's journal vetoes it with
+  `PROP VETO: daily-loss cap (3%)`. Artifact `artifacts/midas_parity_result_20260922_1843.json`;
+  `armed.json` amendment 9; protocol amendment 12.
+- **Two modelling defects, both found by failing first and both fixed.** (1) **The derivation was
+  read off the wrong path.** Derived from the python engine of record it came back **NO-BIND**
+  (`..._1822.json`): the bar model takes **9** trades where the live path takes **7**, and its worst
+  usable day (2026-09-15) is a day the live path never trades — a threshold derived from a market
+  the pass does not walk is not a stress of that pass. The derivation now reads the **live stance's
+  own fills**. (2) **The day anchor is not a close-walk's anchor, and the day is not UTC.**
+  `PropDayAnchorCheck()` includes the **floating P&L** of any position carried across the boundary,
+  and `TimeUTCNow()` returns `TimeGMT()` — which **inside the strategy tester is the venue's clock**,
+  so the pass rolls its day at **server** midnight (UTC 22:00 here) while the live arm rolls at true
+  UTC. Both were measured off the pass's own journal: `STALE feed` prints at 00:00:00 **server** every
+  day, and solving the pass's `DAILY BREAKER TRIPPED: equity down 7.46%` line puts the boundary price
+  at **4321.05** — inside the boundary bar, and **$3.85** from the previous bar's close that an
+  "ending at the boundary" rule would have used. $3.85 is $108 of floating, **0.43 % of equity
+  against a 3 % cap**: it decides a 2.98 %-vs-3.00 % comparison. `breaker_walk` now rolls on the
+  **pass's** day (named in the artifact's `day_clock`) and marks the boundary floating at the bar's
+  **adverse extreme**, the direction in which a predicted breach stays predicted. The pass that ran
+  under the old model (artifact `..._1833`) reported **GOVERNED-FAIL** — it is in the record, not
+  adjusted away.
+- **Limits, stated rather than implied:** this certifies the rule under the **tester's** clock (the
+  live arm's UTC-midnight instant is not certified here); the risk per trade in the pass is a
+  **stress input** (6.18 %, not the shipping 0.25 %) while the cap, strategy, window, tick model and
+  entry sequence are the arm's own; the shield is **measured** on the path (never within $1,500.00 of
+  its floor, and that floor is pinned at the declared size) rather than modelled; and the profit
+  ceiling is **off by declaration**, with its 2 would-be refusals reported beside the result.
+- **Counts:** suite **1520 passed, 10 skipped, 1 failed** (the pre-existing environmental
+  `test_forward_cell_prereg`, on no changed file's path; `tests/test_parity_live_stance.py` is now
+  45 tests). Surface audit **0 dangling**. The strategy certificate is unchanged — same nine trades,
+  `max|dR|` 0.0004 on real ticks — which is the measurement that this work moved no rule.
+
+## 2026-09-22 - THE MAGIC-0 CLOSE: ONE ATTRIBUTION RULE, AND NOW ONLY ONE COPY OF IT
+
+- **The defect, in one line: `if deal.magic != ours: continue`.** MEASURED on the arm's first real fill,
+  the venue stamped the ENTRY deal with magic 7825001 and the **CLOSING** deal with **magic 0** (the
+  platform executed it; its reason read MOBILE). Every reader that filtered the venue's deal history on
+  the deal's own magic threw that close away — and a filter that drops a row reports a **smaller world**,
+  not an error. On the EA side this was a **risk** number (the day's realised P&L, and the Best Day cap
+  and reconstructed opening equity measured from it) and was fixed in v1.25 by attributing **by
+  position**. The python side had the same defect in **three** readers, and a rule copied into three
+  files is three rules, so the rule now lives once:
+  `mt5_ops.our_positions_from_deals` / `attribute_deal` / `attributed_deals` — ownership is a property of
+  the POSITION (an OUT deal is ours iff its position has an IN deal bearing our magic), and the
+  attribution is recorded **per deal** rather than flattened, because the whole defect was that this
+  could not be told from the output.
+- **The three readers, all converted:** `midas_watchdog.live_fill_reconciliation` (the completeness alarm
+  `morning_status` reports), `midas_first_fill_packet.venue_deals` (the ledger-vs-venue packet — the
+  reference implementation, which had already got it right and now shares the rule), and
+  `midas_lv_broker_monitor.build_state` (the broker-evidence surface: a monitor that cannot see a close
+  is evidence of a position that never ended). **Audited after the change:** those are the only three
+  python files in the repository that touch the venue's deal history, and the only magic comparison left
+  anywhere is on OPEN **positions**, which is correct — an open position's magic is set by whoever opened
+  it.
+- **Fail closed, and the direction is the point.** An OUT deal is adopted only when its position has an
+  IN deal bearing our magic **among the deals that were read**. A close whose opening cannot be seen is
+  **not** ours and is never assumed to be: the two mistakes are not symmetric — dropping one of our
+  closes under-reports our P&L, while adopting a **stranger's** close would put someone else's loss inside
+  this arm's day cap, invisible, inside a risk rule. Unattributable deals are now **named**
+  (`unattributed_deals`) instead of silently dropped, and a `SILENT` verdict with unattributable deals
+  present says so — "saw things it could not name" and "nothing traded yet" must not read the same.
+- **Measured on the live account, not in a fixture:** the watchdog reconciliation now reports
+  `matched / healthy`, `1 close(s) adopted BY POSITION (the venue did not stamp them with our magic)`,
+  naming position 18874164 / ticket 18138688 / magic 0 / price 4328.76; and the packet's two deals now
+  attribute as `entry → magic`, `close → position`, with its verdict still **AGREE**. The EA's own
+  `LENTRY` heal and the packet agree with the venue for the same fill.
+- **Pinned** (`tests/test_deal_attribution.py`, plus cases in the three readers' own files): the rule's
+  behaviour in both input shapes (MT5 namedtuples and the packet's dicts), the fail-closed directions
+  (a stray close, an IN deal without our magic, a `0` position id), the L4 monitor adopting our close and
+  rejecting a stranger's, and a **source pin that no reader re-introduces the magic-only filter** and that
+  `our_positions_from_deals` is defined in exactly one module. Suite: **1508 passed, 10 skipped, 1 failed**
+  (the pre-existing environmental `test_forward_cell_prereg`).
+
+## 2026-09-22 - THE ARM NOW SURVIVES UNATTENDED, AND THE BARS THE CERTIFICATION RUNS WERE EATING
+
+- **Registered: `MIDASTOUCH Arm Supervisor`** — S4U principal ("run whether or not the user is signed
+  on"), a boot trigger, the pinned 20-minute cadence, no execution time limit, and **wake-to-run".**
+  Verified against the scheduler's own XML: `logon=S4U triggers=boot,time repeats=20.0min
+  wake-to-run=on time-limit=PT0S`, and `live_readiness` moves the two previously-blocking legs to
+  **PASS** — its verdict is now `AUTHORISED BY OPERATOR OVERRIDE — TRADING, NOT VALIDATED` instead of
+  NOT READY. Proved it runs, not just that it exists: forced a pass, `Last Result: 0`, and the
+  heartbeat it wrote at 17:03:12Z reads `verdict OK, action NONE, terminal_running true, armed true`.
+  The legacy interactive task is **kept** (`-KeepLegacy`) for the trial night, because whether an S4U
+  task can stop and relaunch the MT5 GUI is still unverified; it is removed once a pass from the new
+  one is on the record.
+- **AND THE INSTALLER HAD TO BE FIXED TO GET THERE.** The first `-Apply` printed *"Registered"* over a
+  task whose XML the scheduler had **refused** and which had silently fallen back to the cmdlet path —
+  the one form that **cannot express wake-to-run**. The task existed and ran on its cadence, so on a
+  sleeping host it would have written no line at all: the night would have read like a quiet market,
+  and the single leg this installer exists for was the one lost. The scheduler named the offending
+  node (`(32,7):UseUnifiedSchedulingEngine`); reordering the whole `<Settings>` block to the published
+  schema moved the line number and nothing else. So the installer now tries the definition in
+  **progressively smaller forms** — dropping `UseUnifiedSchedulingEngine`, then `IdleSettings`, then
+  `Hidden`/`Enabled`, one at a time — and **never** drops `WakeToRun`, the S4U principal, the boot
+  trigger or the repetition. This machine accepts `without UseUnifiedSchedulingEngine`, and the
+  accepted form is printed. Two rules come out of it: a registration that cannot express the wake
+  flag must **not** be reported as success (the installer already refused to, which is how this was
+  caught), and a `<Settings>` element list must be pinned **in order**, not by presence — every name
+  was already present in the broken version. `tests/test_unattended.py` now pins the order.
+- **Windows still owes the last leg, and it is named rather than assumed:** whether a wake timer
+  actually wakes an *S0 Low Power Idle* host — and whether closing the lid suspends it — is not
+  observable from `powercfg` on this build. Promote it with `scripts/live_coverage.py` after one real
+  night, not with a setting.
+
+### Why the arm has not taken another trade (measured, and part of it was us)
+
+- **The EA is not slow; it is bar-driven.** Since the 14:06Z fill, 11 in-session M15 bars closed and
+  **8 were evaluated** — every one with `trig=0` (no trigger fired: RSI between 46.7 and 54.4, price
+  inside the bands), so the macro rule was never even asked. The four bars today that *did* fire a
+  trigger were declined by it (`mismatch=4`). Nothing protective refused anything: `session=0
+  friday=0 spread=0 riskcap=0 breaker=0 news=0`, governor `CLEAR`, spread $0.40 against a $0.62 cap.
+- **3 of those 11 bars were never evaluated at all — 14:30Z, 16:15Z and 16:45Z — and each one is a
+  bar that closed while this session's certification runs had the terminal stopped.** The EA
+  discovers a new bar on a tick, and on its first tick after a reload it sets its bar pointer and
+  returns *without evaluating*; a bar that closes while the terminal is down is therefore gone, with
+  no row anywhere saying so. That is a real, self-inflicted cost of running parity passes against a
+  live arm, and it is why the answer to "why no trade" cannot be read off the chart.
+- **Named, not patched:** the fix is a bounded catch-up (on init, evaluate the single bar the ledger
+  says was missed, if it is recent and unrecorded) and a ledger row that makes a miss *visible*. The
+  catch-up changes **when** an entry happens — a trade would be taken one bar late, at the market
+  price of the catch-up instant rather than the missed close — so it is a strategy-relevant change
+  and belongs in a pre-registered decision, not in a drive-by edit. The visibility half has no such
+  question and is the smaller job.
+
+## 2026-09-22 - `vEq` WAS THE PAPER BOOK'S FROZEN COUNTER: the arm's own equity on the chart and on the record (v1.26)
+
+- **The report, and it was correct.** The operator's screenshot: with the account at
+  **25,004.26** the chart printed `vEq: $25,000.00 (start $25,000.00)`, and the ledger's heartbeat
+  printed `EQ,25000.00`. Both numbers were `g_paper_eq` — and **on an armed arm the paper book never
+  trades**, because `LiveSendOrder` is the only entry path that runs, so that value is a **frozen
+  constant standing where the arm's equity belongs**. Same defect class as v1.24's `trades: 0/30`,
+  and worse in consequence: equity is the figure the governor's shield and day caps are read from,
+  so the chart disagreed with the number the **risk rules** use.
+- **The fix, and it is one meaning with two books.** The HUD's equity line and every **live**
+  heartbeat `EQ` row now carry the ARM's equity — the venue's `ACCOUNT_EQUITY` on the live path,
+  the paper book on the paper path — through a single write site (`LogEquityRow()`), so the record's
+  basis cannot drift from the display's again. The live label names the record it is reading:
+  `vEq: $25,004.26 acct (bal $25,004.26, +4.26 vs the $25,000 basis)`. The paper form is v1.10's,
+  **verbatim**, and every write is gated out of tester/BAR runs, so certified parity ledgers and the
+  paper arm stay byte-identical. The `EQ` row's BASIS changes on a live ledger, so the ERA note
+  gains **`+acct-eq`** — a reader must be able to tell that from the ledger alone.
+- **Why it could not be caught by the suite.** Nothing in the repository read the HUD's own line
+  back, and the number it printed was *internally consistent* with the paper book — the defect lived
+  in the meeting point of two records, which is exactly where the arm's other three defects lived.
+  The new pin (`test_the_equity_line_names_the_record_it_is_reading`) asserts the live line reads the
+  venue and never `g_paper_eq`, that the label names the basis, and that the heartbeat row is
+  written through the same helper the display uses.
+- **Recompiled, deployed, re-certified — in that order.** `compile_midas.py` **0 errors /
+  0 warnings** (`source=9bf97612 ex5=049f31e4`), deployed, and re-certified on the new binary with
+  `--window tickcov --corpus venue --live-stance --governor-stress`: **PARITY PASS** (the same nine
+  trades, `max|dR|` 0.0004) and **ACCOUNT LAYER PASS**. The unchanged trade set is again the
+  measurement that this build is display/record only. Certificate of record:
+  `artifacts/midas_parity_result_20260922_1743.json` (amendments 6, 7 and 8 in `armed.json`).
+- **AND THE GOVERNOR IS NO LONGER ONLY "UNEXERCISED" — it is certified at a threshold DERIVED to
+  bind (`--governor-stress`, amendment 7).** The shipping leg can only ever say VACUOUS here (the
+  largest day drawdown is 0.318% of a 3% cap), and a leg that says *"never asked"* is honest but is
+  not a certificate. Changing the strategy so a window binds it would be selecting data, so the
+  threshold was derived instead — **and the derivation was fixed by measurement**: the first rule
+  tried (*half the largest day drawdown*, 0.15%) breached on the day's **last** fill and refused
+  nothing, which the run reported as `NO-BIND` (artifact `..._1718.json`) rather than dressing it up
+  as a pass. The rule is now *truncate 2dp the largest day drawdown still followed by another entry
+  on that day* — **0.11%** from the 2026-09-11 07:15Z close — with the unusable closes named as
+  skipped. Two passes on distinct ledgers (LSU `34474511` / 7 fills, governor **OFF**; LSG
+  `04201b95` / 6, governor **ON**), and the check is falsifiable: the mirror reads its prediction
+  off the **ungoverned** path — reading it off the governed one would leave `must_be_present` empty
+  by construction and make an over-refusal undetectable — and the EA must then refuse exactly those
+  entries and keep every other one. **GOVERNED-PASS**: `refused_as_predicted 1` (the 2026-09-11
+  14:00Z entry), `refused_but_taken 0`, `survived_as_predicted 6`, `lost_without_prediction 0`,
+  `unexpected_entries 0`. The ungoverned pass took the same entries as the shipping stance, which is
+  the VACUOUS verdict stated from the other side. Verifying that leg then caught a **second, quieter
+defect in the model itself, found by arithmetic rather than by a failure**: the stance read the
+  best-day cap as `account x InpPropBestDayPct` = **$5,000/day** when the EA's own
+  `PropDayProfitCapUsd()` is `size x target% x best-day%` = **$250/day** — twenty times smaller, and
+  the number the chart prints. A model that under-states a cap by 20× cannot see it bind, so its
+  VACUOUS verdict (and the `$5,000` in the artifact's day table) was a **false negative presented as
+  evidence**. Corrected, the verdict is unchanged and now means something: the window's best day is
+  **+$78.23 = 31.3% of the $250 cap**, where the old number made it read as 1.6% of a cap twenty
+  times too large. A best-day share with no target is now **refused rather than guessed**, and a test
+  pins the python mirror against the EA's own function body so the two can never state different
+  rules. Three more integrity rules came out of this work: each
+  pass's ledger is recorded with its sha256 and mtime, and **a ledger older than the pass that
+  should have written it is REFUSED, never graded** — the tester agent writes ONE file per arm tag,
+  so a silent pass would otherwise be graded against the previous pass's fills and reported as a
+  certificate. **The shipping 3% cap is still unexercised at this risk and stays reported VACUOUS**
+  — superseded the same day by the `--breaker-stress` certificate above, which exercises the refusal
+  path at the shipping 3% by deriving the risk per trade instead of the cap; the live-stance
+  governor audit still reports VACUOUS, because at 0.25%/trade this window cannot reach 3% and that
+  distance is now printed as arithmetic. The trailing
+  shield floor and intrabar excursions remain unmodelled, named in the artifact as always.
+- **And what the operator actually asked for, stated plainly:** the arm is **armed, flat and
+  evaluating**; nothing of ours refuses its signals — today's refusal census is `signal=33
+  no-trigger=29 mismatch=4` with `session=0 friday=0 spread=0 riskcap=0 breaker=0 news=0`. The fill
+  rate is decided by the entry rule (`REVERSE_DIRECTION` requires the macro to CONTRADICT the
+  trigger), and no change in this session moved it — a trade cannot be ordered into existence, only
+  the rule's own signal can, and the arm takes what the rule accepts.
+- **Pins moved with the build:** the version register (`test_ea_version_is_the_r6_build` += v1.26 with
+  its reason), the deployer's accepted ERA stamps (`ERA,MIDAS1.26,`), and the two HUD pins that name
+  the equity line and the heartbeat's write order (extended, with the reason in place). Suite:
+  **1473 passed, 10 skipped, 1 failed** (the pre-existing environmental `test_forward_cell_prereg`).
+
+## 2026-09-22 - THE ARM'S OWN FILL TOLD THREE LIES, AND NO CERTIFICATE COVERED THE ARM: the fill-row-integrity build (v1.25) + the account layer certified for the first time
+
+- **The instruction was to fix the three defects the arm's first fill exposed, and all three
+  were measured from the ledger and the venue's own history rather than inferred.** (1) *The
+  entry price was a zero.* The row the arm wrote reads
+  `LOPEN,1790092800,0,18874164,0,-1,0.00000,...,cfg=62.50@0.25(missed string parameter)` - the
+  price came from `ResultPrice()` at the instant of acknowledgement, when on this venue that
+  field is 0, while the true 4333.07 was in the position **and** in the entry deal within the
+  same second; the packet reported `entry price: ledger 0.0 vs venue 4333.07` for the rest of
+  the fill's life. (2) *`(missed string parameter)` on every fill row*: the LOPEN format
+  carried **four `%s` for three arguments**, so MQL5 appended its own missing-argument text into
+  a data row. (3) *A closing deal is not always ours to stamp*: the venue's **closing** deal
+  carried **magic 0** (the platform executed it - the reason field reads MOBILE) while the entry
+  deal carried 7825001, and the day's realised P&L filtered OUT deals on `DEAL_MAGIC == InpMagic`
+  - i.e. it ignored every externally-closed trade, and that number is what the **Best Day cap and
+  the day's reconstructed opening equity** are measured from. A risk-path number.
+- **The fixes.** The ack resolves the price from the position or the entry deal before the row is
+  written; if neither answers inside a bounded wait the row says `entry=pending` (**a 0 in a price
+  column is read as a price by every reader** - a keyed token is not); and
+  `LENTRY,<epoch>,<identity>,<price>,<source>` amends it the moment the venue reports one, at init
+  (which heals a row written by an earlier build) and again the moment a pending fill resolves.
+  The specifier counts now match their arguments, with the tail **ordered by contract**: the
+  configured-risk token is read off the END of the row, so v1.25's `,entry=pending` sits before
+  it. Day-P&L attribution is now **by POSITION** (an OUT deal is ours iff its position has an IN
+  deal bearing our magic), with the unmatched case LOGGED rather than dropped.
+- **The heal is confirmed operating on the live arm, not just present in source.** The running
+  build's own ERA row is followed by
+  `LENTRY,1790099656,18874164,4333.07000,entry deal` - the identity taken from the row's ORDER
+  field, because on a netting account that IS the position id and `posid` is 0 at write time. And
+  the readers consume it: `midas_first_fill_packet.read_live_ledger` now pairs
+  `LENTRY,<identity>,<price>,<source>` rows (the packet is the tool that reported the
+  disagreement), grades the **amended** figure and prints where it came from; a row still pending
+  is reported **PENDING**, not as an agreement and not as a disagreement.
+- **The same defect on the read side, fixed with it.** `venue_deals` filtered the venue's history
+  on `magic == ours`, so the packet could not see a close the platform had stamped with magic 0
+  and reported *"the ledger recorded a close the account does not hold"* about a close it did.
+  Attribution is now by position, and the deals it needed that for are NAMED in the packet
+  (`venue_attributed_by_position`) - a widening that keeps its fail-closed direction: a stranger's
+  OUT deal is still refused, pinned by a test.
+- **The new pin is the general one the defect class deserved**
+  (`test_midas_telemetry.test_every_fill_row_format_matches_its_arguments`): every ledger row
+  writer's specifier count is compared against its top-level argument count on the source, and
+  MQL5's missing-argument text is asserted absent from the code. The grammar pins counted
+  specifiers and none of them counted the arguments beside them - a row is written by a format
+  **and** an argument list, and only both together are a row.
+- **Recompiled, deployed, re-certified - in that order.** `compile_midas.py` **0 errors /
+  0 warnings** (`source=011e0ab9 ex5=6748e8bd`), deployed to the live terminal, and the chart
+  reloaded onto it: the ledger's own `ERA,MIDAS1.25,...,+fill-price-heal` row proves it.
+  `python scripts/midas_parity.py --window tickcov --corpus venue --live-stance` -> **PARITY
+  PASS** on **real** ticks: `py 9tr +0.2699R | EA 9tr +0.271R | max|dR| 0.0004`, artifact
+  `artifacts/midas_parity_result_20260922_1654.json`. **The trade set is identical to the v1.24
+  certificate's**, which is the measurement that v1.25 is fill-row integrity and nothing else -
+  a build that could move a trade would have moved one.
+- **AND THE OTHER HALF OF THE REQUEST: the account layer is now certified instead of pinned off.**
+  Every pass of record pins `InpPropGuard=false`, `InpRiskPercent=1.0`, `InpArmTag=M1` because the
+  python engine of record is a BAR model and the governor is an account-level layer it does not
+  model - so **nothing** in this harness had ever said anything about the configuration the arm
+  runs. `--live-stance` adds a SECOND pass over the same window and tick model whose account layer
+  is read from the arm's own preset (one declaration, not a copy: anything it does not declare
+  refuses), whose EA runs its LIVE path in the tester (which the EA's own comment says it is
+  "deliberately testable" that way - in there the orders hit the simulated account), and whose
+  standard is the pinned python mirror `size_like_ea`. Result: **ACCOUNT LAYER PASS** -
+  **7 closed fills, every one sized the way the declared rule sizes it at the equity it actually
+  had** (lots and the row's own `risk_usd`, which is equity-independent), **5 of 7 floored to the
+  venue's min lot** (the quantisation the live arm shows, now on a record), and the configured-risk
+  token on each row matching the preset's own percent. One entry of that pass was still open at the
+  window's end and is reported **ungraded** rather than dropped.
+- **The governor leg is VACUOUS, and it says so in that word.** No modelled rule bound on this
+  window: the largest day drawdown was **0.318 % of the 3 % cap**, so the arm was never asked.
+  "The governor behaved" and "the governor was never asked" are different claims and only one of
+  them is evidence; a window that exercises the cap is what would validate it. NOT modelled, and
+  named in the artifact rather than left to inference: the trailing shield floor (needs the
+  venue's peak/DD bookkeeping) and intrabar equity excursions. This pass does **not** compare
+  trades against the python engine - the live path's fill mechanics are the arm's own, which is
+  the divergence the BAR pass documents.
+- **The live record's own packet now reads AGREE, and it took all three fixes to get there.**
+  `artifacts/live/first_fill_packet.json` on the arm's real fill: `--- position 18874164: AGREE ---`,
+  with the venue's deals **attributed by position** (18874164 — the close the magic filter could not
+  see), `entry price 4333.07 vs 4333.070000000001 AGREE` carrying the note *"the row itself carries
+  0.0: the price was UNRESOLVED at write time and this figure is the LENTRY amendment, line 1,
+  source 'entry deal'"*, and `exit price 4328.76 AGREE`. Before this session the same packet read
+  `DISAGREE` with a phantom `MISSING_LEDGER_ROW`.
+- **And the record was being written by the TEST SUITE, which is its own defect.** Found while
+  chasing the above: `record_first_fill` wrote the packet to a **hardcoded**
+  `artifacts/live/first_fill_packet.json`, so every test that redirected the capture to a tmp dir
+  still dumped its **synthetic** packet into the arm's live record — the file on disk described
+  `fill 308417`, a position that never existed, beside the real fill in `first_fill.json`. The
+  packet path is now derived from the capture's own location (one location, not two), pinned by a
+  test that asserts it follows the redirect.
+- **What this still does not change, stated plainly:** the venue's own validation criteria remain
+  **FAILED** (pf >= 1.30, expectancy >= +0.15R), the account is still an operator override, and
+  `live_readiness` is still **NOT READY** on the two unattended-supervision legs. The parity pass
+  certifies engine equivalence; the live-stance pass certifies the account layer; neither is a
+  validation.
+- **Pins moved with the build, each extended rather than replaced:** the version register
+  (`test_ea_version_is_the_r6_build` += v1.25 with its reason), the deployer's accepted ERA stamps
+  (`ERA,MIDAS1.25,`), the LOPEN/OPEN specifier and tail-shaped pins (with the measured reason for
+  the count in place of the old one), the sanctioned-selector list (the fill-price resolver proves
+  magic+symbol before it reads anything), and the history-selection invariant, which was restated
+  as **ownership** - an argument is either state we hold or a parameter of a function that proves
+  the identity is ours - because two honest callers arrived that the literal `g_lv_posid` pin could
+  not describe. Suite: **1472 passed, 10 skipped, 1 failed** (the pre-existing environmental
+  `test_forward_cell_prereg`, 661 vs its literal 658, on no changed file's path).
+
+## 2026-09-22 - THE ARM WAS FLAT AND EVERY SAFETY MEASURE WAS FREE: the trigger threshold moves to its measured value (2.0 -> 1.5)
+
+- **The complaint, answered by the arm's own census, not by an opinion.** `NOFILLSUM` for UTC
+  day 20718 read `25,4,0,0,0,0,0,21,0`: 25 bars evaluated with no trade, **21 with no trigger at
+  all**, 4 with a trigger the mode refused, and **every protective counter at zero** - session,
+  Friday, spread, risk-cap, breaker, news. So there was nothing to remove: no measure that
+  protects the account had refused anything, and the fill rate was decided by **how often a
+  trigger fires**. That is a threshold, not a gate, and it is what moved.
+- **The machine's half, already on the record but now measured to the end.** The 04:00-07:15 UTC
+  hole cost today **13 of 38 in-session M15 bars** (evaluation stops at server 01:15 and resumes
+  mid-session at server 09:15), because the host enters **Modern Standby** on lid close: the
+  event log records `Kernel-Power 506 The system is entering Modern Standby` repeatedly, the
+  chassis is a convertible (type 31) on a battery, and `powercfg` refuses to even show the lid
+  policy without an administrator token - display-off and sleep-after were already `never`, so no
+  idle timer was the cause. Nothing was changed here; the honest statement is that this needs a
+  VPS or the elevation that was declined.
+- **A frame finding, disclosed rather than quietly fixed.** The EA's `InSessionBar()` compares
+  `InpSessionStartHour/EndHour` (declared `// UTC`) against `TimeToStruct(iTime(...))`, and every
+  MQL5 datetime is **server** time - this venue is +2 (measured from the ledger: a bar opening
+  10:00 UTC is stamped 12:00). So the live arm trades UTC **04:00-18:00** while the certified
+  window is 06:00-20:00, and `midas_parity.build_inputs` normalises the inputs by the offset so the
+  *tester* frame agrees with python. Swept on the venue's own bars the live window is **better in
+  both spans**, so it was left alone and written down instead.
+- **The measurement** (`scripts/midas_frequency_axes.py`, pre-registered in
+  `docs/FREQUENCY_AXES_PREREG_20260922.md` BEFORE it ran, artifact
+  `artifacts/midas_frequency_axes_20260922.json`). Certified `midas_sweep.run_mode`, unchanged;
+  corpus = the venue's own bars; harness self-check binding: it reproduced the pinned
+  `wfv` law n=53 / +14.2563R before printing anything. Held out (`oos` 2026-04-01 -> 09-16, 168 d):
+  **k=2.0** 111 fills, 0.66/day, **50.3 % of days flat**, `-0.003R`, pf 0.981, dd 7.6R ->
+  **k=1.5** 130 fills, 0.77/day, **40.8 % flat**, `+0.087R`, pf 1.201, dd 6.5R -> k=1.0 140 fills,
+  0.83/day, 37.3 % flat, `-0.009R`, pf 0.966, dd 8.9R. The selection span (`wf`) ranks them the same
+  way. Min-lot `vetoed` = 0 in every cell.
+- **The prior this falsified, recorded because the artifact still says it.** The Sep-18 sweep (the
+  **retired** series, a different market) pointed at k=1.0, monotonically, at every RSI band; on
+  the venue's own bars **k=1.0 is the worst of the three**. The mechanism is in the source: the
+  trigger is `bb_touch` **else** the RSI branch, so narrowing the band *displaces* the RSI trigger
+  instead of adding to it.
+- **The change.** `gold_preset_upcomers.BB_DEV = 1.5` (with the table beside it),
+  `midas_parity.BB_DEV = 1.5` - the EA input and the python leg's trigger array are one contract
+  and moved in the same commit - and all three presets regenerated, the M1 control included so the
+  family runs one strategy. The watchdog's own drift action spliced it onto the running chart at
+  **2026-09-22T13:49:11Z** (`action=DRIFT`, `relaunched=True`); the EA's journal shows
+  `trigger=M15 BB(20,2.0` at 13:32 giving way to `trigger=M15 BB(20,1.5` at 14:49/14:52, and the
+  identity check that reported `DRIFT` now reports **OK**.
+- **What moved because the contract moved** (all re-measured, each with its reason in place):
+  `tests/test_midas_minlot_veto.py` wfv **53 -> 56 trades**, +14.2563R -> **+15.9352R**, the
+  amendment-6 invariant (the veto never fires there) unchanged; the parity **`veto` window
+  re-chosen** 2026-05-11..16 -> **2026-03-15..20**, because at 1.5 the old one refused nothing at
+  all and a window that no longer exercises the stand-down is not a veto path - found by sweeping
+  every 5-day window of the venue span at its **era's own clock**, with exactly one week surviving;
+  and a preset fixture that compared against the literal `"2.0"` now reads the pin's own value.
+- **The certificate, at the new threshold.** `python scripts/midas_parity.py --window tickcov`
+  (the only window with real ticks, and the only one whose PASS is recordable) returned **PASS**:
+  artifact `artifacts/midas_parity_result_20260922_1547.json` (14:47:00Z — the pass of record
+  at that moment, because it was the one that ran the build the arm ran, v1.24; SUPERSEDED the
+  same day by `..._1654.json` on v1.25, see the entry above), python leg 9 trades /
+  **+0.2699R** against the EA's 9 / **+0.271R**, count, open time, close time and side all
+  agreeing, `max|dR|` **0.0004**, `tick_model used: real`. The artifact carries the input block the
+  pass used, so the threshold it describes is readable from it (`InpBBDev: "1.5"`) rather than
+  inferred, and the trade set **moved** (two 2.0-era entries gone, two new ones in) — a changed
+  configuration, not a no-op. Recorded in `artifacts/live/armed.json` under `parity_certification`,
+  together with the one thing a parity pass structurally cannot say (see the account-layer bullet
+  below). Two identical PASSes at **14:02:45Z** (`..._1502.json`) and **14:26:14Z**
+  (`..._1526.json`) certify the same contract on v1.23 and are kept, neither counted twice.
+- **WHY THREE IDENTICAL PASSES ACROSS TWO BUILDS EXIST, and it is not busywork.** (1) The first pass's
+  provenance was broken by this session's own hand: `scripts/midas_parity.py` and
+  `scripts/gold_preset_upcomers.py` were edited at **14:14Z**, *after* the 14:02Z pass, so that
+  certificate described a tree that no longer existed. I measured the edits inert — the python leg
+  re-derived from the current tree reproduces the artifact to the digit (**n=9, +0.2699R**) — but a
+  certificate whose validity needs an argument is worth re-earning for four minutes of a flat
+  market. (2) **The arm's own first fill had made a fresh pass impossible.** Measured:
+  `mt5_ops.ledger_flatness` returned **`flat=False`, `open_positions=[{'ticket': '0', ...}]`** on a
+  book whose only live trade was **closed**, and `midas_parity` refuses to stop the terminal over a
+  non-flat book — so the certification run was **blocked**, not merely un-run. (3) **The build then
+  changed underneath the certificate** (the HUD fix below), so a third pass was run against v1.24 —
+  a certificate that does not name the build it ran invites exactly the question it exists to
+  answer.
+- **The chart was lying about the arm's own trade, and the fix is in the EA (v1.24).** The
+  operator's own screenshot after the fill showed `MIDASTOUCH MIDAS1.23 | trades: 0/30 (gate reads
+  at n=60) | wins 0 | cumR +0.00` while the ledger held a CLOSED live fill at **+0.104R**. Root
+  cause, found by reading the code rather than the symptom: **no live close path incremented a
+  counter.** The two *paper* close paths do (`g_cum_r += r; g_trades++`); the live managed-close and
+  the live external-close write their `LCLOSE` row and touch nothing else, and the paper counters an
+  armed arm can see start at zero on every reload — so on this account the tally could only ever
+  read **0/30**. Fixed as a **ledger-backed live census**: one helper counts the ledger's own
+  `LCLOSE` rows (the same rows every other reader uses), restored at init and incremented by both
+  live close paths, with the tally line naming which record it counts. Two pins added, and the HUD's
+  read-only boundary (no file access) kept intact. The governor line likewise stops printing
+  `floor $0 | today +0.00 of cap $0` for a state it has not measured and says so instead.
+- **v1.24 compiled, deployed and certified, in that order.** `compile_midas.py` **0 errors /
+  0 warnings** (source sha `014b980a`, ex5 sha `39b41510`), deployed to the live terminal, and the
+  live journal confirms the reload at **14:48:12Z** with `[MIDAS1.24]LIVE CENSUS restored: closed=1
+  wins=1 cumR=+0.104 (from 1 LCLOSE row(s) in MIDASTOUCH_paper_XAUUSD_U25.csv)` — the one closed
+  fill the ledger holds, restored across a restart instead of reset to zero. The third parity pass
+  (`..._1547.json`, PASS, the same nine trades, `max|dR|` 0.0004) then re-earned the certificate on
+  that binary; the **unchanged trade set is also the measurable statement that v1.24 is
+  telemetry-only** — a HUD that could move a trade would have moved one. `armed.json` now carries a
+  `certified_build` naming both hashes.
+- **The arming record named the previous build too, and now says so.** `armed.json`'s `config_id` read
+  `MIDASTOUCH_v1.23_...` while the chart ran v1.24 — the same defect class as the tally, caught because the
+  operator went looking for what else did not match. Renamed to v1.24 with a `config_id_history` giving the
+  moment and the reason, and **amendment 4** added to the record (the same place the previous config_id move
+  was recorded) carrying the fix, the measurement and what it does not do. Nothing parses that string as a
+  version except the `ArmingGate`, which compares it to a validation record an override does not create —
+  measured before the rename, so it is a naming fix and not a behaviour change.
+- **The documents that described the previous arm, corrected rather than left to age.** `README.md` still
+  said **0 opened, 0 closed** and named `MIDAS1.23`; its status table now carries the fill, the parity
+  certificate of record and the real refusal census. The health guide's HUD sample was pre-v1.22 in shape
+  (no `cfg` on the sizing line, the paper tally, a governor that reads zeros) — updated to what this
+  build prints, with the values marked as the arm's own and their source named.
+- **Two version-history pins extended for v1.24** — `test_ea_version_is_the_r6_build`'s registered
+  list and the deployer verifier's `accepted_era` tuple — each at the point its own comment marks as
+  an extension point ("A NEW RELEASE EXTENDS THIS LIST, it does not replace it"). The verifier
+  needed it: it would otherwise have refused the very ERA stamp the live ledger now carries
+  (`ERA,MIDAS1.24,...`).
+- **What is between the arm and its next fill, measured after the reload.** The live census restored
+  at 14:48:12Z reads `signal=28 no-trigger=24 mismatch=4` with `session=0 friday=0 spread=0
+  riskcap=0 breaker=0 news=0`. **Every safety counter is still zero** — nothing protective has
+  refused anything in the arm's whole live record — and the only refusals that exist are the
+  confluence rule's, 4 of the 4 signals that fired. The arm is armed, flat, in-session and
+  evaluating, so the next qualifying signal fills. What is NOT done is relaxing that rule, which
+  would be a strategy change needing a pre-registered study rather than a gate to switch off.
+- **THE ARM TRADED.** 2026-09-22 **14:00:00Z**: a live SHORT, 0.01 XAUUSD @ 4333.07, signal bar
+  13:45 (the first entry after the threshold went live at 13:49), closed by the venue at
+  **14:06:37** for **+$4.31 / +0.104R** — account 1428765 went 25,000 -> **25,004.26**. The ledger
+  recorded it (`LOPEN` at 1790092800, `LCLOSE ... EXTERNAL 4328.76000 +0.104`).
+- **And the fill immediately exposed FOUR false statements in the record-keeping path, all
+  fixed because a record that lies is worse than no record. One rule produced three of them:**
+  an `LOPEN` row carries the position id in field 2 — *except at the moment the EA writes it*,
+  when on a netting account field 2 is `0` and the **order ticket** (which on netting IS the
+  position id) is the only identity the row holds. Field 2 was what every pairing reader read.
+  - **`mt5_ops.ledger_flatness`, `midas_watchdog.ledger_health`, `morning_status.parse_ledger`
+    and `morning_status.live_grammar_view`** all paired a fill with its close on field 2 alone,
+    so the arm's one **closed** fill stayed "open": the operator's own report printed
+    `LIVE POSITION: SHORT 0.01 lots @ 0.00 ... open -1.7h` (negative age — the row's epoch is
+    SERVER-stamped and the age was taken against UTC) and `1 OPEN rows without CLOSE` sat on the
+    problem list, while the venue held **0 positions**. That is also the line that reads
+    `ledger_flatness`, i.e. the gate that blocks a certification run. Fixed with ONE rule in one
+    place — `mt5_ops.live_fill_key`, keying on the identity the row actually carries, never on
+    `0` (which would buy a false MATCH, a live position read as closed — the worse failure), and
+    treating a row with no identity at all as unpairable so the verdict stays fail-closed. The
+    frame is fixed too: the age is now taken with the persisted broker offset (`server_offset_min`)
+    or says `frame unproven`. Pinned by three tests built from the arm's **verbatim** row
+    (`LOPEN,1790092800,0,18874164,0,-1,...` + `LCLOSE,1790093197,18874164,EXTERNAL,4328.76000,0.104`)
+    including the two directions that matter more than the fix: the same row **without** its close
+    must still read as a live position, and a row carrying **no** identifier must not pair with a
+    close that also carries none. The suite's old fixtures all used a realistic `posid`, which is
+    exactly why four readers could pass while the live book read not-flat.
+  - `midas_watchdog.live_fill_reconciliation` keyed a `LOPEN` row on its `posid`/`deal` fields
+    only. MEASURED on this fill: both are **0** at write time on a netting account (the EA writes
+    the row as the fill is acknowledged; its own journal says the IDs reconcile on the next tick)
+    while the venue's `position_id` 18874164 sits in the row's **order** field, which was not
+    read. The alarm therefore fired as `ledger-short` — "every R derived from this ledger is
+    unverified" — on a fill the ledger had recorded in full, and would have fired on every
+    netting fill. Fixed to key on `posid`/`order`/`deal` (and never on `0`, which would buy a
+    false MATCH), and the account side now keys on the **position's** identity because the deal
+    ticket is a field the row cannot contain at write time.
+  - `midas_first_fill_packet.read_live_ledger` had the same defect: reading `posid` alone keyed
+    the `LOPEN` under "0" and its **own `LCLOSE`** under "18874164", so the packet reported the
+    ledger's close as "the venue holds a fill this ledger never recorded" — a phantom
+    `MISSING_LEDGER_ROW` manufactured from the ledger's own two rows.
+  - `build_packet` also called the reconciliation **without** the injected reader, so its own
+    promise ("Nothing here touches a terminal") was false and `test_no_fills_is_reported_as_nothing_yet`
+    passed only while the account happened to hold no deals. It failed the moment the arm traded.
+    Both readers now take the injected account, and two regression tests pin the real row's shape.
+  - **`morning_status.print_midas_section` had the same hole, one step earlier:** it reconciled the
+    ledger against the account with no injectable source, so `test_armed_world_marks_the_live_arm_live_
+    and_the_paper_arm_paper` — a test describing a **synthetic** world — depended on whether this
+    machine's arm had traded, and went unhealthy the moment it had. Fixed with a seam
+    (`LIVE_FILL_DEAL_READER`) and pinned in that test's own world helpers, on the same principle the
+    file's `preset_for_tag(armed=...)` already applies to the arming state.
+  - The write-once `artifacts/live/first_fill.json` had been written at 14:09:36Z **by the buggy
+    keying**, so it said `ledger-short` and lost `first_ledger_row`/`first_account_deal`. The false
+    capture is preserved as `first_fill.superseded_20260922T140936Z.json` and the corrected record
+    (state `matched`, with the row and the deal) is written beside it, with the supersession
+    stated inside the new artifact.
+- **Two real gaps the packet now names, NOT fixed here** (both need the EA, and the second is
+  about the venue rather than the EA): the `LOPEN` row carries `entry = 0.00000` because it is
+  written before the fill price is known, so the ledger cannot say what price the arm actually got
+  — the packet reports `entry price: ledger 0.0 vs venue 4333.07`; and this venue's **closing**
+  deal carries **magic 0**, so a deal history filtered by our magic holds the entry and not the
+  close, which is why the ledger's `+0.104R` cannot be graded against the venue by that filter.
+  A third, cosmetic: the row's `cfg=` token ends with a literal `(missed string parameter)` — an
+  MQL5 format specifier in `RiskAppend()` with no argument.
+- **What this is not.** Not a validation: at `+0.087R` over 130 trades t is about 0.9, the venue's
+  own criteria (pf >= 1.30, expectancy >= +0.15R) are still **FAILED**, and the account remains an
+  operator override on an unvalidated strategy. It is an ordering between three thresholds that
+  held on two spans and one market under a rule written before the numbers existed.
+- **The layer a parity pass cannot cover, measured separately.** The harness compares the two
+  STRATEGY engines and pins `InpPropGuard=false`, `InpRiskPercent=1.0`, `InpMagic=7801001`,
+  `InpArmTag=M1` (readable in the artifact's own input block), because the python engine of record
+  does not model the account layer — so no parity pass can ever certify the live arm's 0.25%
+  sizing or its governor, and a certificate silent about that reads as if it covered it. Measured
+  read-only with `scripts/verify_sizing_live.py` against the live preset and the venue: **legality
+  ALLOW** at **0.01 lots risking $39.01 of a $62.51 budget** (0.25% of $25,004.26 equity) —
+  **QUANTISED DOWN** by the venue's minimum lot, $23.50 of the budget unexpressible — a measured
+  basis of $100.00 per price unit per lot against spec fields implying $10.00 (the venue's 10x
+  self-inconsistency, reported not averaged). Exit **4 = LEGAL_BUT_NOT_ARMED**: the *rules* allow
+  the trade and the *python-side* gate is OFF because `artifacts/live/validation_record.json` does
+  not exist, which is what the override block says it does not create. Both records now sit
+  together in `artifacts/live/armed.json`.
+- **A fix that only exists is not a fix: the live watchdog was still running the old module.**
+  MEASURED: PID 3284 (started 2026-09-21) kept logging `ledgers: [{... "flat": false}]` and
+  `live_fills: ledger-short ... account 2 / ledger 1` — the pre-fix verdicts — because python does
+  not reload a module under a running process, and `flat=false` is not cosmetic there: it is the
+  verdict that makes the watchdog **SKIP** a restart, so a genuinely hung arm would have been left
+  hung on a closed trade read as open. It was restarted through its own registered task
+  (`MIDAS Watchdog Autostart` -> `start_midas_watchdog.bat`, the documented entry point, seconds of
+  gap, instance lock held) and its first pass, **2026-09-22T14:34:26Z**, reads
+  `flat: True` and `live_fills: matched / healthy, 1 ledger fill reconciled against 1 account
+  identifier`. The same open-position lie is gone from `scripts/morning_status.py`'s own output:
+  `[3b]` now prints `live: flat` where it printed `LIVE POSITION: SHORT ... open -1.7h`.
+- Suite after the pass and these fixes: **1451 passed, 10 skipped, 1 failed** - the failure is the
+  pre-existing environmental `test_forward_cell_prereg` (661 against its literal 658), on no
+  changed file's path. The two version-history pins above failed until they were extended for
+  v1.24, which is what those pins are for.
+
+## 2026-09-22 - THE SUPERVISOR NEVER RAN AT NIGHT: it is now unattended, host-checked, and every night is measured
+
+- **The complaint, measured from the supervisor's own log** (`artifacts/live/supervisor.log`,
+  2026-09-21 11:32Z -> 2026-09-22 13:00Z, 26.0 h): **55 passes recorded where a 20-minute
+  cadence owes 78**, coverage **69.7 %** (473.1 min unattended beyond one cadence), **zero
+  passes in the 01:00-06:00 UTC hours**, 4 gaps over threshold with the longest **282.8 min**,
+  and 2 passes that began and never completed. The night window alone (22:00Z -> 08:00Z):
+  **10 passes / 30 due, 30.8 % coverage, 415.4 min unattended, longest gap 282.8 min**.
+  Reproduce: `python scripts/live_coverage.py` (last night) or `--hours 24 --json`.
+- **Root cause 1, the task's principal.** `python scripts/unattended.py` read the task's own
+  exported XML: `logon=InteractiveToken`, no BootTrigger, `wake-to-run=off` - so it ran
+  **only while a user was signed in**, and the arm's market hours are exactly the hours
+  nobody is. The task was `Ready` the whole time, with a recent LastRunTime. A registered
+  task with the wrong principal is not supervision.
+- **Root cause 2, the host.** `python scripts/host_power.py`: the only standby state is
+  `S0 Low Power Idle Network Connected` (no S3), `Allow wake timers = Disable` on AC, and
+  the lid-close action is **not exposed by powercfg** on this build. `Sleep after = never`
+  was already true and did not prevent the hole - that is the finding worth keeping, because
+  checking the idle timer proves nothing on a Modern-Standby machine.
+- **What was built.** `scripts/unattended.py` (LogonType + BootTrigger + WakeToRun from the
+  scheduler's own XML; "not registered" and "could not ask" kept distinct),
+  `scripts/host_power.py` (read-only powercfg audit, prints the elevated fixes, runs none),
+  `scripts/live_coverage.py` (one heartbeat line per pass, two alarm kinds, the window rule),
+  and `scripts/install_paper_task.ps1` now registers **`MIDASTOUCH Arm Supervisor`** -
+  S4U principal, at-startup trigger, 20-min repetition, **WakeToRun**, no execution time
+  limit, `IgnoreNew` - and removes the legacy interactive `MitemshubPaperSupervisor` only
+  AFTER the replacement is registered. The name is deliberate: the supervisor is scoped to
+  the ARM (`preset_for_tag(tag, armed=True)`), not to a paper run.
+- **A bug in the measurement harness itself, found and fixed the same hour.** The first
+  `live_coverage._epoch` fed the log's naive `2026-09-22T07:27:46` into
+  `datetime.astimezone()`, which reads a naive stamp as LOCAL time - on this host (UTC+1)
+  every summary line moved an hour earlier and the night reported **14 passes / 42 %** where
+  it was **10 / 30.8 %**. A harness that flatters the thing it measures is worse than none;
+  `tests/test_live_coverage.py` now pins a naive `...Z` stamp to UTC regardless of the host's
+  zone.
+- **The alarm fires on the real hole, not a synthetic one.** Feeding `record_pass` the actual
+  last pass before the gap (00:40:24Z) and the actual first pass after it (07:27:46Z) raises
+  `supervision-gap` at **407.4 min** (episode-keyed, one `alerts.log` line, deduped), with a
+  `why` that names `unattended.py` and `host_power.py`. A stale ledger AT a pass that ran is
+  the other kind (`ledger-heartbeat-gap`) because its remedy is the watchdog's, not the
+  schedule's.
+- **Four readiness legs replace one.** `scheduled task target`, `supervisor runs unattended`,
+  `host can hold supervision overnight` and `no unacknowledged heartbeat gap`; the middle two
+  **block**, and this machine now reads **VERDICT: NOT READY** with exactly those two - the
+  honest reading of "the arm exists ~5 hours a day". Before 2026-09-22 only the first existed
+  and it passed while the arm was unguarded for 407 minutes.
+- **PRE-REGISTERED, before any post-fix night exists** (`docs/UNATTENDED_OPERATION_20260922.md`
+  §2, printed as data by `live_coverage.py --prereg`): a window PASSES iff no interval between
+  recorded passes exceeds **40 min** (2 x cadence) and no observed ledger heartbeat age
+  exceeds **35 min** (`midas_watchdog.STALE_MIN`, pinned equal by test). The numbers above are
+  labelled a **BASELINE**, not a test of that rule.
+- **THE HOST WAS FIXED, AND RE-MEASURED.** Wake timers were `Disable` on AC and are now
+  **`Enable`** (measured: `RTCWAKE` AC `0x0` -> `0x1`), plus `STANDBYIDLE 0`, `HIBERNATEIDLE 0`
+  and `LIDACTION 0` (the last set BLIND: it cannot be read back through `powercfg -query` on
+  this build, and that is stated rather than presented as a verified fix). No elevation turned
+  out to be needed for `powercfg`. The host verdict moved **FAIL -> WARN/unverified**: nothing
+  measured is wrong any more, and nothing in `powercfg` can certify that a wake timer actually
+  wakes an S0 host. Only a measured night can, which is why it is WARN and not PASS.
+- **Two defects the installer itself shipped, both found by running it.** (1) On this build the
+  ScheduledTasks cmdlets **cannot express `WakeToRun` at all** - the trigger objects expose
+  only {Enabled, EndBoundary, ExecutionTimeLimit, Id, Repetition, StartBoundary, RandomDelay}
+  - so the first version's `$trigger.WakeToRun = $true` threw non-terminatingly, was swallowed,
+  and the script printed **"Registered. Current state:"** over a task it had never created. The
+  registration is now written as the Task Scheduler's own **XML** (the artifact
+  `unattended.py` reads back), the task is **read back and success is refused** if it is not
+  there, and a scheduler that refuses the wake flag falls back to the cmdlet path while
+  **saying the leg is missing**. (2) A `<WakeToRun>` child of `<TimeTrigger>` is rejected
+  outright ("The task XML contains an unexpected node"); it belongs in `<Settings>`, where a
+  real wake-to-run task carries it. S4U registration **does** need elevation (measured:
+  `Access is denied`, `0x80070005`).
+- **NOT DONE, NOT CLAIMED.** No VPS has been provisioned, and **no post-fix night has been
+  measured** - `live_coverage.py` returning PASS over 22:00Z -> 08:00Z is the claim and it has
+  not been observed. The replacement task is **NOT registered**: the elevation prompt was
+  declined, so nothing on the machine changed and the legacy interactive supervisor is still
+  the only one. The coverage record is nonetheless **live** - the running supervisor wrote its
+  first heartbeat at 13:12:20Z, and over an awake window the harness reports **9 passes / 9
+  due, 100.0 % coverage, longest gap 20.0 min, PASS** (a measurement of the cadence, not of
+  unattended survival). An Interactive task can demonstrably stop and relaunch the MT5 GUI;
+  whether an S4U task can is **unverified**, so switching this live-armed arm's only recovery
+  path stays the operator's call: `install_paper_task.ps1 -Apply -KeepLegacy` (elevated), then
+  `Start-ScheduledTask` + a fresh line in `supervision_heartbeat.jsonl` to confirm.
+- **The arm is not short of permission to trade.** Its own `NOFILLSUM` census for the UTC day
+  reads **23 bars evaluated, 19 with NO trigger at all, 4 with a trigger the mode refused** -
+  the binding constraint is the trigger's own frequency, not a safety gate. The machine's
+  contribution is the other half: the 00:40Z -> 07:27Z hole covers **04:00Z -> 07:27Z of the
+  arm's own 04:00-18:00 UTC session**, roughly a quarter of every trading day in which the
+  strategy cannot be asked anything. No gate was relaxed to manufacture a fill.
+- **Counts.** Suite **1444 passed, 10 skipped, 1 failed** - the failure is the pre-existing
+  environmental `test_forward_cell_prereg.py::test_the_forward_mask_reproduces_the_studys_own_cell`
+  (661 vs the study's literal 658); no file in this change is on that path. Live import
+  closure **31 (23 entry points)**, **0 dangling**. **42 new tests**: `test_live_coverage.py`
+  (20), `test_host_power.py` (8), `test_unattended.py` (8), `test_paper_supervisor.py` (+6),
+  against the 1402 the suite held before this change.
+
+## 2026-09-22 — the arm is aligned to the mode the gate certifies, and the census refuted the request to remove safety gates
+
+- **The request.** "I don't like the fact that you are not trading yet … either you reduce
+  them or remove some and use the best." So the first thing measured was not a gate but the
+  refusal census, because "which measure is blocking you" has a countable answer.
+- **The census, from the arm's own record.** Across the whole live record (2026-09-21 20:00
+  UTC onward) the restart-persistent counters read `session=0 friday=0 spread=0 riskcap=0
+  breaker=0 news=0`. Every refusal that existed came from ONE measure: ORIGINAL's requirement
+  that the H1/H4 regime agree with the M15 trigger. Read from the ledger's own `STATE` rows,
+  **all 3 of the 31 evaluated bars that carried a trigger at all** (each `mac=-1, trig=+1`)
+  died there. Widening the session window, cutting the spread cap or switching the prop
+  governor off would have produced **exactly zero** extra trades. None of them was touched.
+- **What changed: `InpMode` 0 → 1** (ORIGINAL → REVERSE_DIRECTION) in both Upcomers presets,
+  pinned as `MODE` in `scripts/gold_preset_upcomers.py`. This is *configuration integrity*,
+  not a claim that mode 1 is the better mode: every parity window and the walk-forward gate
+  describe mode 1 (the 2026-09-21 12:18 parity PASS is a REVERSE_DIRECTION pass), so mode 0
+  meant no parity run and no gate verdict spoke about the live configuration *in either
+  direction*. The sweep says both are NO-SHIP, ORIGINAL is ahead in is1/is2/wf, and mode 1 is
+  ahead only in the out-of-sample window (n=108 +0.0759R pf 1.158 maxDD 5.41R against n=94
+  +0.0697R pf 1.141 maxDD 6.87R, +8.199R against +6.555R total, 15% more fills). The whole
+  table is in the preset header and in the arming-record amendment.
+- **It went live through the mechanism that exists for it.** The repo pin moved, and the
+  watchdog's own drift action respliced the staged `MQL5\Presets\…_LIVE.set` and relaunched
+  the terminal at 12:28:47Z; the EA's journal confirms `MIDASTOUCH started | mode=1` at
+  12:28:57Z, and `morning_status` now reports `preset: OK (44 inputs byte-identical to repo
+  .set)` where it had reported `PROBLEM: preset DRIFT: InpMode=0 (repo pin 1)`.
+- **The arming record was amended, not edited** (`artifacts/live/armed.json`, gitignored):
+  `config_id` → `MIDASTOUCH_v1.23_XAUUSD_M15_MODE_REVERSE_DIRECTION_U25`, a dated amendment
+  stating what it does NOT do (the gate FAILED mode 1 itself — V2 12/30, V3, V5 −0.7173R,
+  V6 +0.5243 — so this is still an override on a FAILED gate), and the old
+  `armed_configuration_was_never_the_gated_one` block replaced by
+  `armed_configuration_and_the_gate`, which keeps the prior text under
+  `prior_state_2026_09_21` rather than deleting it. The record now also discloses
+  `gate_family_mismatch` (the cited artifact measures `ema_stack_trigger`; the EA implements
+  `bb_rsi_trigger`; they agree on 3.4% of signals), which is what `live_readiness` asks for:
+  its verdict moved from **NOT READY / blocking: evidence describes this strategy** to
+  **AUTHORISED BY OPERATOR OVERRIDE — TRADING, NOT VALIDATED**, by disclosure rather than by
+  relaxing the check.
+- **A false label on the session window, fixed.** The HUD and `morning_status` both called
+  the window "06-20 UTC" while the gate classifies *bar epochs*, i.e. broker-server hours —
+  on this venue (UTC+2) that is 04:00-18:00 UTC, two hours of the operator's day at each end.
+  `morning_status` now reads the hours from the preset and says `SERVER … NOT UTC`; the HUD's
+  own string still says UTC and needs an EA-side change to carry a version bump, so it is
+  queued with the next EA edit rather than forced into a live restart.
+- **Measured, not assumed: the real blocker is uptime.** The arm evaluated 31 bars where an
+  awake terminal would have evaluated ~66: the machine slept from ~01:40 to ~06:22 UTC
+  (`Sleep after=never` on AC, so this is session/lid-class, not the idle timer), the terminal
+  then spent ~2h failing to reconnect, and 10 of the 31 evaluated bars were outside the
+  session window entirely. No gate change can trade bars that were never evaluated.
+- **INCIDENT, on the record, with the EA's own banner as the evidence.** `execution=` in the
+  INIT banner reads LIVE at 12:20:20Z, **PAPER at 12:28:57Z**, LIVE again at 12:32:32Z. So
+  for 3m35s the arm was running with the real-order switch OFF while the ledger, the
+  heartbeats and `STATE` rows all looked perfectly alive — the exact "looks like a quiet
+  market" failure mode this program keeps paying for. The 12:28:47Z watchdog pass is what
+  put it there: its drift remedy (triggered by the mode pin moving) wrote a preset with
+  `InpLiveExecution=false` into the staged `..._LIVE.set`, and the next pass found
+  `chart InpLiveExecution=false (repo pin true)` and repaired it. The same class is already
+  documented inside `resplice_pins` from 2026-09-21 17:52 ("resolved by writing the paper
+  preset into `..._LIVE.set` (4564 bytes, paper header)"). I could NOT attribute the 12:28Z
+  write to anything I ran — my staging wrote the LIVE pin, and `preset_for_tag(tag,
+  armed=True)` resolves to the LIVE pin — and another process is editing this checkout
+  concurrently, so the mechanism is NOT yet established. What matters until it is:
+  `execution=` is the only signal that distinguishes "armed" from "alive".
+
+## 2026-09-22 (v1.23) — the venue's self-inconsistency printed once, recorded always
+
+- **The complaint, measured in the journal.** `TICK VALUE MISMATCH broker tv/ts=10.00 vs
+  settled 100.00 …` appeared at 09:45, 10:01, 10:16, 10:31, 10:46, 11:01, 11:16, 11:30 and
+  11:31 on 2026-09-22 — the same two static numbers. Root cause, read from the call graph:
+  `DollarPerUnitPerLot()` printed on every call, and the 15-minute heartbeat calls it twice
+  (`StateRowWrite` + `HudUpdate`), every evaluated bar calls it again, and the sizing sites
+  add one per attempt. A fact that never changes was the loudest line in the journal, and
+  the `VETO`/`NOFILL` refusals it protects were underneath it.
+- **Print once per session, or on change.** `SpecMoved()` now gates the line: the first
+  observation of the EA session returns true; afterwards either number must move past a
+  0.5% relative band. A re-print names what it was (`TICK VALUE MISMATCH CHANGED: …
+  was tv/ts=… vs settled …`), because "it changed" is itself evidence. The first line of a
+  session is byte-identical to the v1.22 text, so nothing that greps the journal breaks.
+- **The record replaces the repetition.** The same two moments append a `SPEC` row with
+  KEYED fields — `SPEC,<utc epoch>,tv=…,ts=…,cs=…,broker=…,settled=…,used=…,ratio=…` —
+  written through `PaperLog`, gated out of the tester and the BAR replay exactly like
+  `STATE`, and carrying `+spec-record` in the ERA note. Keyed rather than positional for
+  the NOFILL reason (2026-09-21): a reader whose column order disagrees with the writer
+  mislabels every field after the divergence, invisibly. `morning_status.spec_last` /
+  `spec_text` read it back and render it under the arm view, and the new row is invisible
+  to every existing parser (`parse_ledger` and friends ignore unknown prefixes — pinned).
+- **Deployed and proved on the live arm.** EA compiles 0 errors / 0 warnings (134,382B),
+  `source=a6ce588b ex5=fb7f8db5`, copied to both attachable paths, and reloaded while FLAT
+  at 12:20:20 local through the registered stop→relaunch. The journal now shows exactly
+  ONE mismatch line for the session; the ERA row is
+  `ERA,MIDAS1.23,1790083220,pertick-fills+telemetry-only-per-V2-register+diag-nofill+p6-entrytf+diag-census+state-view+cfg-risk+spec-record`;
+  the row landed as
+  `SPEC,1790076020,tv=0.10000,ts=0.01000,cs=100.00,broker=10.00,settled=100.0000,used=100.0000,ratio=0.1000`;
+  and `morning_status` renders `venue spec (ledger SPEC, written 09-22 11:20 UTC): broker
+  tv/ts=10.00 vs order_calc_profit 100.00 per price unit (ratio 0.10) — venue spec
+  self-inconsistent; sized on the settled value`.
+- **One caveat on the ledger, stated rather than hidden.** The ledger also carries
+  `ERA,MIDAS1.23,…,+spec-tv-mismatch` from an earlier v1.23 build that ran 11:43–12:20
+  local before this one; the deployer's accepted-stamp list is extended, never replaced,
+  and this entry describes `+spec-record` — the build now deployed. Two builds, two tags,
+  told apart by the ERA row exactly as the v1.20 lesson requires.
+- **Pins, proved both ways.** `tests/test_spec_warn_dedupe.py` (9 tests): the gate sits
+  between caller and print, the record lands at the print (not on a clock — `OnTimer`
+  carries no writer), the row stays keyed with only the epoch positional, the reader
+  round-trips and ignores partial rows, and the ERA note cites the change. Restoring the
+  defect (a bare print, no `SpecRecord`) fails 2 of them; restored, 9 pass. Suite **1402
+  passed, 10 skipped, 1 failed** — the failure is
+  `test_forward_cell_prereg.py::test_the_forward_mask_reproduces_the_studys_own_cell`,
+  environmental as before: the venue's history has advanced and the recomputed frozen cell
+  is 660 against the study's literal 658. No file in this change is on that path.
+- Registered never-abort history extended to v1.23 (`test_midas_r6_preconditions`), and the
+  deployer's `accepted_era` admits `ERA,MIDAS1.23,`. `README` names MIDAS1.23.
+
+## 2026-09-22 — the fill row now says what the arm was *told* to risk, not just what it got
+
+- **The gap existed only outside the journal.** A fill row carried one risk number: the
+  dollars actually put at stake, derived from the lot size the venue allowed. The arm's
+  *configured* risk (`InpRiskPercent` of the very equity base the sizing divided) is a
+  different number whenever the venue's lot step cannot express it — and the previous
+  turn's own `verify_sizing_live` work found that state is the standing one on this
+  account. Reading the journal alone, a min-lot fill and a correctly-sized fill looked
+  identical; the gap was recoverable only by running a verification tool against a preset
+  the ledger does not name.
+- **`cfg=<usd>@<pct>`, appended last on every fill row and on the STATE row (v1.22).** One
+  KEYED field rather than two positional ones, and that is a correctness choice, not style:
+  the v1.19e state stamp is 0 fields (label off, or a tester row) or exactly 5, so "the next
+  two fields" cannot be told apart from a half-written stamp. `cfg=` can never be mistaken
+  for one. It rides all three fill writers the same way the state stamp does — BAR `OPEN`,
+  PERTICK `OPEN` and the LIVE `LOPEN` — and, again like it, **no tester row carries it**, so
+  the certified parity ledgers stay byte-identical by construction.
+- **It is on the STATE row too, which is what makes it visible before the first fill.** The
+  panel's view already carries the prospective size (`lots`, `risk`); appending the token
+  there means the configured-vs-allowed gap is answerable from the journal on the next
+  evaluated bar, not only once a fill happens. `ConfiguredRiskUsd()` is the single definition
+  behind the HUD line, the STATE row and the fill rows, so the three cannot disagree about
+  what was asked for; the HUD's SIZING line now reads
+  `0.02 lots, risk $62.24 of $62.50 configured (0.25%) QUANTISED DOWN on 2.0xATR(H1)=$31.12`.
+- **The stamp describes the row's own risk basis.** `PaperEquity()` on the two paper paths,
+  account equity on the live one — the same quantity each path's sizing already divided — so
+  `cfg` and the row's `risk` field are always two numbers off one basis, never two bases.
+  No new arithmetic: the value passed is the `risk_d` those paths already computed.
+- **Readers, because a number nobody parses is not visible.** `midas_first_fills_audit.py`
+  (the wire-contract owner) gained `read_risk_tail` / `RISK_PREFIX` and now prints a `risk:`
+  disclosure per closed trade plus a `risk basis:` summary naming how many fills were
+  quantised down or oversized; `morning_status.live_grammar_view` renders it under a live
+  `LOPEN`. Both take the token off the END, so neither has to know whether the state stamp
+  is on. A pre-v1.22 row is unstamped, not malformed.
+- **Disclosure, never a rule.** Whether the venue's granularity can express the arm's budget
+  is a property of the venue, not something the arm can breach, so the audit reports the
+  numbers and grades nothing on them. The bound that refuses a trade is unchanged:
+  `InpMaxRiskPct` (amendment 6), veto on all three sizing sites.
+- **Pins, strengthened rather than relaxed.** `tests/test_state_label_contract.py` now counts
+  on the concatenation `StateAppend() + RiskAppend(` (the old `, StateAppend()` pin read 0
+  the moment the append moved onto its own line — a pin that a whitespace change could
+  disarm) and pins `RiskAppend` itself: tester-gated, carrying `InpRiskPercent`, and NOT
+  gated on `InpRecordStateLabel`. `test_midas_golive_grammar` pins the LOPEN writer at 16
+  specifiers with the tail `state,cfg`.
+- **Measured, on the live arm.** EA compiles 0 errors / 0 warnings (133870B), the deployed
+  binary matches its source, the arm was reloaded while FLAT and its ERA row is now
+  `ERA,MIDAS1.22,...,+state-view+cfg-risk`. The very next evaluated bar wrote the token to
+  the live ledger:
+  `STATE,1790064000,1790070300,-1,-1,-1,1,2377,1,2,6224,0.00,250.00,23500.00,cfg=62.50@0.25`,
+  and `morning_status` renders it as `0.02 lots risk $62.24 of $62.50 configured (0.25%)
+  QUANTISED DOWN`. **No FILL row carries it yet** — the arm has still never filled, so for
+  the fill writers the proof remains the compile plus the pinned grammar; the readers were
+  also exercised on a crafted `OPEN` row (state tail parses unchanged beside the token, and
+  `risk note: configured $62.50 (0.25% of the row's own risk basis) | took $10.00 |
+  QUANTISED DOWN (-52.50)`).
+- **Suite: 1393 passed, 10 skipped, 1 failed.** The failure is
+  `test_forward_cell_prereg.py::test_the_forward_mask_reproduces_the_studys_own_cell` and it
+  is environmental, not this change: the venue history's window end has advanced to
+  2026-09-22 09:30 while the research calendar copy is 25.8h old, and the engine's own
+  freshness rule is 24h — measured directly as `the calendar is unusable at the window end:
+  calendar stale (25.8h old > 24h)`. No file in this change is on that code path. The LIVE
+  calendar is separate and fresh (the EA refreshed it at 08:27). Surface audit unchanged:
+  closure 27 (22 entry points), residue 56, **dangling none**.
+
+## 2026-09-21 — the tool printed one size where the account has two
+
+- **The number that will be sent was missing.** `verify_sizing_live.py` sized to the
+  venue's daily loss limit and printed that single figure. On the U25 arm that is **0.11
+  lots / $350.24**; the EA sizes `InpRiskPercent` of equity, which is **0.01 lots /
+  $31.84**. One unlabelled number, read as the other.
+- **Both sizes now print, labelled.** `size (this tool)` and `size (the ARM)`, the latter
+  read from the preset the **arming record names** (`artifacts/live/armed.json` →
+  `MidastouchAI_upcomers_gold_LIVE.set`; `--preset` overrides) and computed by
+  `EaSizing` / `size_like_ea`, a step-for-step mirror of the EA's own `LiveSendOrder`.
+  With no arming record the line reads `UNAVAILABLE` and names what would be needed —
+  the paper preset is deliberately *not* a fallback, since it answers a question about a
+  different configuration.
+- **The mirror is pinned against the MQL5, not trusted.** `tests/test_ea_sizing_mirror.py`
+  extracts the bodies of `LiveSendOrder`, `OpenPaperPosition` and `BarFillAndManage` from
+  `MidastouchAI.mq5` and asserts every arithmetic step is still there, that all three
+  sites still carry the amendment-6 veto, and that no fourth sizing site has appeared.
+- **A state the EA's own log cannot express turned up while pinning it.** The EA's
+  `FLOORED` flag marks only the min-lot branch, so it is silent on the case that is
+  actually happening on this account: the 0.25% budget is **$62.50**, the venue's 0.01
+  step yields **$31.84**, and the arm trades **half its configured risk** with nothing in
+  the journal saying so. `EaSizing.quantised_down` derives that from the numbers and now
+  prints `$30.66 of it unspent`. Its mirror image, `over_budget`, covers the small arm
+  where the venue minimum forces *more* than `InpRiskPercent` (a $3,000 arm risks 4.25x
+  its configured budget at this stop width).
+- **Measured live:** `size (the ARM) 0.01 lots risk $31.84 budget $62.50 (preset
+  MidastouchAI_upcomers_gold_LIVE.set, named by artifacts\live\armed.json)`, beside
+  `size (this tool) 0.11 lots risk $350.24`. Suite **1392 passed, 10 skipped**
+  (24 + 14 tests across the two files); surface audit unchanged at closure 27
+  (22 entry points), residue 56, **dangling none**.
+
+## 2026-09-21 — `BLOCK` was two different facts wearing one word
+
+- **The complaint, reproduced.** `scripts/verify_sizing_live.py` printed `BLOCK` beside
+  `$0.00 allowance` on a funded account whose only conditions were *no profit yet* and *an
+  arming switch that is off*. Nothing had blocked anything, and both readings were this
+  repository's own reporting rather than the venue's or the EA's behaviour.
+- **`$0.00` meant two opposite things, and now it says which.** The Best Day allowance is
+  zero when today's ceiling is REACHED (a refusal) and zero when no profit is banked yet
+  (the share is undefined at zero, and the rule binds on the first profitable *close*, never
+  on an entry). `TradeDecision` now carries `best_day_basis` (`BEST_DAY_NO_PROFIT_YET` /
+  `BEST_DAY_CAP_REACHED` / `BEST_DAY_HEADROOM`) and `best_day_note`, so no renderer infers a
+  refusal from a number, and the tool's line reads
+  `remaining allowance $0.00 — NOT a refusal: no profit is banked yet, …`.
+- **Legality and arming are two labelled verdicts, never one word.** The arming switch was
+  being passed into `evaluate_trade`, so an unarmed-but-legal configuration reported
+  `BLOCKED`. The rules now answer `legality`; the arming record answers `arming switch`; and
+  the exit codes keep them apart — **1** = the rules refuse, **4** = legal but not armed, so a
+  pipeline can no longer read "the switch is off" as "the venue would refuse".
+- **`explain()` names its block codes** (`BLOCK (not_armed)`) instead of the bare word, which
+  is what let the Best Day line three lines above it be read as the cause.
+- **Pinned.** `tests/test_verify_sizing_live_reporting.py` (12 tests, pure — no terminal, no
+  network) asserts a legal unarmed verdict contains no `BLOCK` at all, that a zero allowance
+  never renders unqualified, that a reached cap *is* labelled a refusal, and — by `ast`, not
+  text — that `evaluate_trade` is never handed an arming decision in this tool.
+- **Measured live:** `VERDICT: LEGAL_BUT_NOT_ARMED (4) — NOTHING refuses this trade; the
+  arming switch is what is off`, with `legality ALLOW` and `arming switch OFF` on their own
+  lines. Suite **1366 passed, 10 skipped**.
+
+## 2026-09-21 — the order path is a gate now, not a paragraph in a changelog
+
+- **The hand proof from earlier today became routine.** The arm's ability to place an order was
+  established once, by hand: a min-lot XAUUSD request the venue priced and accepted (retcode 0,
+  $241.76 of margin), and a filling-mode question settled by reading the installed `Trade.mqh`
+  (`FillingCheck` rewrites CTrade's FOK default to whatever the symbol lists — here IOC only).
+  True, and checked by nothing that runs on a schedule, so "does it work" depended on someone
+  remembering how it was done. `live_readiness` now carries two legs:
+  `symbol filling mode is usable` and `order path accept-check (min lot, nothing sent)`.
+- **Three answers, not two, because two of them get conflated.** A venue that ACCEPTS the
+  request passes; one that REFUSES its shape (wrong filling mode, bad volume, bad stops) blocks
+  and names the retcode; one that cannot be asked (market closed, trading disabled) reports
+  **UNCONFIRMED**, which renders WARN and does not block. An unasked question is not an answer,
+  and the leg says so in those words rather than rounding to green.
+- **Read-only by construction, and pinned that way.** `order_check` prices and margins the
+  request on the server and sends nothing; a source pin parses the module with `ast` and asserts
+  there is no `order_send` anywhere in it. That pin immediately caught its own first version
+  tripping over the word inside the docstring explaining the rule — prose must not be able to
+  satisfy or violate a code pin, so the pin strips docstrings rather than matching text.
+- **Measured live:** `[PASS] symbol filling mode is usable — IOC only; CTrade resolves to IOC`
+  and `[PASS] order path accept-check (min lot, nothing sent) — venue ACCEPTED a 0.01-lot buy,
+  stop $31.17 (2xATR) — nothing was sent`. (The margin the check returns moves with the
+  price, so it is printed but not asserted; the retcode is the claim.) The verdict is unchanged
+  (`NOT READY`, blocking: the cited evidence describes a different strategy), and the surface
+  audit is unchanged: closure 27 (22 entry points), residue 56, **dangling none**.
+  Suite **1354 passed, 10 skipped**.
+
+## 2026-09-21 (v1.21) — the chart now says what the engine sees, and the record keeps it
+
+- **The complaint, confirmed against the source.** The HUD said the arm was alive and nothing
+  about its view: no regime, no trigger state, no sizing, no governor reading. Worse, the only
+  place the macro direction appeared was inside a veto label (`last: VETO NO-TRIGGER(mac=-1)`) —
+  a bare integer, read as such.
+- **Six display lines, built from the decision's own values.** `REGIME` names the direction
+  rather than numbering it (`H4 down / H1 down -> BEARISH (macro -1)`) using the **same two
+  booleans that decide entries**, stashed inside `MacroState()` so the chart cannot say BULLISH
+  while the engine refuses a long. `TRIGGER` shows the closed bar's trigger plus the RSI that
+  answers "how close was it". `GATES` shows the session verdict and the live spread against the
+  1.5%-of-stop cap. `SIZING` shows the lots and the dollar risk it would take now, flagging
+  `[MIN-LOT EXCEEDS BUDGET -> risk-cap veto]` when the venue's floor is bigger than the budget.
+  `GOVERNOR` shows the shield floor, today's P&L against the Best Day cap, and the block reason.
+  `NEWS` reports the stand-down switch.
+- **A `Comment()` is not a record, so the same numbers are a ledger row.** `STATE` is appended
+  per evaluated bar and on the heartbeat, and `morning_status` renders it from the file — "why
+  didn't it trade at 14:15" is answerable tomorrow without the chart. Gated out of the tester
+  and the BAR replay, so certified parity ledgers stay byte-identical; the ERA note carries
+  `+state-view` (v1.21 accepted by the deployer, list extended as always).
+- **The row has two clocks and they are labelled, not blended.** Its own timestamp is UTC; the
+  bar epoch it carries is server-stamped like every bar epoch here. The first live row exposed
+  exactly that trap in the reader I had just written (`20:00` UTC written for a bar stamped
+  `21:45` server), which is why the report prints both, labelled, instead of converting.
+- **The session rule is now defined once**, in `InSessionBar()`, used by the live gate and the
+  HUD alike; the BAR-replay gate keeps its own frozen comparison and a test asserts *that*
+  difference explicitly, so adopting the shared rule in BAR mode is a deliberate parity
+  decision rather than a silent refactor. Display helpers are pinned read-only: no view function
+  may assign to engine state.
+- **Live, verified.** `MIDAS1.21` deployed to both copies (0 errors / 0 warnings), arm reloaded
+  at a flat, out-of-session moment, census restored across it (`signal=7 no-trigger=7`), ERA row
+  `+state-view`, and the first `STATE` row landed as written:
+  `STATE,1790020800,1790027100,-1,-1,-1,0,4644,0,1,3252,0.00,250.00,23500.00`
+  — BEARISH (H4 and H1 both down), no trigger, RSI 46.4, inside session, 0.01 lots risking
+  $32.52. Suite **1339 passed, 10 skipped**.
+
 ## 2026-09-21 (later) — the reversal hint, tested where it had not already been seen
 
 - **A hypothesis generated by consumed data cannot be tested on it.** The momentum study's

@@ -296,6 +296,44 @@ and `--reset-state` exist for inspection and emergencies; `--force` is an
 override that lands in the log and state, like the sweep runner's override
 flag.
 
+**Amendment (2026-09-22) — the supervisor is UNATTENDED, and a night without it is a
+record.** The operator contract above autostarts the watchdog at **user logon**. MEASURED
+that morning from the supervisor's own log: over 25.3 h the scheduled supervisor produced
+**54 passes where a 20-minute cadence owes 76**, with **zero** passes in the 01:00-06:00
+UTC hours and one gap of **407 minutes** — because the task's principal was
+`InteractiveToken`, i.e. it ran only while a user was signed in, and the arm's market hours
+are exactly the hours nobody is. The liveness leg was never the problem: nothing was
+watching, and nothing recorded that nothing was watching. Therefore:
+
+1. **The task's shape is part of the machine's contract, not an installer detail.**
+   LogonType S4U ("whether or not the user is signed on"), a BootTrigger, and WakeToRun,
+   read back from the task's own exported XML by `scripts/unattended.py`.
+   `live_readiness.py` **blocks** while they do not hold; a `Ready` task with an
+   Interactive principal is not supervision, however recently it last ran.
+2. **The HOST is part of it too.** `scripts/host_power.py` measures the power posture and
+   `live_readiness.py` blocks while the machine can suspend under a task that cannot wake
+   it. `Sleep after = never` is **not** that check: it was already 0 here and a 282.8-minute
+   hole happened anyway (Modern Standby suspends on lid close / S0 idle). The arm's
+   unattended home is a host with no lid and no user session to lose.
+3. **A pass that is not recorded is not coverage.** Every pass appends one line to
+   `artifacts/live/supervision_heartbeat.jsonl` and the interval between passes is scored
+   against a **PRE-REGISTERED** threshold — 40 min (2 x cadence) between passes, 35 min
+   (= STALE_MIN) of ledger heartbeat age. Both were frozen in
+   `docs/UNATTENDED_OPERATION_20260922.md` §2 **before** the first post-fix night exists;
+   `python scripts/live_coverage.py --prereg` prints them as data. The pre-fix numbers are
+   that document's BASELINE, not a test of the rule.
+4. **Alignment is decided by evidence, not by a model of it.** An instrument that cannot
+   confirm a leg reports UNCONFIRMED and never PASS: "not registered", "could not be
+   asked" and "read and wrong" stay three distinct outcomes in `unattended.py`,
+   `host_power.py` and the readiness legs, the same four-state discipline §12 already
+   applies to drift.
+5. **The alarm is a record, not a pager.** A host that is asleep runs nothing, so a gap is
+   only ever *raised* by the first pass after the host wakes; its durable channels are the
+   alarm record, `alerts.log` and `morning_status [3b]`, deduped per episode, and
+   acknowledged only by a human (`live_coverage.py --ack`). `--dry-run` records nothing: a
+   rehearsal is not coverage. The parity pause discipline is unchanged and a paused pass
+   still observes.
+
 ## 13. Amendment 4 — M1 forward arm verdict rule (frozen BEFORE the first fill)
 
 **Written 2026-09-17 with the ledger holding zero fills** (0 OPEN/CLOSE rows,
@@ -584,3 +622,198 @@ Full record: `docs/GOLD_PREREG_TIGHT_STOP_20260921.md` and
 while the mean trades off against the dispersion — the stop is a constant factor, not the missing
 piece. The four exit studies now agree that the open question is the **persistence** of the edge,
 not its geometry.
+
+## 19. Amendment 10 — a parity certificate covers the STRATEGY, and the account layer has its own
+##      stance (2026-09-22, registered with the measurement it describes)
+
+**The gap, stated as a defect of this protocol rather than of the arm.** Every parity pass pins
+`InpPropGuard=false`, `InpRiskPercent=1.0`, `InpMagic=7801001` and `InpArmTag=M1`, and it must: the
+python engine of record is a BAR model of the strategy, and the governor is an account-level layer
+it does not model, so a pass with the gate on would report a rule difference as an engine
+difference. The consequence was never written down where it could be read: **no certificate said
+anything about the configuration the arm actually runs.** MEASURED 2026-09-22 on the arm's first
+fill, the 0.25 % sizing and the governor existed only in (a) the preset and (b) a read-only probe
+(`verify_sizing_live`). "The live configuration is certified" was false by construction, and a
+pass that pins the account layer off cannot be cited for it.
+
+**The rule, from here.** A parity certificate covers **engine equivalence at the pinned strategy
+contract**. It must say so in its own artifact (`the_layer_this_parity_pass_still_cannot_cover`)
+and must not be quoted for the arm's sizing or its governor. The account layer is certified by a
+**second pass in the arm's own stance** (`midas_parity.py --live-stance`), which:
+
+1. reads the account layer from the preset the arm is launched with, and **refuses** if the preset
+does not declare it or does not arm — a harness default would be a second declaration of the arm's
+risk, which is the failure mode this whole file exists to prevent;
+2. moves **nothing else**: the session, the window pins, the news stance and the trigger threshold
+are byte-identical to the strategy contract (pinned by tests, not asserted in prose);
+3. grades every closed fill against the **python mirror** of the EA's sizing (`size_like_ea`, itself
+pinned against the MQL5 it mirrors) at the equity that fill actually had, and reads the row's own
+configured-risk token against the preset's percent;
+4. models the governor's **entry** rules on the pass's own equity path and cross-checks them against
+the entries the arm took — a modelled refusal that coincides with an entry is a DISAGREEMENT;
+5. reports a rule that never bound as **VACUOUS**, in that word, and names what it does not model.
+   *"The governor behaved"* and *"the governor was never asked"* are different claims and only one
+   of them is evidence.
+
+**Applied 2026-09-22 (v1.25, `--window tickcov --live-stance`, real ticks).** ACCOUNT LAYER **PASS**:
+7 closed fills, every one sized the way the declared rule sizes it at its own equity, 5 of 7 floored
+to the venue's minimum lot, the `cfg=` token matching the preset's 0.25 %; governor **VACUOUS**
+(largest day drawdown 0.318 % of the 3 % cap), with the trailing shield floor and intrabar equity
+excursions declared **not modelled**. Recorded in `artifacts/live/armed.json` beside the strategy
+certificate, in the same artifact (`artifacts/midas_parity_result_20260922_1654.json`).
+
+**What this does not do.** It does not validate the strategy, and it does not turn a VACUOUS
+governor leg into a certified one: the window that exercises the cap is still owed. The venue's
+criteria remain **FAILED** and the account remains an operator override.
+
+## 20. Amendment 11 — the governor is certified on a threshold DERIVED to bind, read off the
+##      ungoverned path (2026-09-22)
+
+**The gap.** Amendment 10's governor leg answers *"would a declared rule have refused an entry the
+arm took?"* and, on every certified window, answers **VACUOUS** — the largest day drawdown in the
+12-day `tickcov` window is 0.318 % of a 3 % cap. A leg that can only ever say *"never asked"* is
+honest and is not a certificate. Two ways out were available: change the strategy so a window binds
+it (out of the question — that is selecting data), or **ask the rule a question it has to answer by
+choosing a threshold derived to bind**, which is a stress and must be labelled as one.
+
+**The rule, from here.** `midas_parity.py --live-stance --governor-stress` adds a second,
+**stress-scoped** account-layer leg, run in two passes on the arm's own window and tick model:
+
+1. **`LSU` — the governor OFF.** The arm's live path with `InpPropGuard=false`, so the equity path
+   is the strategy's own sequence. **The prediction is read from this pass and nowhere else**, and
+   that is the whole validity of the leg: a prediction read off a *governed* pass has the refused
+   entries missing already, so its `must_be_present` set is empty by construction and an
+   OVER-refusal — the failure a governor actually produces — could never be detected. Reading it
+   off the ungoverned path is what makes the audit falsifiable, and a test asserts that set is not
+   empty.
+2. **The threshold is DERIVED, not chosen, and it is derived from WHERE AN ENTRY REMAINS:**
+   `cap = truncate to 2dp the largest day drawdown that is still followed by another entry on that
+   day`. The first rule tried was *half the largest day drawdown*, and MEASURED 2026-09-22 it came
+   back **NO-BIND**: the arm's largest day drawdown (0.318%) lands on the day's **last** fill, so
+   its breach refuses nothing. The usable close is 0.1186% on 2026-09-11 07:15Z, from which the
+   2026-09-11 14:00Z entry — and only it — must be refused. A cap that binds with nothing after it
+   is not a threshold, and a number picked by hand would be a number chosen after the result was
+   known; the skipped closes are named in the artifact rather than dropped.
+3. **`LSG` — the governor ON at it.** The check has three clauses, each naming its own failure: an
+   entry the mirror says the cap refuses and the governed EA **took anyway**; an entry the mirror
+   says survives and the governed pass **does not hold** (over-refusal); and an entry that appears
+   in the governed pass and was **never on the ungoverned path** — which a governor that can only
+   refuse can never produce, and which is therefore the quietest of the three. An entry tapped on
+   the breaching bar itself is **named** (`boundary`) and scored neither way.
+
+4. **The ledger each pass wrote is on the record** (path, sha256, mtime) and **a ledger older than
+   the pass that should have written it is REFUSED**, never graded. The tester agent writes ONE file
+   per arm tag, so a pass that writes nothing leaves the previous pass's ledger in place — and a
+   newest-by-mtime lookup would then grade a pass against itself and report it as a certificate.
+
+**The verdict is `GOVERNED-PASS` / `GOVERNED-FAIL` / `NO-BIND` / `REFUSED`, and it is never quoted
+as the shipping threshold.** The artifact carries, in the stress leg's own `derivation`, the
+shipping cap beside the stress one and the flag `this_is_a_stress_threshold_not_the_shipping_one`;
+the shipping `VACUOUS` verdict stays where it is, unchanged. A `GOVERNED-FAIL` fails the run; a
+`NO-BIND` does not, because *"this window cannot ask the question"* is already what the live stance
+says out loud.
+
+**Applied 2026-09-22 (v1.26, `--window tickcov --live-stance --governor-stress`, real ticks).**
+**GOVERNED-PASS** at a derived **0.11%** cap, in two passes on distinct ledgers (LSU `34474511`, 7
+closed fills; LSG `04201b95`, 6): from the ungoverned path the mirror predicted exactly one refusal,
+the 2026-09-11 14:00Z entry, and the governed EA took **none** of the predicted refusals while
+holding **all six** entries the mirror said would survive — `refused_as_predicted 1 /
+refused_but_taken 0 / survived_as_predicted 6 / lost_without_prediction 0 / unexpected_entries 0`.
+The ungoverned pass took the **same** entries as the shipping stance, which is the same statement
+from the other side. Artifact `artifacts/midas_parity_result_20260922_1743.json`.
+
+**And verifying it caught a model error that no failure would have surfaced.** The stance read the
+best-day cap as `account x InpPropBestDayPct` — **$5,000/day** — while the EA's own
+`PropDayProfitCapUsd()` is `size x InpPropTargetPct/100 x InpPropBestDayPct/100` = 5 % x 20 % =
+**$250/day**, the number the chart prints. A model that under-states a cap by a factor of twenty
+cannot see it bind, so its **VACUOUS** verdict was a false NEGATIVE wearing the clothes of evidence —
+named here because *"the model agreed with the arm"* is exactly the kind of claim this file exists to
+refuse. Corrected (and re-certified, amendment 8): the window's best day is **+$78.23 = 31.3 % of the
+$250 cap**, where the $5,000 model made the same day read as 1.6 %. The **rule** for models in this
+file, from here: a cap that is derived from another input must be computed from the other input, the
+basis must be written into the artifact (`best_cap_basis`), a preset that cannot supply it must be
+**refused rather than guessed**, and the python mirror must be pinned by a test against the EA's own
+function body so the two cannot state different rules.
+
+**What this does not do.** It does not move the shipping 3 % cap, does not make the shipping window
+bind (the shipping leg stays **VACUOUS**), does not model the trailing shield floor, and does not
+validate the strategy. It certifies the governor's **machinery at a binding threshold** — that the
+EA and the mirror describing it agree on which entries the rule refuses and which it leaves alone.
+
+## 21. Amendment 12 — the SHIPPING 3 % daily cap is certified at a DERIVED RISK, on the PASS'S OWN
+##      day clock (2026-09-22)
+
+**The gap amendment 11 left.** It certified the governor at a threshold *derived to bind*, which by
+construction is not the threshold the arm runs. So the 3 % number in the preset was still
+unexercised, and "the governor is certified" was a claim about the machinery with the number
+substituted. This amendment closes that: the cap stays at **3 %**, and the quantity that moves is
+the **risk per trade** — because a daily-loss cap is a percentage of the day's opening equity and
+the only way a 3 % day becomes reachable on this window is for one trade to be worth more of it.
+
+**Why a construction is the only option here, measured.** On the tick-covered window (the only span
+this venue serves real ticks for, so the only one a pass may be certified on) the arm's live path
+makes **7** closed fills, no day holds more than two of them, and the largest day drawdown still
+followed by an entry is **0.583R**. At the arm's own realised risk per trade that is **0.14 % of the
+day's opening equity** — a 3 % day would take **~19 consecutive full stops inside one UTC day** on
+the *live* path (and ~13 on the python path's shallower one, per the live stance's own note). The
+window cannot be widened instead: every candidate outside the venue's real-tick span is demoted to
+REFUSED by `recorded_verdict`. So the lever is the risk, and **R is risk-invariant** — a trade's R
+is its profit over its own risk, and the entry, the stop distance, the target and the timeout all
+decide themselves without reference to lot size. Raising the risk per trade therefore moves *when*
+the rule binds and the order of **nothing**: the certified path took exactly the same entries as the
+shipping stance (`same_entries_as_the_shipping_stance: true`), which is the control that says this
+is a stress of the same strategy rather than a second one.
+
+**The result.** `midas_parity.py --live-stance --breaker-stress`, two passes on the same window and
+tick model in the arm's own stance: **`BSU`** with the governor OFF at the derived risk (the path a
+prediction may be read from) and **`BSG`** with it ON at the **shipping 3 %**. Derived risk
+**6.18 %/trade** = 3 % over that 0.583R day (5.148 % exactly) carried at a declared 1.2 margin for
+the venue's lot step. Verdict **GOVERNED-PASS**: the mirror predicted **one** refusal — 2026-09-11
+07:15Z breaches, the 14:00Z entry must be absent — the governed EA took **none** of the predicted
+refusals while holding **all six** it said would survive, and produced no entry that was not on the
+ungoverned path (`refused_as_predicted 1 / refused_but_taken 0 / survived_as_predicted 6 /
+lost_without_prediction 0 / unexpected_entries 0`). The rule-attribution is the pass's own: the
+governed ledger has **6** closed fills against the ungoverned **7** (ledger shas `0098144c` vs
+`737cf121`), the missing row is exactly the predicted `LOPEN,1789142400,...`, and the EA's journal
+vetoes that entry with `PROP VETO: daily-loss cap (3%)`. Artifact
+`artifacts/midas_parity_result_20260922_1843.json`; recorded in `armed.json` amendment 9.
+
+**Two modelling defects the leg found, both by failing first, both fixed rather than explained.**
+
+1. **The derivation was read off the wrong path.** The first attempt derived the risk from the
+   python engine of record — the certified arithmetic — and came back **NO-BIND** (artifact
+   `..._1822.json`): the python bar model takes **9** trades where the live path takes **7**, and its
+   worst usable day (**2026-09-15**) is a day the live path never trades at all. A threshold derived
+   from a market the pass does not walk is not a stress of that pass. The derivation now reads the
+   **live stance's own fills** (the same path, already measured in the same run) and names them as
+   its source.
+2. **The day anchor is not a close-walk's anchor, and the day is not UTC.** `PropDayAnchorCheck()`
+   takes `AccountInfoDouble(ACCOUNT_EQUITY)` on the first tick of the new day, so a position carried
+   across the boundary contributes its **floating P&L** to the day's opening equity — which a
+   closed-trade walk cannot see, and which is what makes the *smaller*-anchor direction the safe one.
+   Worse, `TimeUTCNow()` returns `TimeGMT()`, and **inside the strategy tester `TimeGMT()` is the
+   venue's clock**: the pass rolls its day at **server** midnight (UTC 22:00 here) while the live arm
+   rolls at true UTC midnight. MEASURED, twice over: the pass prints `STALE feed` at 00:00:00
+   **server** on every day of the window, and solving its own `DAILY BREAKER TRIPPED: equity down
+   7.46%` line puts the boundary price at **4321.05** — inside the boundary bar (o 4320.76,
+   h 4324.48, l 4316.11, c 4321.14) and **$3.85** from the previous bar's close (4317.20), which is
+   the number a "close of the bar ending at the boundary" rule would have used. That $3.85 is $108 of
+   floating on the carried size — **0.43 % of equity against a 3 % cap**, i.e. it decides a
+   2.98 %-vs-3.00 % comparison. Hence two rules, both now in `breaker_walk`: the day is the **pass's**
+   day (server midnight, and the artifact says so in `day_clock`), and the boundary floating is
+   marked at the boundary bar's **adverse extreme** (a long at its low, a short at its high), so the
+   walk's day loss is the *smallest* one the bar admits — the direction in which a predicted breach
+   stays predicted whatever the tick inside that bar actually was. That pass-1 (artifact `..._1833`)
+   *did* exercise the cap — the breaker tripped and refused, but at 12:35Z rather than the predicted
+   07:15Z, because under the old model the day's loss at the first close read 3.61 % where the EA's
+   own arithmetic made it **2.98 %**. Reported as **GOVERNED-FAIL** rather than adjusted.
+
+**Limits, named.** The pass's day is the venue's day, so this certifies the rule's arithmetic and
+its refusal path **under the tester's clock**; the live arm's UTC-midnight instant is not certified
+here, and the size per trade in this pass is a **stress input** (6.18 %, not the shipping 0.25 %) —
+the cap, the strategy, the window, the tick model and the entry sequence are the arm's own. The
+trailing shield is *measured* on this path rather than modelled (it never came within **$1,500.00**
+of its floor, and that floor is pinned at the declared size here, so no intrabar high can raise it),
+and the fifth-rule profit ceiling is **switched off by declaration** with what it would have refused
+reported beside it (2 entries, on 2 days) — the isolation is visible rather than convenient. What is
+certified is one rule, at the number the arm runs, with the refusal observed.

@@ -137,7 +137,14 @@ def test_the_readers_offset_is_the_writers_own_row() -> None:
         assert head_fields == ffa.WIRE_OPEN_TELEM_N, (
             f"the OPEN head is {head_fields} fields (including the token); the state reader "
             f"starts at index {ffa.WIRE_OPEN_TELEM_N}")
-        assert f.endswith("%s"), "the state stamp rides as the LAST specifier, never inserted"
+        # v1.25: ONE `%s` for the state stamp AND the configured-risk token, because the writer
+        # passes them as ONE concatenated argument. A second `%s` here is not decoration — it is
+        # the measured defect (`(missed string parameter)` appended to the row) — and the bytes
+        # are identical either way, since each segment starts with its own comma.
+        assert f.endswith("%s"), (
+            "the state stamp and the v1.22 configured-risk token are APPENDED — state first, "
+            "then the keyed cfg token — as one specifier and one argument, never inserted "
+            "into the certified head")
     assert ffa.STATE_N == len(ffa.STATE_FIELDS) == 5
     assert ffa.STATE_FIELDS == ("sig_ct", "hour_utc", "vol_ratio", "news", "off_min")
     # and the LIVE row's own head, for whoever reads the live layer next: the arm tag and
@@ -149,7 +156,10 @@ def test_the_readers_offset_is_the_writers_own_row() -> None:
     # one offset reads either.
     assert lopen[0].count(",") == ffa.WIRE_OPEN_TELEM_N - 1, (
         "the LOPEN head must be the same width as the OPEN head")
-    assert lopen[0].endswith("%s%s%s"), "tag, _FLOORED, then the state stamp"
+    assert lopen[0].endswith("%s%s%s"), (
+        "tag, _FLOORED, then the state stamp with the risk stamp concatenated after it — "
+        "three specifiers for three arguments (v1.25: a fourth asked for an argument that "
+        "does not exist, and MQL5 wrote `(missed string parameter)` into the row)")
 
 
 def test_the_stamp_writes_exactly_five_fields_in_the_declared_order() -> None:
@@ -169,12 +179,63 @@ def test_the_stamp_rides_every_fill_path_and_never_a_tester_run() -> None:
     `LOPEN`/`LCLOSE`. A stamp on the paper writers alone would leave exactly the record that
     matters unlabelled.
     """
-    assert code().count(", StateAppend()") == 3, (
-        "both OPEN writers AND the LOPEN writer must carry the stamp")
+    # Counted on the CONCATENATION, not on a comma: "a comma then StateAppend()" is a
+    # whitespace accident, and this pin read 0 the moment the append moved onto its own line.
+    #
+    # v1.25 SPLIT THE LOPEN TAIL: it is `StateAppend() + EntryPendingAppend() + RiskAppend(...)`,
+    # because the configured-risk token is read OFF THE END OF THE ROW
+    # (`midas_first_fills_audit._split_risk_tail` takes `fields[-1]`), so the `,entry=pending`
+    # token has to sit before it. Asserted as "each of the three writers carries BOTH stamps",
+    # which is the property that matters, rather than as one literal substring.
+    writers = _open_formats() + re.findall(r'"(LOPEN,%[^"]*)"', code())
+    assert len(writers) == 3, f"the three fill writers must all be counted: {writers}"
+    for i, fmt in enumerate(writers):
+        text = code()
+        lit = text.index(f'"{fmt}"')
+        k = text.rindex("(", 0, lit)      # the StringFormat call's OWN parenthesis
+        depth = 0
+        while k < len(text):
+            if text[k] == "(":
+                depth += 1
+            elif text[k] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        args = text[lit:k]
+        assert "StateAppend()" in args, f"writer {i + 1} lost the state stamp: {args}"
+        assert "RiskAppend(" in args, f"writer {i + 1} lost the configured-risk stamp: {args}"
+    assert code().count("EntryPendingAppend()") == 2, (
+        "the unresolved-price token is written by the LOPEN row and read back by the healer")
     b = body("StateAppend")
     assert "InpRecordStateLabel" in b, "off unless the input says otherwise"
     assert "MQL_TESTER" in b, "a tester ledger is a parity artifact: no stamp, by construction"
     assert "g_sig_bar_epoch" in b, "the stamp describes the SIGNAL bar, not the fill bar"
+
+
+def test_the_configured_risk_is_recorded_beside_the_risk_actually_taken() -> None:
+    """The v1.22 contract, pinned where it can actually break.
+
+    A fill row's `risk` field is what the venue's lot step ALLOWED; the `cfg` token is what
+    InpRiskPercent ASKED FOR. On this arm they differ on every single fill ($62.50 configured,
+    $31.84 taken), and a row carrying only the second number cannot be told from a correctly
+    sized one — which is the whole reason the token exists. So: the token is keyed (a reader
+    finds it without counting fields, because the state stamp is 0 or 5 of them), it is appended
+    LAST, it rides every fill path, and no tester row carries it.
+    """
+    r = body("RiskAppend")
+    assert "MQL_TESTER" in r, "a parity ledger is a reproduction artifact: no stamp, by construction"
+    assert "InpRiskPercent" in r, "the configured PERCENT rides with the configured dollars"
+    assert re.search(r'"[^"]*cfg=%\.2f@%\.2f"', r), (
+        "the one grammar: cfg=<usd>@<pct>, unparseable-by-accident is not an option")
+    assert "InpRecordStateLabel" not in r, (
+        "the configured risk is not a research option — it is what the arm was told to risk")
+    # the reader takes it off the END, so it never has to know whether the state stamp is on
+    assert ffa.RISK_PREFIX == "cfg="
+    assert ffa.read_risk_tail(["OPEN", "1", "cfg=62.50@0.25"]).get("cfg_risk_usd") == 62.50
+    assert ffa.read_risk_tail(["OPEN", "1", "LV"]) == {}
+    # a token that cannot be read is REPORTED, never silently dropped
+    assert "malformed" in ffa.read_risk_tail(["OPEN", "1", "cfg=nonsense"])
 
 
 def test_the_source_keeps_the_calendar_the_stamp_reads_alive() -> None:

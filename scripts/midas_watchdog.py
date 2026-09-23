@@ -87,7 +87,7 @@ LIVE_FILLS_UNREADABLE = "account-unreadable"
 
 
 def live_fill_reconciliation(ledger_path: str, *, magic: int,
-                             since: float | None = None) -> dict:
+                             since: float | None = None, reader=None) -> dict:
     """The live ledger against the ACCOUNT's own deal history — two sources, one answer.
 
     WHY A LEDGER IS NOT ENOUGH. On a live arm the paper ledger stops being the record of
@@ -106,12 +106,22 @@ def live_fill_reconciliation(ledger_path: str, *, magic: int,
         unverified from that moment on.
       * `account-unreadable` — the terminal cannot be queried. Unknown is not healthy.
     """
+    # `reader` is the venue side, injectable for the same reason `midas_first_fill_packet`
+    # .venue_deals` takes one: a caller that has already injected a fake account must be able
+    # to inject it HERE too, or the completeness block silently queries the live terminal and
+    # the test around it passes or fails on whether the arm happens to have traded. That
+    # happened: MEASURED 2026-09-22,
+    # `test_first_fill_packet.py::test_no_fills_is_reported_as_nothing_yet` (a synthetic empty
+    # ledger and a fake reader reporting no deals) failed with `ledger-short` as soon as the
+    # arm's first real fill existed, because this function never saw the fake.
+    # `reader(from_dt, until_dt) -> iterable of deal objects`; None means the live terminal.
+    #
     # Row grammar (MidastouchAI.mq5, the LOPEN writer):
     #   LOPEN,<epoch>,<posid>,<order>,<deal>,<dir>,...
     # Both identifiers are kept: `posid` is authoritative on a hedging account and the
     # deal ticket is what `history_deals_get` returns directly, so keying only one of them
     # is how a real fill gets reported as missing. A ledger row matches a deal if EITHER
-    # identifier agrees.
+    # identifier agrees — and the ORDER ticket is one of them, see the reader below.
     ledger: dict[str, str] = {}
     rows = 0
     first_row = ""
@@ -122,32 +132,80 @@ def live_fill_reconciliation(ledger_path: str, *, magic: int,
                 if parts and parts[0] == "LOPEN" and len(parts) > 4:
                     rows += 1
                     first_row = first_row or line.strip()
-                    for ident in (parts[2], parts[4]):
-                        ledger[ident] = parts[1]
+                    # EVERY identifier the row can carry, and only the ones that ARE one.
+                    # MEASURED 2026-09-22 on the arm's FIRST REAL FILL (a netting account):
+                    #   LOPEN,1790092800,0,18874164,0,-1,...   ->   posid=0, order=18874164, deal=0
+                    # with the venue holding position_id=18874164 and ticket=18137411 for the
+                    # same fill. The EA writes LOPEN as the fill is acknowledged, and on netting
+                    # `g_lv_posid`/`g_lv_deal` are not resolvable yet — the EA's own print says
+                    # so ("IDs will reconcile on the next tick") — so the ORDER ticket is the
+                    # only identifier in the row, and on netting pos == order. Reading parts[2]
+                    # and parts[4] alone keyed this row on ("0", "0"), matched nothing, and
+                    # returned `ledger-short` — the ALARM state, whose text is "every R derived
+                    # from this ledger is unverified" — on a fill the ledger had recorded in
+                    # full with an LOPEN and an LCLOSE. That is a standing false alarm on every
+                    # netting fill, not a one-off, and it is the state the watchdog and morning
+                    # status report as unhealthy.
+                    # A ZERO IS NOT AN IDENTIFIER: keying on "0" would match any account deal
+                    # that happens to carry 0, which buys a false MATCH — the worse failure —
+                    # instead of a false alarm.
+                    for ident in (parts[2], parts[3], parts[4]):
+                        if ident and ident != "0":
+                            ledger[ident] = parts[1]
     except OSError as exc:
         return {"state": LIVE_FILLS_NO_LEDGER, "healthy": False, "ledger": 0, "account": 0,
                 "detail": f"live ledger unreadable ({exc}) — nothing verifies the arm"}
 
+    frm = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    if since is not None:
+        frm = datetime.fromtimestamp(since, timezone.utc)
+    until = datetime.now(timezone.utc) + timedelta(days=1)
     try:
-        import MetaTrader5 as mt5  # type: ignore
-        # `history_deals_get` takes datetimes (the integer overload raises inside the
-        # extension) and the terminal must be attached first — same idiom as
-        # scripts/midas_lv_broker_monitor.py, which is the one that runs this live.
-        if not mt5.initialize():
-            raise RuntimeError(f"initialize() failed: {mt5.last_error()}")
-        frm = datetime(2000, 1, 1, tzinfo=timezone.utc)
-        if since is not None:
-            frm = datetime.fromtimestamp(since, timezone.utc)
-        until = datetime.now(timezone.utc) + timedelta(days=1)
-        deals = mt5.history_deals_get(frm, until) or []
+        if reader is None:
+            import MetaTrader5 as mt5  # type: ignore
+            # `history_deals_get` takes datetimes (the integer overload raises inside the
+            # extension) and the terminal must be attached first — same idiom as
+            # scripts/midas_lv_broker_monitor.py, which is the one that runs this live.
+            if not mt5.initialize():
+                raise RuntimeError(f"initialize() failed: {mt5.last_error()}")
+
+            def reader(a, b):        # noqa: E731 — the live source, bound late
+                return mt5.history_deals_get(a, b) or []
+
+        deals = reader(frm, until) or []
+        # ATTRIBUTION BY POSITION, NOT BY THE MAGIC ON THE DEAL (`mt5_ops.attribute_deal`). MEASURED
+        # 2026-09-22 on the arm's own fill: the venue stamped the ENTRY deal with magic 7825001 and the
+        # CLOSING deal with magic 0 (the platform executed it; its reason read MOBILE). A reader that
+        # filters on `deal.magic == ours` therefore loses the close — and with it the whole POSITION
+        # whenever the entry deal falls outside the queried window (`since`), which is precisely the
+        # case this reconciliation exists for: a position that CLOSED recently and whose fill the
+        # ledger must record. The failure is silent by construction: it reports a smaller world rather
+        # than an error. The EA side of the same defect (`PropDayPnlUsd()`) was fixed in v1.25 with the
+        # identical rule; this is the python copy, and it is the last one.
+        ours_positions = R.our_positions_from_deals(deals, magic)
         acct: dict[str, float] = {}
         first_deal: dict | None = None
+        closes_by_position: list[dict] = []
+        unattributed = 0
         for d in deals:
-            if getattr(d, "magic", 0) != magic:
+            how = R.attribute_deal(d, magic, ours_positions)
+            if how is None:
+                unattributed += 1
                 continue
             if since is not None and float(getattr(d, "time", 0)) < since:
                 continue
-            if not first_deal:
+            if how == R.DEAL_BY_POSITION:
+                # A close the platform stamped as somebody else's (or nobody's). Kept and NAMED: this
+                # is the row that used to vanish, and "the close of position X was not stamped with
+                # our magic" is a fact about the venue, not an error.
+                closes_by_position.append({
+                    "position_id": getattr(d, "position_id", None),
+                    "ticket": getattr(d, "ticket", None),
+                    "time": getattr(d, "time", None),
+                    "price": getattr(d, "price", None),
+                    "magic": getattr(d, "magic", None),
+                    "reason": getattr(d, "reason", None)})
+            if not first_deal and how == R.DEAL_BY_MAGIC:
                 first_deal = {"ticket": getattr(d, "ticket", None),
                               "position_id": getattr(d, "position_id", None),
                               "time": getattr(d, "time", None),
@@ -155,9 +213,21 @@ def live_fill_reconciliation(ledger_path: str, *, magic: int,
                               "volume": getattr(d, "volume", None),
                               "symbol": getattr(d, "symbol", None),
                               "type": getattr(d, "type", None)}
-            for ident in (getattr(d, "ticket", None), getattr(d, "position_id", None)):
-                if ident:
-                    acct[str(ident)] = float(getattr(d, "time", 0) or 0)
+            # ONE KEY PER DEAL — the POSITION's identity — because that is the only thing the
+            # ledger row can physically carry at the moment it is written. MEASURED 2026-09-22
+            # on the arm's first real fill: the EA writes LOPEN as the fill is acknowledged,
+            # when on a netting account neither the deal ticket nor the position id is
+            # resolvable yet (the row's `deal` field is 0 and its `posid` is 0), and what IS
+            # present is the opening ORDER ticket — which on netting IS the position id, as the
+            # EA's own print says: "netting: pos==order; hedging: pos_id is authoritative".
+            # Keying this side on the deal ticket as well would therefore demand a field the
+            # row cannot contain and report `ledger-short` on a fill the ledger recorded in
+            # full — a standing false alarm, since it would fire on every such fill. The
+            # position's identity is the same from both sides: position_id here, and any of
+            # posid/order/deal on the ledger side.
+            ident = getattr(d, "position_id", None) or getattr(d, "ticket", None)
+            if ident:
+                acct[str(ident)] = float(getattr(d, "time", 0) or 0)
     except Exception as exc:      # noqa: BLE001 — any failure means "cannot verify"
         return {"state": LIVE_FILLS_UNREADABLE, "healthy": False, "ledger": rows,
                 "account": 0,
@@ -165,21 +235,38 @@ def live_fill_reconciliation(ledger_path: str, *, magic: int,
                           f"verified against the venue, only against its own ledger"}
 
     if rows == 0 and not acct:
+        # A SILENT VERDICT WITH UNATTRIBUTED DEALS PRESENT IS NOT THE SAME AS ONE WITH NOTHING AT ALL.
+        # The state stays healthy — a deal this reader cannot call ours is not evidence about this arm —
+        # but the fact is STATED, because the alternative is a reader that saw things it could not name
+        # and reported the empty-looking state that says "nothing traded yet".
+        extra = ""
+        if unattributed:
+            extra = (f"; {unattributed} deal(s) in the same window could not be attributed to magic "
+                     f"{magic} (an IN deal bearing it, or the close of such a position) — not ours, "
+                     f"and not counted")
         return {"state": LIVE_FILLS_SILENT, "healthy": True, "ledger": 0, "account": 0,
+                "closes_attributed_by_position": closes_by_position,
+                "unattributed_deals": unattributed,
                 "detail": ("no fills yet in either the ledger or the account's own history "
-                           "for this magic — alive and unproven, NOT a health claim")}
+                           "for this magic — alive and unproven, NOT a health claim" + extra)}
     missing = sorted(set(acct) - set(ledger))
     if missing:
         return {"state": LIVE_FILLS_LEDGER_SHORT, "healthy": False, "ledger": rows,
                 "account": len(acct), "missing": missing[:5],
+                "closes_attributed_by_position": closes_by_position,
+                "unattributed_deals": unattributed,
                 "detail": (f"the account holds {len(acct)} identifier(s) for magic {magic} "
                            f"but the ledger records {rows} fill(s) — missing {missing[:5]}; "
                            f"every R derived from this ledger is unverified")}
     return {"state": LIVE_FILLS_MATCHED, "healthy": True, "ledger": rows,
             "account": len(acct),
             "detail": (f"{rows} ledger fill(s) reconciled against {len(acct)} account "
-                       f"identifier(s) for magic {magic}"),
-            "first_ledger_row": first_row, "first_deal": first_deal}
+                       f"identifier(s) for magic {magic}"
+                       + (f"; {len(closes_by_position)} close(s) adopted BY POSITION (the venue did "
+                          f"not stamp them with our magic)" if closes_by_position else "")),
+            "first_ledger_row": first_row, "first_deal": first_deal,
+            "closes_attributed_by_position": closes_by_position,
+            "unattributed_deals": unattributed}
 
 
 #: The durable record of an arm's FIRST real fill — written once, never rewritten.
@@ -239,7 +326,13 @@ def record_first_fill(recs: list[dict], *, now: float | None = None) -> dict | N
                                   "ledger": r["ledger"], "venue": r["venue"]}
                                  for c in packet["fills"] for r in c["rows"]
                                  if r["verdict"] == "DISAGREE"],
-                             "path": os.path.join(REPO, "artifacts", "live",
+                             # BESIDE THE CAPTURE, not at a second hardcoded location
+                             # (2026-09-22, MEASURED): this path used to be absolute, so a
+                             # test that redirected `FIRST_FILL_PATH` to a tmp dir still wrote
+                             # its SYNTHETIC packet into the live record - the file on disk
+                             # read `fill 308417`, a position that never existed, while the
+                             # arm's own fill sat beside it in first_fill.json.
+                             "path": os.path.join(os.path.dirname(os.path.abspath(path)),
                                                   "first_fill_packet.json")}
             try:
                 os.makedirs(os.path.dirname(out["packet"]["path"]), exist_ok=True)
@@ -534,21 +627,30 @@ def ledger_health(ledger: str, now_s: float) -> dict:
                 if not parts or not parts[0]:
                     continue
                 if parts[0] == "OPEN" and len(parts) >= 12:
-                    opens[parts[2]] = ln
+                    opens[R.live_fill_key(parts) or f"line:{ln}"] = ln
                 elif parts[0] == "CLOSE" and len(parts) >= 8:
-                    opens.pop(parts[2], None)
+                    opens.pop(R.live_fill_key(parts), None)
                     res["closed"] += 1
                 elif parts[0] == "LOPEN" and len(parts) >= 14:
                     # 2026-09-18 go-live: the LIVE path appends LOPEN/LCLOSE
-                    # rows (LCLOSE[2] is the posid, matching LOPEN[2]). A
-                    # dangling LOPEN is a LIVE REAL-MONEY position — exactly
-                    # what the flat gate exists to protect. 14 fields per the
-                    # EA v1.16 writer (epoch,posid,order,deal,dir,...); keyed
-                    # on [2] = posid. Pinned to the MQ5 format string by
+                    # rows. A dangling LOPEN is a LIVE REAL-MONEY position —
+                    # exactly what the flat gate exists to protect. 14 fields
+                    # per the EA v1.16 writer (epoch,posid,order,deal,dir,...).
+                    # Pinned to the MQ5 format string by
                     # tests/test_midas_golive_grammar.py.
-                    opens[parts[2]] = ln
+                    #
+                    # KEYED ON THE IDENTITY THE ROW CARRIES, not on [2] alone:
+                    # MEASURED 2026-09-22 on the arm's first real fill, a netting
+                    # account, the EA writes `LOPEN,1790092800,0,18874164,0,-1,...`
+                    # — posid 0 at fill time, the order ticket being the position
+                    # id — whose own LCLOSE carries 18874164. Keying [2] left that
+                    # fill dangling forever, so this gate called a book holding a
+                    # CLOSED trade non-flat (and midas_parity's flat gate then
+                    # refuses to stop the terminal for a certification run).
+                    # See mt5_ops.live_fill_key, the one rule all four readers use.
+                    opens[R.live_fill_key(parts) or f"line:{ln}"] = ln
                 elif parts[0] == "LCLOSE" and len(parts) >= 6:
-                    opens.pop(parts[2], None)
+                    opens.pop(R.live_fill_key(parts), None)
                     res["closed"] += 1
                 elif parts[0] == "ERA":
                     res["eras"] += 1

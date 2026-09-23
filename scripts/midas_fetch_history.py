@@ -167,7 +167,20 @@ def main(argv: list[str] | None = None) -> int:
                          "(e.g. --suffix _upcomers)")
     ap.add_argument("--terminal", default=None,
                     help="explicit terminal64.exe (default: resolve the live install)")
+    # ADDED 2026-09-22 for the cross-asset structural study (docs/CROSS_ASSET_DIVERGENCE_PREREG_20260922.md).
+    # The DEFAULT is unchanged — gold only — because `SYMBOLS` is what every existing artifact's
+    # provenance was fetched under, and a fetch that silently widened would make an old artifact's
+    # "which series is of record" ambiguous. A context symbol is named explicitly, on purpose.
+    ap.add_argument("--symbols", default=None,
+                    help="comma-separated symbols to fetch (default: the module's own SYMBOLS, "
+                         "i.e. gold only). A context series is fetched with this, never by editing "
+                         "SYMBOLS: e.g. --symbols AUDUSD --suffix _upcomers")
     args = ap.parse_args(argv)
+    fetch_symbols = ([s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+                     if args.symbols else SYMBOLS)
+    if not fetch_symbols:
+        print("FAIL: --symbols was empty")
+        return 2
 
     global TERMINAL_EXE
     TERMINAL_EXE = args.terminal or _resolve_install()
@@ -196,6 +209,8 @@ def main(argv: list[str] | None = None) -> int:
             "currency": getattr(ai, "currency", None),
             "balance": getattr(ai, "balance", None),
             "suffix": args.suffix,
+            "symbols_requested": fetch_symbols,
+            "symbols_default_unchanged": args.symbols is None,
             "resolution": "mt5_ops.terminal_exe() by account identity",
         }
         print(f"install   : {provenance['terminal_path']}  (build {provenance['terminal_build']})")
@@ -209,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
         # share. Research runs on M15/H1; D1 never gates the verdict.
         REFERENCE_ONLY = {"D1"}
         ok_all = True
-        for sym in SYMBOLS:
+        for sym in fetch_symbols:
             report["symbols"][sym] = {}
             for tf_name, tf in TFS.items():
                 if not warm_up(mt5, sym, tf):

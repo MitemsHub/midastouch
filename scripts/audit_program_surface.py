@@ -66,6 +66,12 @@ LIVE_ENTRY_POINTS = (
     "check_wip_liveness.py",
     # the era classifier the ledgers are read through
     "era.py",
+    # the scheduled supervisor itself (2026-09-22): the task that runs with nobody signed
+    # in, records one coverage heartbeat per pass (live_coverage) and verifies its own
+    # schedule (unattended) and host (host_power). Leaving it out of this list made the
+    # three modules that answer "was anything watching at 03:00" read as residue, which is
+    # the opposite of true — they are the live surface's own evidence.
+    "paper_supervisor.py",
     # this audit is itself part of the live surface: without it listed here it
     # reports itself as residue, which trains the reader to ignore the report
     "audit_program_surface.py",

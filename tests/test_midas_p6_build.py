@@ -234,10 +234,12 @@ def test_deployer_verify_arms_a_v120_ledger(tmp_path):
         "ERA,MIDAS1.19,100,pertick-fills+telemetry-only-per-V2-register+diag-nofill+p6-entrytf\n"
         "ERA,MIDAS1.20,101,pertick-fills+telemetry-only-per-V2-register+diag-nofill"
         "+p6-entrytf+diag-census\n"
+        "ERA,MIDAS1.21,102,pertick-fills+telemetry-only-per-V2-register+diag-nofill"
+        "+p6-entrytf+diag-census+state-view\n"
         "EQ,50.00\n", encoding="utf-8")
     os.utime(p, (now, now))
     v = dep.verify_arms(tmp_path, min_epoch=now - 60)
-    assert v["M1"] == "ok", "a v1.20-era paper ledger must verify"
+    assert v["M1"] == "ok", "a v1.21-era paper ledger must verify"
 
 
 def test_deployer_verify_arms_v119_ledger(tmp_path, monkeypatch):

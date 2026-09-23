@@ -77,10 +77,13 @@ def test_every_position_touch_is_isolated() -> None:
     """All position-API touch sites live inside the sanctioned functions:
     SelectOurPosition (adoption), ResolveLiveIds (post-selection ID
     resolution), LiveClosePosition (verified close), LiveCheckExits
-    (verified exit reconciliation), LiveRecoverState (restart adoption)."""
+    (verified exit reconciliation), LiveRecoverState (restart adoption),
+    ResolveEntryPriceById (the v1.25 fill-price resolver — it verifies symbol
+    AND magic before it reads anything, and returns false rather than a price
+    when the identity is not one this EA claims)."""
     code = strip_comments(src())
     sanctioned = ("SelectOurPosition", "ResolveLiveIds", "LiveClosePosition",
-                  "LiveCheckExits", "LiveRecoverState")
+                  "LiveCheckExits", "LiveRecoverState", "ResolveEntryPriceById")
     for fn in sanctioned:
         body(fn)  # must exist
     # every occurrence must sit inside one of the sanctioned bodies
@@ -110,13 +113,41 @@ def _inside_body(code: str, fn_name: str, at: int) -> bool:
 
 # --- invariant 2: history selection is posid-only ------------------------------
 
-def test_history_select_only_receives_g_lv_posid() -> None:
+def test_history_select_only_receives_identities_we_claim() -> None:
+    """THE INVARIANT IS OWNERSHIP, AND IT IS NOW NAMED THAT WAY (v1.25).
+
+    The original pin required the literal `g_lv_posid`, which was true while the only caller
+    was the exit reconciler. Two honest callers arrived with fixes the arm's own fill demanded:
+    `ResolveEntryPriceById` (which must reach the fill's history while the globals are still
+    empty — at the ack, `g_lv_posid` is 0) and `PositionHasOurEntry` (whose whole body IS the
+    ownership test, because the venue stamps the CLOSING deal with magic 0). So the rule the
+    pin now enforces is the one that actually protects the account: an argument is either state
+    we hold, or a parameter of a function that PROVES the identity is ours before selecting.
+    """
     code = strip_comments(src())
-    calls = re.findall(r"\bHistorySelectByPosition\s*\(\s*([^)]*?)\s*\)", code)
+    held = ("g_lv_posid", "g_lv_order")           # identities this EA tracks as its own
+    verifying = ("ResolveEntryPriceById", "PositionHasOurEntry")
+    calls = list(re.finditer(r"\bHistorySelectByPosition\s*\(\s*([^)]*?)\s*\)", code))
     assert calls, "live reconciliation must select history by position"
-    for args in calls:
-        assert args.strip() == "g_lv_posid", \
-            f"HistorySelectByPosition must receive g_lv_posid, got: {args!r}"
+    for m in calls:
+        arg = m.group(1).strip()
+        if arg in held:
+            continue
+        for fn in verifying:
+            body(fn)                              # must exist
+        owner = next((fn for fn in verifying if _inside_body(code, fn, m.start())), None)
+        assert owner, (f"HistorySelectByPosition({arg}) is neither held state nor a parameter "
+                       f"of an ownership-verifying selector")
+        b = strip_comments(body(owner))
+        assert "PositionHasOurEntry(" in b or "InpMagic" in b, \
+            f"{owner} must prove the identity is OURS before selecting its history"
+    # and the plain held-state calls are still the literal, so a rename cannot hide one
+    literal = [m.group(1).strip() for m in calls]
+    assert literal.count("g_lv_posid") >= 2, (
+        "the exit reconciler and the entry-deal resolver select OUR position by g_lv_posid")
+    assert "key" in literal, (
+        "the fill-price resolver selects the identity the fill row carries (posid, or the "
+        "order ticket that IS the posid on netting) — see the v1.25 note in the EA")
 
 
 def test_history_deal_filter_matches_the_position_id() -> None:

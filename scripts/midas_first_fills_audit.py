@@ -34,6 +34,13 @@ Per closed trade, verified against the frozen rules:
                      vol_ratio, news, off_min) read but never required — a row
                      written before the stamp existed carries none, and a tester row
                      never will, while a HALF-WRITTEN tail is reported.
+  F. risk basis    — the v1.22 configured-risk stamp (`cfg=<usd>@<pct>`, appended last
+                     on every fill row) read and DISCLOSED beside the row's own `risk`
+                     field. Never graded: whether the venue's lot step can express the
+                     arm's configured budget is a property of the venue, not a rule the
+                     arm can violate — but the two numbers drifting apart is exactly what
+                     an operator has to be able to see, and before v1.22 the row carried
+                     only the second one.
 
 Exit codes: 0 compliant (or nothing closed yet), 1 violations, 2 unreadable.
 Stdlib + the engine's own loaders only.
@@ -92,6 +99,86 @@ WIRE_OPEN_TELEM_N = 14
 #: re-typing it — `gold_persistence_state.STATE_FIELDS` is this tuple.
 STATE_FIELDS = ("sig_ct", "hour_utc", "vol_ratio", "news", "off_min")
 STATE_N = len(STATE_FIELDS)
+#: The v1.22 configured-risk stamp: ONE KEYED token, appended LAST on every fill row, after
+#: the state stamp. Keyed and not positional on purpose — the state stamp is 0 fields (label
+#: off, or a tester row) or exactly STATE_N, so "the next two fields" cannot be told apart
+#: from a half-written state stamp. `cfg=<usd>@<pct>` starts with a letter and so can never
+#: be mistaken for a state field.
+RISK_PREFIX = "cfg="
+RISK_FIELDS = ("cfg_risk_usd", "cfg_risk_pct")
+#: The v1.25 UNRESOLVED-PRICE token, and the row that amends it. MEASURED 2026-09-22 on the
+#: arm's first real fill: the EA took the entry price from `ResultPrice()` at the instant of
+#: acknowledgement, when on this venue that field is 0, and wrote `LOPEN,...,0.00000,...` — a 0
+#: in a PRICE COLUMN, which every reader reads as a price (this module's own packet reported
+#: `entry price: ledger 0.0 vs venue 4333.07` for the rest of the fill's life). The row now
+#: carries the keyed token `,entry=pending` instead of a lying zero, and
+#: `LENTRY,<epoch>,<identity>,<price>,<source>` amends it the moment the venue reports one. The
+#: token rides BEFORE the configured-risk token because that one is read off the END of the row.
+PENDING_PREFIX = "entry="
+ENTRY_ROW = "LENTRY"
+ENTRY_ROW_N = 5
+
+
+def _split_risk_tail(fields: list[str]) -> tuple[dict, list[str]]:
+    """(configured-risk stamp, the rest of the tail) — the one place the token is removed,
+    so the state reader and the risk reader can never disagree about where the tail starts."""
+    if not fields or not fields[-1].startswith(RISK_PREFIX):
+        return {}, fields
+    usd, _, pct = fields[-1][len(RISK_PREFIX):].partition("@")
+    try:
+        return {"cfg_risk_usd": float(usd), "cfg_risk_pct": float(pct)}, fields[:-1]
+    except ValueError:
+        return {"malformed": f"unreadable configured-risk token {fields[-1]!r}"}, fields[:-1]
+
+
+def read_risk_tail(fields: list[str]) -> dict:
+    """The v1.22 configured-risk stamp from an OPEN row, {} when the row carries none.
+
+    ABSENCE IS NOT A DEFECT, exactly as for the state stamp: every row written before v1.22
+    has none, and a strategy-tester row never will (the stamp is off there so certified parity
+    ledgers stay byte-identical). A row that DOES carry it and cannot be read is reported.
+    """
+    return _split_risk_tail(fields)[0]
+
+
+def read_entry_pending(fields: list[str]) -> dict:
+    """The v1.25 unresolved-price token from a fill row: `{"entry_pending": True}` or `{}`.
+
+    ABSENCE IS NOT A DEFECT — every row written before v1.25 has none, and a row whose price was
+    resolved at write time never will. Presence is not a defect either: it is the row saying
+    "this price is not known yet, do not read the field as one", which is strictly better than
+    the 0 it used to carry. The AMENDMENT is what turns it into a price, and `read_entry_rows`
+    below is where that comes from.
+    """
+    for f in fields:
+        if f.startswith(PENDING_PREFIX):
+            return {"entry_pending": True}
+    return {}
+
+
+def read_entry_rows(lines: list[str]) -> dict:
+    """`identity -> the LENTRY amendment that prices it`, from a ledger's raw lines.
+
+    The amendment is keyed by the SAME identity the fill row carries (posid on a hedging
+    account, the order ticket on netting where it IS the position id, the entry deal as a last
+    resort), so a reader pairs them without knowing which of the three answered. First win:
+    an identity is amended once, and a reader that finds two is looking at a double write.
+    """
+    out: dict[str, dict] = {}
+    for ln, line in enumerate(lines, 1):
+        p = line.strip().split(",")
+        if len(p) < ENTRY_ROW_N or p[0] != ENTRY_ROW:
+            continue
+        ident = p[2].strip()
+        if not ident or ident == "0":
+            continue
+        try:
+            px = float(p[3])
+        except ValueError:
+            continue
+        out.setdefault(ident, {"line": ln, "epoch": int(p[1]), "price": px,
+                               "source": p[4].strip()})
+    return out
 
 
 def read_state_tail(fields: list[str]) -> dict:
@@ -109,7 +196,7 @@ def read_state_tail(fields: list[str]) -> dict:
     and `hour_utc == -1` means no server offset could be vouched for; a consumer that needs either
     axis must REFUSE on those values rather than default them, because `na` is not `out`.
     """
-    tail = fields[WIRE_OPEN_TELEM_N:]
+    _risk, tail = _split_risk_tail(fields[WIRE_OPEN_TELEM_N:])
     if not tail:
         return {}
     if len(tail) < STATE_N:
@@ -186,10 +273,13 @@ def read_ledger(path: str) -> dict:
                         "side": int(p[3]), "entry": float(p[4]), "sl": float(p[5]),
                         "tp": float(p[6]), "vol": float(p[7]), "risk": float(p[8]),
                         "stop_d": float(p[9]), "hold": int(p[10]), "tag": p[11],
-                        "state": read_state_tail(p),
+                        "state": read_state_tail(p), "cfg_risk": read_risk_tail(p),
                     }
                     if "malformed" in open_rows[p[2]]["state"]:
                         problems.append(f"line {ln}: state stamp {open_rows[p[2]]['state']['malformed']}")
+                    if "malformed" in open_rows[p[2]]["cfg_risk"]:
+                        problems.append(
+                            f"line {ln}: configured-risk stamp {open_rows[p[2]]['cfg_risk']['malformed']}")
                 elif p[0] == "CLOSE":
                     if len(p) < WIRE_CLOSE_N:
                         problems.append(f"line {ln}: CLOSE row has {len(p)} fields (<{WIRE_CLOSE_N})")
@@ -305,7 +395,30 @@ def audit_trade(t: dict, session: tuple[int, int] | None, stop_mult: float,
     # D. veq continuity
     if abs((t["prev_veq"] + t["pnl"]) - t["close_veq"]) > TOL_VEQ:
         v.append(f"VEQ: close veq {t['close_veq']:.2f} != prev {t['prev_veq']:.2f} + pnl {t['pnl']:+.2f}")
+    # F. the risk basis — DISCLOSED, never graded. The row's own `risk` field is the risk the
+    #    fill actually took; the v1.22 stamp carries what the arm was CONFIGURED to risk. They
+    #    differ whenever the venue's lot step cannot express the budget, in either direction:
+    #    QUANTISED DOWN (the floor lot risks less than configured — this arm's standing case)
+    #    or OVERSHOOT (the floor lot risks more, which amendment 6 still permits while it stays
+    #    under InpMaxRiskPct). Grading either as a violation would need the preset, and the
+    #    preset is not what this audit reads; so it says the numbers and lets the operator see.
+    t["risk_note"] = risk_basis_note(t)
     return v
+
+
+def risk_basis_note(t: dict) -> str:
+    """One honest sentence about configured vs actual risk on a trade, or "" when unstated."""
+    cfg = t.get("cfg_risk") or {}
+    if "cfg_risk_usd" not in cfg:
+        return ""
+    cfg_usd, pct, act = cfg["cfg_risk_usd"], cfg["cfg_risk_pct"], t["risk"]
+    if cfg_usd <= 0:
+        return f"configured risk ${cfg_usd:.2f} ({pct:.2f}%) is not a budget — stamp unusable"
+    gap = act - cfg_usd
+    word = ("QUANTISED DOWN" if gap < -0.005
+            else "OVERSHOOT" if gap > 0.005 else "AS CONFIGURED")
+    return (f"configured ${cfg_usd:.2f} ({pct:.2f}% of the row's own risk basis) | "
+            f"took ${act:.2f} | {word} ({gap:+.2f})")
 
 
 def run(ledger: str, session: tuple[int, int] | None, stop_mult: float,
@@ -341,6 +454,8 @@ def run(ledger: str, session: tuple[int, int] | None, stop_mult: float,
             "trades": [
                 {"i": i, "open_ct": t["open_ct"], "side": t["side"],
                  "reason": t["reason"], "r": t["r"], "pnl": t["pnl"],
+                 "risk": t["risk"], "cfg_risk": t.get("cfg_risk", {}),
+                 "risk_note": t.get("risk_note", ""),
                  "stop_note": t.get("stop_note", ""),
                  "frame_note": t.get("frame_note", ""), "violations": vs}
                 for i, t, vs in rows],
@@ -358,6 +473,8 @@ def run(ledger: str, session: tuple[int, int] | None, stop_mult: float,
                   f"pnl {t['pnl']:+.2f} | {t.get('stop_note','')}")
             if t.get("frame_note"):
                 print(f"      note: {t['frame_note']}")
+            if t.get("risk_note"):
+                print(f"      risk: {t['risk_note']}")
             for x in vs:
                 print(f"      VIOLATION: {x}")
         for p in led["problems"]:
@@ -365,6 +482,17 @@ def run(ledger: str, session: tuple[int, int] | None, stop_mult: float,
         if rows:
             print(f"  summary: {len(rows)} closed, {n_bad} with violations, "
                   f"veq {led['veq_end']:.2f}")
+            stamped = [t for t in (r[1] for r in rows) if "cfg_risk_usd" in (t.get("cfg_risk") or {})]
+            if stamped:
+                down = sum(1 for t in stamped
+                           if t["risk"] - t["cfg_risk"]["cfg_risk_usd"] < -0.005)
+                over = sum(1 for t in stamped
+                           if t["risk"] - t["cfg_risk"]["cfg_risk_usd"] > 0.005)
+                print(f"  risk basis: {len(stamped)}/{len(rows)} fills carry the configured "
+                      f"risk (v1.22 stamp) — {down} quantised down, {over} oversized")
+            elif rows:
+                print("  risk basis: no fill carries the v1.22 configured-risk stamp — this "
+                      "ledger predates it, so the configured-vs-taken gap is not in the record")
         if not h1:
             print(f"  note: the venue's own H1 not found at {h1_path} — stop checks "
                   f"UNVERIFIABLE (fetch it with scripts/midas_fetch_history.py --suffix _upcomers)")

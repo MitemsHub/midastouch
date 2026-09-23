@@ -249,7 +249,18 @@ def test_the_veto_window_is_declared_as_a_bar_comparison_not_a_certificate():
     spec = P._window_spec("veto")
     assert spec["model"] == "1" and "1" not in T.REAL_TICK_MODEL_CODES
     assert spec["corpus"] == "venue", "the window's whole point needs one market"
-    assert spec["server_offset_min"] == 120
+    # The offset must be DECLARED (None means the window cannot be put on one clock, and such a
+    # window must refuse rather than be read as UTC) AND declared correctly: checked against the
+    # measured era table rather than against a literal. It used to be pinned as the literal 120,
+    # which was this window's era when it sat in May; the window moved to March (+60) on
+    # 2026-09-22 (the trigger threshold changed and the old window stopped exercising the
+    # stand-down — see midas_parity's WINDOW_SPECS comment), and a literal would have gone on
+    # passing for the wrong reason.
+    assert spec["server_offset_min"] is not None
+    month = spec["dates"][0].replace(".", "-")[:7]
+    assert spec["server_offset_min"] == M.server_offset_for_month(month), (
+        f"the window declares {spec['server_offset_min']} min but {month} measures "
+        f"{M.server_offset_for_month(month)} — a window on one clock, or none")
     assert T._tick_date(spec["dates"][0]) < T._tick_date("2026.09.04"), \
         "the re-declaration is required because the venue has no real ticks there"
     verdict, why = P.recorded_verdict(
@@ -366,6 +377,18 @@ def test_the_veto_window_contains_entries_the_stand_down_removes():
     corpus and no longer describes what this window runs; pinning a stale instant as if it
     were the rule is how a passing test stops meaning anything.
 
+    RE-MEASURED AND THE WINDOW RE-CHOSEN 2026-09-22 (bounds 2026-03-15..20 UTC, entry removed:
+    2026-03-19 19:45), because the trigger threshold moved with the contract (BBDev 2.0 ->
+    1.5) and the SIGNAL SET moves with it: in the old window the stand-down then refused
+    nothing at all (measured: off_n=5, on_n=5, news_vetoed=0, removed={}), so the window had
+    stopped being a veto path — which this test's own docstring says must be re-chosen rather
+    than asserted around. The replacement was found by sweeping every 5-day window of the
+    venue's span AT ITS ERA'S OWN CLOCK and keeping only those that refuse >=1 signal, remove
+    an entry and add none: exactly one week survives, so the choice was between starts of that
+    week. (The first sweep answered June; that was the sweep's own clock error — every window
+    run at +60 when June is +120 — and the June window reports vetoed=0 at its asserted offset.
+    Both readings are recorded in midas_parity's WINDOW_SPECS comment.)
+
     Nothing is ADDED by switching the gate on — a refused entry must not move the strategy to
     different bars, which is what would make this a different bet rather than a veto.
     """
@@ -395,7 +418,7 @@ def test_the_veto_window_contains_entries_the_stand_down_removes():
     removed = {_f(ct) for ct in a - b}
     added = {_f(ct) for ct in b - a}
     assert on.news_vetoed > 0, "the stand-down refused nothing — the window is not a veto path"
-    assert removed == {"2026-05-14 19:45"}, sorted(removed)
+    assert removed == {"2026-03-19 19:45"}, sorted(removed)
     assert not added, f"the gate changed which bars are traded, not just how many: {sorted(added)}"
 
 

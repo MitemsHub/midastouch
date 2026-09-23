@@ -50,9 +50,17 @@ class TestPresetIdentityPure:
         assert not (r["missing"] or r["extra"] or r["drift"] or r["problems"])
 
     def test_value_reformatting_is_drift(self):
-        r = ms.preset_identity(_chart_text({"InpBBDev": "2.00"}))
+        # The reference is the preset's OWN value, read from the pin file (as `_chart_text`
+        # already does for every other key), so this fixture cannot rot when a pin legitimately
+        # moves — which it did on 2026-09-22 (InpBBDev 2.0 -> 1.5, docs/FREQUENCY_AXES_PREREG
+        # _20260922.md). What is asserted is that REFORMATTING is drift; the literal it used to
+        # compare against was pinning the value instead, and went stale the moment the pin moved.
+        want = dict(ln.split("=", 1) for ln in _preset_input_lines())["InpBBDev"]
+        reformatted = f"{float(want):.2f}"
+        assert reformatted != want, "the fixture needs a value whose reformatting differs"
+        r = ms.preset_identity(_chart_text({"InpBBDev": reformatted}))
         assert r["verdict"] == "DRIFT"
-        assert r["drift"] == [("InpBBDev", "2.00", "2.0")]
+        assert r["drift"] == [("InpBBDev", reformatted, want)]
 
     def test_pinned_value_change_is_drift(self):
         r = ms.preset_identity(_chart_text({"InpMode": "2"}))
@@ -136,3 +144,45 @@ class TestMidasSectionIntegration:
         out = capsys.readouterr().out
         assert "preset DRIFT: InpMode=2 (repo pin 0)" in out
         assert healthy is True
+
+
+class TestShadowRecordSection:
+    """[3b.1] quotes the published sweep-shadow artifact — and imports nothing
+    from the research layer, so the surface audit's 0-dangling gate holds."""
+
+    @staticmethod
+    def _artifact(path, **over):
+        import json
+        d = {"harness": "midas_sweep_shadow.py",
+             "ts": "2026-09-23T07:45:00+00:00",
+             "verdict": "ACCUMULATING",
+             "rule": {"variant": "SWEEP_CONT", "n_target": 60},
+             "checks": {"rows_total": 3, "rows_in_window": 3, "coverage": 1.0,
+                        "n_disagreements": 0, "n_unmatched": 0},
+             "forward": {"results": {"SWEEP_CONT": {"n": 0}}}}
+        d.update(over)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        return path
+
+    def test_no_artifact_is_reported_not_fatal(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(ms, "SHADOW_ART", os.path.join(str(tmp_path), "absent.json"))
+        ms.print_shadow_record()
+        out = capsys.readouterr().out
+        assert "no forward record" in out
+
+    def test_artifact_is_quoted_with_counts(self, tmp_path, monkeypatch, capsys):
+        art = self._artifact(os.path.join(str(tmp_path), "sweep_shadow_forward.json"))
+        monkeypatch.setattr(ms, "SHADOW_ART", art)
+        ms.print_shadow_record()
+        out = capsys.readouterr().out
+        assert "ACCUMULATING" in out and "N=0 of 60 resolved (SWEEP_CONT)" in out
+        assert "coverage 1.0" in out and "disagreements 0" in out and "unmatched 0" in out
+
+    def test_corrupt_artifact_reads_as_absent(self, tmp_path, monkeypatch, capsys):
+        art = os.path.join(str(tmp_path), "sweep_shadow_forward.json")
+        with open(art, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        monkeypatch.setattr(ms, "SHADOW_ART", art)
+        ms.print_shadow_record()
+        assert "no forward record" in capsys.readouterr().out

@@ -37,11 +37,20 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 import midas_first_fills_audit as audit        # noqa: E402  (the wire contract's owner)
 import midas_watchdog as wd                    # noqa: E402  (the completeness alarm)
+import mt5_ops as _ops                        # noqa: E402  (whose-deal-is-this, one rule)
 
 #: The live grammars, from the EA's own writers (MidastouchAI.mq5):
 #:   LOPEN,<epoch>,<posid>,<order>,<deal>,<dir>,<entry>,<sl>,<tp>,<lots>,<risk_usd>,<stop_d>,
 #:         <hold_s>,<tag[_FLOORED]>,<state x5>            -> 14 fixed + up to 5 state fields
+#:   LENTRY,<epoch>,<identity>,<entry>,<source>           -> 5   (the v1.25 price amendment)
 #:   LCLOSE,<epoch>,<posid>,<reason>,<exit>,<r>           -> 6
+#:
+#: THE AMENDMENT IS READ, NOT DECORATION. On this venue the entry price is not knowable at the
+#: instant the fill is acknowledged (MEASURED 2026-09-22: `ResultPrice()` returned 0 and the row
+#: went out as `0.00000` while the position's own price was 4333.07 within the same second), so
+#: the row may say `entry=pending` and a later LENTRY row prices it. This packet is the tool
+#: that reported `entry price: ledger 0.0 vs venue 4333.07`; a reader that ignores the amendment
+#: would keep reporting it after the ledger has been corrected.
 #: The state tail sits at the same index as on an OPEN row, which is why `read_state_tail` is
 #: reused rather than re-implemented: one wire contract, one reader.
 LOPEN_N = 14
@@ -63,9 +72,19 @@ def read_live_ledger(path: str) -> dict:
     fills: dict[str, dict] = {}
     order: list[str] = []
     problems: list[str] = []
+    amendments: dict[str, dict] = {}
     try:
         with open(path, encoding="utf-8-sig", errors="replace") as fh:
             for ln, line in enumerate(fh, 1):
+                if line.startswith(audit.ENTRY_ROW):
+                    for ident, amd in audit.read_entry_rows([line]).items():
+                        if ident in amendments and amendments[ident]["price"] != amd["price"]:
+                            problems.append(
+                                f"line {ln}: LENTRY for {ident} contradicts line "
+                                f"{amendments[ident]['line']} "
+                                f"({amd['price']} vs {amendments[ident]['price']})")
+                        amendments.setdefault(ident, amd)
+                    continue
                 p = line.strip().split(",")
                 if not p or not p[0]:
                     continue
@@ -73,7 +92,20 @@ def read_live_ledger(path: str) -> dict:
                     if len(p) < LOPEN_N:
                         problems.append(f"line {ln}: LOPEN row has {len(p)} fields (<{LOPEN_N})")
                         continue
-                    posid = p[2]
+                    # THE POSITION'S IDENTITY, from whichever field carries it. MEASURED
+                    # 2026-09-22 on the arm's FIRST REAL FILL: the EA writes LOPEN as the fill
+                    # is acknowledged, and on a netting account the position id is not
+                    # resolvable yet, so `posid` is 0 and `deal` is 0 while `order` holds
+                    # 18874164 — which IS the position id ("netting: pos==order; hedging:
+                    # pos_id is authoritative").
+                    #
+                    # READING `p[2]` ALONE KEYED THE LOPEN ROW UNDER "0" AND ITS OWN LCLOSE
+                    # UNDER "18874164", so the packet reported the ledger's LOPEN as a fill with
+                    # no close AND the ledger's LCLOSE as "the venue holds a fill this ledger
+                    # never recorded" — a phantom MISSING_LEDGER_ROW generated from the ledger's
+                    # own two rows. The real row: LOPEN,1790092800,0,18874164,0,-1,... and
+                    # LCLOSE,1790093197,18874164,EXTERNAL,4328.76000,0.104.
+                    posid = p[2] if p[2] and p[2] != "0" else p[3]
                     if posid in fills and "lopen" in fills[posid]:
                         problems.append(f"line {ln}: LOPEN for position {posid} written twice")
                     fills.setdefault(posid, {})["lopen"] = {
@@ -83,6 +115,8 @@ def read_live_ledger(path: str) -> dict:
                         "risk_usd": float(p[10]), "stop_d": float(p[11]),
                         "hold_s": int(p[12]), "tag": p[13],
                         "state": audit.read_state_tail(p),
+                        "entry_written": float(p[6]),
+                        "pending": bool(audit.read_entry_pending(p)) or float(p[6]) <= 0.0,
                     }
                     if posid not in order:
                         order.append(posid)
@@ -95,6 +129,24 @@ def read_live_ledger(path: str) -> dict:
                         "exit": float(p[4]), "r": float(p[5])}
     except OSError as exc:
         raise SystemExit(f"cannot read ledger {path}: {exc}")
+    # the amendments, applied to the fills they price — on identity, whichever of the row's
+    # three identifiers the amendment names. An amendment that prices nothing is a problem, not
+    # a decoration: it means a row was written against a fill this ledger does not hold.
+    for led in fills.values():
+        op = led.get("lopen")
+        if not op or not op["pending"]:
+            continue
+        for ident in (op["posid"], op["order"], op["deal"]):
+            amd = amendments.pop(ident, None)
+            if amd:
+                op["entry"] = amd["price"]
+                op["entry_source"] = (f"LENTRY amendment, line {amd['line']}, source "
+                                      f"'{amd['source']}'")
+                op["pending"] = False
+                break
+    for ident, amd in amendments.items():
+        problems.append(f"line {amd['line']}: LENTRY amendment for {ident} prices no fill row "
+                        f"in this ledger")
     return {"fills": {k: fills[k] for k in order},
             "problems": problems,
             "closed": sum(1 for v in fills.values() if "lclose" in v)}
@@ -124,21 +176,39 @@ def venue_deals(magic: int, since: float | None = None, reader=None) -> tuple[li
             return [], f"history_deals_get failed ({exc})"
     else:
         raw = reader(None, None)
-    out = []
+    deals = []
     for d in raw or []:
-        if int(getattr(d, "magic", 0) or 0) != magic:
-            continue
         if since is not None and float(getattr(d, "time", 0) or 0) < since:
             continue
-        out.append({"ticket": str(getattr(d, "ticket", "")),
-                    "position_id": str(getattr(d, "position_id", "")),
-                    "time": float(getattr(d, "time", 0) or 0),
-                    "price": float(getattr(d, "price", 0) or 0),
-                    "volume": float(getattr(d, "volume", 0) or 0),
-                    "type": int(getattr(d, "type", -1)),
-                    "entry": int(getattr(d, "entry", -1)),
-                    "symbol": str(getattr(d, "symbol", "")),
-                    "comment": str(getattr(d, "comment", ""))})
+        deals.append({"ticket": str(getattr(d, "ticket", "")),
+                      "position_id": str(getattr(d, "position_id", "")),
+                      "time": float(getattr(d, "time", 0) or 0),
+                      "price": float(getattr(d, "price", 0) or 0),
+                      "volume": float(getattr(d, "volume", 0) or 0),
+                      "type": int(getattr(d, "type", -1)),
+                      "entry": int(getattr(d, "entry", -1)),
+                      "magic": int(getattr(d, "magic", 0) or 0),
+                      "symbol": str(getattr(d, "symbol", "")),
+                      "comment": str(getattr(d, "comment", ""))})
+    # A CLOSING DEAL IS NOT ALWAYS STAMPED WITH OUR MAGIC (v1.25, MEASURED). On the arm's own
+    # first fill the ENTRY deal carried magic 7825001 and the CLOSING deal carried magic 0 —
+    # the platform had executed it (its reason field read MOBILE). A history filtered on
+    # `magic == ours` therefore loses the close, and this packet then reported the ledger's R
+    # against nothing while claiming "the ledger recorded a close the account does not hold".
+    # Ownership is a property of the POSITION: an OUT deal is ours iff its position has an IN
+    # deal bearing our magic. The attribution is recorded per deal rather than flattened, so a
+    # reader can see which deals needed it.
+    #
+    # THE RULE ITSELF LIVES IN `mt5_ops` NOW, because this was never one reader's problem: the
+    # watchdog's ledger reconciliation, this packet and the LV broker monitor all read the venue's
+    # deal history, and a rule copied into three files is three rules that can drift. This call site
+    # is the reference — it is the one that was correct first — and the others now import it.
+    rows, unattributed = _ops.attributed_deals(deals, magic)
+    out = [{**row["deal"], "attributed_by": row["attributed_by"]} for row in rows]
+    for d in unattributed:
+        # Named, never silently dropped: "this reader could not say whose deal this is" is a fact
+        # about the venue's stamping that belongs on the record.
+        d["attributed_by"] = None
     return out, ""
 
 
@@ -189,8 +259,26 @@ def compare_fill(posid: str, led: dict, venue: list[dict]) -> dict:
             check("entry time (s)", f"{op['epoch']} ({_ts(op['epoch'])})",
                   f"{int(entry_deal['time'])} ({_ts(entry_deal['time'])})", False,
                   "different instants in either frame — not a frame difference")
-        check("entry price", op["entry"], entry_deal["price"],
-              abs(op["entry"] - entry_deal["price"]) <= TOL_PRICE)
+        # v1.25: THE WRITTEN PRICE MAY NOT BE A PRICE. On this venue the entry price is not
+        # knowable at the instant the fill is acknowledged (measured: `ResultPrice()` was 0 and
+        # the row went out as `0.00000`), so a row can carry `entry=pending` and a later LENTRY
+        # row prices it. Two rules follow, and both are about not making a claim:
+        #   * AMENDED — grade the amended figure, and SAY where it came from. A reader that
+        #     silently substitutes a number is the defect this row exists to prevent.
+        #   * STILL PENDING — do not grade it at all. An unpriced row is an unfinished record,
+        #     not a disagreement, and grading it would report the writing date as a difference.
+        if op.get("pending") and not op.get("entry_source"):
+            rows.append({"field": "entry price", "ledger": "entry=pending",
+                         "venue": entry_deal["price"], "verdict": "PENDING",
+                         "note": "no price was knowable at write time and no LENTRY amendment "
+                                 "has priced it yet: the venue's figure is shown but NOT graded"})
+        else:
+            note = ""
+            if op.get("entry_source"):
+                note = (f"the row itself carries {op['entry_written']!r}: the price was UNRESOLVED "
+                        f"at write time and this figure is the {op['entry_source']}")
+            check("entry price", op["entry"], entry_deal["price"],
+                  abs(op["entry"] - entry_deal["price"]) <= TOL_PRICE, note)
         check("lots", op["lots"], entry_deal["volume"],
               abs(op["lots"] - entry_deal["volume"]) <= TOL_LOTS)
         check("direction", op["dir"], DEAL_TYPE_SIGN.get(entry_deal["type"], 0),
@@ -242,15 +330,27 @@ def compare_fill(posid: str, led: dict, venue: list[dict]) -> dict:
                      "note": "row written before v1.19e, or the stamp is off — the label then "
                              "has to be rebuilt, which is what the stamp exists to avoid"})
 
-    verdict = ("DISAGREE" if any(r["verdict"] == "DISAGREE" for r in rows)
-               else "OPEN" if cl is None else "AGREE")
+    # v1.25: PENDING is not a disagreement and not an agreement — it is a record that cannot be
+    # graded yet, so it lands on OPEN ("nothing to compare yet") with its own named row above.
+    if any(r["verdict"] == "DISAGREE" for r in rows):
+        verdict = "DISAGREE"
+    elif cl is None or any(r["verdict"] == "PENDING" for r in rows):
+        verdict = "OPEN"
+    else:
+        verdict = "AGREE"
     return {"posid": posid, "rows": rows, "verdict": verdict}
 
 
 def build_packet(ledger: str, magic: int, reader=None) -> dict:
     """The whole packet: completeness alarm, then every fill field by field."""
     led = read_live_ledger(ledger)
-    recon = wd.live_fill_reconciliation(ledger, magic=magic)
+    # THE READER IS FORWARDED, and that is a fix rather than a convenience: without it the
+    # completeness block always queried the live terminal, so this packet's own promise
+    # ("Nothing here touches a terminal: the venue side is injected through the `reader` hook")
+    # was false for one of its two venue readers, and its test passed only while the account
+    # held no deals. MEASURED 2026-09-22: the arm's first real fill made that test fail with
+    # `ledger-short` while the ledger had recorded the fill in full.
+    recon = wd.live_fill_reconciliation(ledger, magic=magic, reader=reader)
     deals, why = venue_deals(magic, reader=reader)
     by_pos: dict[str, list[dict]] = {}
     for d in deals:
@@ -267,8 +367,12 @@ def build_packet(ledger: str, magic: int, reader=None) -> dict:
     missing = sorted(set(by_pos) - set(led["fills"]))
     for posid in missing:
         compared.append(compare_fill(posid, {}, by_pos[posid]))
+    by_position = sorted({d["position_id"] for d in deals if d.get("attributed_by") == "position"})
     return {"ledger_fills": len(led["fills"]), "ledger_closed": led["closed"],
             "venue_deals": len(deals), "venue_why": why, "ledger_problems": led["problems"],
+            # v1.25: the deals a magic filter alone would have dropped, named so the attribution
+            # is auditable rather than invisible
+            "venue_attributed_by_position": by_position,
             "completeness": recon, "fills": compared,
             "verdict": ("AGREE" if compared and all(c["verdict"] == "AGREE" for c in compared)
                         else "OPEN" if all(c["verdict"] == "OPEN" for c in compared)
@@ -306,6 +410,9 @@ def main(argv: list[str]) -> int:
     p = build_packet(str(ledger), magic)
     print(f"\ncompleteness (midas_watchdog.live_fill_reconciliation): {p['completeness']['state']}")
     print(f"  {p['completeness']['detail']}")
+    if p.get("venue_attributed_by_position"):
+        print(f"  venue deals attributed BY POSITION (their own magic was not ours, the venue "
+              f"stamped the executing side): {', '.join(p['venue_attributed_by_position'])}")
     if p["venue_why"]:
         print(f"  venue unreadable: {p['venue_why']} — the packet cannot be completed")
     if not p["fills"]:

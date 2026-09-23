@@ -25,11 +25,73 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "src"))
 
 import midas_first_fills_audit as ffa  # noqa: E402
+import midas_sweep as S  # noqa: E402
 
-OPEN_A = "OPEN,1790000200,7,1,4000.00000,3990.00000,4020.00000,0.10,10.00,10.00000,720,U25,10.0,0.2"
-CLOSE_A = "CLOSE,1790001000,7,TARGET,4020.00000,2.000,20.00,25020.00,0.20000,0.0,2.0,0,1"
-OPEN_B = "OPEN,1790010000,8,-1,4001.00000,4011.00000,3981.00000,0.10,10.00,10.00000,720,U25,10.0,0.2"
-CLOSE_B = "CLOSE,1790020000,8,STOP,4011.00000,-1.000,-10.00,25010.00,0.20000,0.0,2.0,0,1"
+
+# v2 (2026-09-23, measured repair): the fixture's stops are DERIVED from the data of record
+# through the audit's own `expected_stop`, not hardcoded. The original literal rows recorded
+# stop 10.0 at entries where the corpus of the day measured 2xATR = 5.0; after the 09-23
+# corpus refresh the same stamps measure 28.1/33.4 (crash-week volatility), and a fixture
+# whose compliance was frozen to one corpus vintage failed as a "violation". Compliance that
+# must survive data refreshes is compliance DERIVED from the data: open at the corpus's first
+# stamps, stop = 2xATR as the audit itself measures it, TP/exit/PnL/EQ following geometrically
+# (risk 0.10/point side × 2.0R), so every invariant the audit grades holds by construction.
+
+
+def _open_row(open_ct: int, ticket: int, side: int, entry: float, stop_d: float) -> str:
+    sl = entry - side * stop_d
+    tp = entry + side * 2.0 * stop_d
+    return (f"OPEN,{open_ct},{ticket},{side},{entry:.5f},{sl:.5f},{tp:.5f},"
+            f"0.10,{stop_d:.5f},{stop_d:.5f},720,U25,10.0,0.2")
+
+
+def _close_row(close_ct: int, ticket: int, reason: str, exit_px: float, r: float,
+               pnl: float, prev_veq: float) -> str:
+    return (f"CLOSE,{close_ct},{ticket},{reason},{exit_px:.5f},{r:.3f},{pnl:.2f},"
+            f"{prev_veq + pnl:.2f},0.20000,0.0,{r:.1f},0,1")
+
+
+def _derived_rows() -> tuple[list[str], list[dict]]:
+    """The compliant two-trade ledger, derived from the corpus at import time.
+
+    Returns (rows, trades) where `trades` carries the derived numbers later pins assert
+    (the OLD pins asserted literal 25020/25010 equities; the derivation keeps the 25,000
+    basis, the +2.0/−1.0 R shape and the $10/point risk, so every assertion in this file
+    keeps its meaning while its numbers become corpus-proof).
+    """
+    h1 = S.load_bars(str(ROOT / "data" / "forex" / "xauusd" / f"XAUUSD_H1{ffa.VENUE_SUFFIX}.csv"))
+    h1_atr = S.sma_atr(h1)
+    # two stamps inside the session gate (06-20 UTC), deep inside the corpus era, a weekday,
+    # away from any DST seam (both server months here are +2): 2026-06-10 10:00Z and 12:00Z
+    import datetime as _dt
+    base = int(_dt.datetime(2026, 6, 10, 10, 0, tzinfo=_dt.timezone.utc).timestamp())
+    oa_ct, ob_ct = base + 900, base + 3 * 3600 + 900
+    exp_a, _ = ffa.expected_stop(2.0, h1, h1_atr, oa_ct)
+    exp_b, _ = ffa.expected_stop(2.0, h1, h1_atr, ob_ct)
+    entry_a, entry_b = 4000.0, 4001.0
+    rows = ["EQ,25000.00"]
+    meta = []
+    prev_veq = 25000.0
+    for open_ct, ticket, side, entry, stop_d, reason, r in (
+            (oa_ct, 7, 1, entry_a, exp_a, "TARGET", 2.0),
+            (ob_ct, 8, -1, entry_b, exp_b, "STOP", -1.0)):
+        exit_px = entry + side * r * stop_d
+        # pnl = r x risk_d — the EA's own arithmetic (risk budget per trade, here $10),
+        # so the +20.00/-10.00 shape holds whatever width the corpus's ATR gives the stop.
+        pnl = r * 10.0
+        rows.append(_open_row(open_ct, ticket, side, entry, stop_d))
+        rows.append(f"EQ,{prev_veq:.2f}")
+        rows.append(_close_row(open_ct + 800, ticket, reason, exit_px, r, pnl, prev_veq))
+        prev_veq += pnl
+        meta.append({"open_ct": open_ct, "ticket": ticket, "stop_d": stop_d,
+                     "entry": entry, "exit": exit_px, "r": r, "pnl": pnl,
+                     "prev_veq": prev_veq - pnl, "close_veq": prev_veq})
+    rows.append(f"EQ,{prev_veq:.2f}")
+    return rows, meta
+
+
+_ROWS, _META = _derived_rows()
+OPEN_A, CLOSE_A, OPEN_B, CLOSE_B = (_ROWS[1], _ROWS[3], _ROWS[4], _ROWS[6])
 
 
 def _ledger(tmp_path: Path, rows: list[str], name: str = "MIDASTOUCH_paper_XAUUSD_U25.csv") -> Path:

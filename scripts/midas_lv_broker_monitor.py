@@ -30,6 +30,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "scripts"))
+
+import mt5_ops as _ops                        # noqa: E402  (whose-deal-is-this, one rule)
+
 ART = REPO / "artifacts"
 STATE_PATH = ART / "midas_lv_broker_state.json"
 LV_MAGIC = 7801601
@@ -70,9 +74,19 @@ def build_state(acct, positions, deals, prev: dict, now_epoch: float,
     """
     prev_deals = {d["ticket"] for d in prev.get("deals", [])}
     new_deals = []
+    # ATTRIBUTION BY POSITION (`mt5_ops.attribute_deal`, the one rule). Filtering on
+    # `getattr(d, "magic", 0) != LV_MAGIC` lost the CLOSE of the arm's own position whenever the venue
+    # stamped it with magic 0 — MEASURED 2026-09-22 on the gold arm, and this monitor reads the SAME
+    # venue. A broker-evidence monitor that cannot see the close is evidence of a position that never
+    # ended: `first_fill_seen` and the ring would both say "still open" for a trade the venue closed.
+    ours_positions = _ops.our_positions_from_deals(deals, LV_MAGIC)
+    by_position: list[int] = []
     for d in deals:
-        if getattr(d, "magic", 0) != LV_MAGIC:
+        how = _ops.attribute_deal(d, LV_MAGIC, ours_positions)
+        if how is None:
             continue
+        if how == _ops.DEAL_BY_POSITION:
+            by_position.append(int(getattr(d, "ticket", 0)))
         rec = {"ticket": int(getattr(d, "ticket", 0)),
                "entry": int(getattr(d, "entry", -1)),     # 0=IN, 1=OUT
                "type": int(getattr(d, "type", -1)),       # 0=BUY, 1=SELL
@@ -143,6 +157,7 @@ def build_state(acct, positions, deals, prev: dict, now_epoch: float,
             "algo_trading": algo,
             "positions": positions_out,
             "deals": deals_ring,
+            "deals_attributed_by_position": by_position,
             "balance_ops": balops,
             "first_fill_seen": first_fill,
             "problems": problems}

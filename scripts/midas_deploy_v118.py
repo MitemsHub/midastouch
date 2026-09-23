@@ -147,7 +147,11 @@ def verify_arms(files_root: Path, min_epoch: float) -> dict:
     what an un-migrated or historical ledger carries, and a verifier that stopped
     admitting them would report a healthy old arm as broken.
     """
-    accepted_era = ("ERA,MIDAS1.18,", "ERA,MIDAS1.19,", "ERA,MIDAS1.20,")
+    # EXTENDED, never replaced: an un-migrated ledger still has to verify, and a
+    # deployer that rejects an older stamp refuses the very record it deployed.
+    accepted_era = ("ERA,MIDAS1.18,", "ERA,MIDAS1.19,", "ERA,MIDAS1.20,", "ERA,MIDAS1.21,",
+                    "ERA,MIDAS1.22,", "ERA,MIDAS1.23,", "ERA,MIDAS1.24,", "ERA,MIDAS1.25,",
+                    "ERA,MIDAS1.26,", "ERA,MIDAS1.27,", "ERA,MIDAS1.28,", "ERA,MIDAS1.29,")
     out = {}
     for tag in PAPER_TAGS:
         p = files_root / f"MIDASTOUCH_paper_XAUUSDmicro_{tag}.csv"

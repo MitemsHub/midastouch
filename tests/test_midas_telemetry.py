@@ -66,9 +66,17 @@ def test_paper_open_prefix_frozen_with_two_appends() -> None:
     # 12 frozen fields + arm tag, then the v1.13 appends: atr, spread-at-open,
     # then the v1.19e state stamp (%s: five more fields, or nothing at all when the stamp is
     # off — which is why it rides as one specifier and not five conditionals).
+    #
+    # v1.25: the v1.22 configured-risk token shares that SAME specifier, because it is
+    # concatenated into the same ARGUMENT (`StateAppend() + RiskAppend(risk_d)`). Asking for a
+    # second `%s` there is exactly the defect MEASURED on the arm's first live fill — MQL5
+    # appended `(missed string parameter)` to the row — so the pin counts the specifier, and
+    # test_every_fill_row_format_matches_its_arguments below counts specifiers against
+    # arguments for every row writer in the file.
     assert _callsites(
         "OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s,%.5f,%.5f%s"
-    ) == 1, "BAR OPEN must keep the frozen 12-field head + atr,spread appends + state stamp"
+    ) == 1, ("BAR OPEN must keep the frozen 12-field head + atr,spread appends "
+             "+ state stamp + the v1.22 configured-risk stamp (one specifier)")
 
 
 def test_paper_close_prefix_frozen_with_two_appends() -> None:
@@ -96,17 +104,40 @@ def test_paper_close_p5_tail_shape() -> None:
 def test_p5_density_counter_is_after_session_gates() -> None:
     """Census semantics: count in-session condition-true bars — the counter
     must sit after the session (and Friday) gates at BOTH ModeDecide sites,
-    never before them."""
+    never before them.
+
+    v1.21: the live path calls the shared `InSessionBar()` rather than repeating the
+    comparison, so the gate is recognised in either form. The BAR-replay path keeps its
+    own literal comparison ON PURPOSE — it is frozen against the python engine of record
+    and parity outranks tidiness there (see test_the_live_path_shares_one_session_rule)."""
     b = strip_comments(src())
     for fn in ("BarEvaluateSignal", "TrackFreshM15Bar"):
         body_txt = body(fn)
-        gate_idx = body_txt.find("InpSessionStartHour")
+        gate_idx = max(body_txt.find("InpSessionStartHour"),
+                       body_txt.find("InSessionBar("))
         friday_idx = body_txt.find("InpFridayCutoffHour")
         inc_idx = body_txt.find("g_p5_signals++")
         assert gate_idx != -1 and friday_idx != -1, f"{fn}: gates present"
         assert inc_idx != -1, f"{fn}: density counter present"
         assert inc_idx > gate_idx and (friday_idx == -1 or inc_idx > friday_idx), \
             f"{fn}: counter must be AFTER the session/Friday gates"
+
+
+def test_the_live_path_shares_one_session_rule() -> None:
+    """v1.21: two copies of "is this bar in session" is how the chart and the engine come
+    to disagree. The live gate and the HUD both call InSessionBar(); the BAR-replay gate
+    keeps its own frozen comparison, and that exception is asserted rather than assumed —
+    so a change here is a deliberate choice about parity, not a silent refactor."""
+    inb = body("InSessionBar")
+    assert "InpSessionStartHour" in inb and "InpSessionEndHour" in inb, \
+        "InSessionBar must be where the window rule lives"
+    live = strip_comments(body("TrackFreshM15Bar"))
+    assert "InSessionBar(" in live, "the live gate must use the shared rule"
+    assert "InpSessionStartHour" not in live, "the live gate must not re-implement it"
+    bar = strip_comments(body("BarEvaluateSignal"))
+    assert "InpSessionStartHour" in bar, "the frozen BAR-replay gate keeps its comparison"
+    assert "InSessionBar(" not in bar, \
+        "BAR replay must not adopt the live helper without a parity re-run"
 
 
 def test_p5_counter_is_monotone_no_reset_path() -> None:
@@ -132,6 +163,71 @@ def test_appends_are_at_end_of_row_only() -> None:
         f = m.group(0)
         if ",%.5f,%.5f\"" in f and f.startswith('"CLOSE'):
             assert f.endswith(',%.5f,%.5f"')
+
+
+#: MQL5 substitutes this text for a specifier it was given no argument for, and appends it to
+#: the row. It is a defect signature, never data — which is why it is asserted ABSENT.
+MISSED_ARG = "(missed string parameter)"
+
+_ROW_WRITER = re.compile(r'StringFormat\(\s*"((?:OPEN|LOPEN|CLOSE|LCLOSE|PARITY)[^"]*)"')
+_SPEC = re.compile(r"%(?:\+?I64[du]|\+?\.\d+f|\+?\d+d|\+?d|\+?u|\+?s)")
+
+
+def _format_calls() -> list[tuple[int, str, int, int]]:
+    """(line, format, specifiers, top-level arguments) for every ledger row writer."""
+    text = src()
+    out: list[tuple[int, str, int, int]] = []
+    for m in _ROW_WRITER.finditer(text):
+        fmt = m.group(1)
+        k = text.index("(", m.start())
+        depth = 0
+        while k < len(text):
+            if text[k] == "(":
+                depth += 1
+            elif text[k] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        args = re.sub(r"//[^\n]*", "", text[m.end():k]).strip()
+        if args.startswith(","):
+            args = args[1:]
+        depth, n = 0, (1 if args else 0)
+        for ch in args:
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                n += 1
+        out.append((text[:m.start()].count("\n") + 1, fmt, len(_SPEC.findall(fmt)), n))
+    return out
+
+
+def test_every_fill_row_format_matches_its_arguments() -> None:
+    """THE DEFECT THIS EXISTS FOR, AND IT IS A MEASURED ONE (2026-09-22).
+
+    The arm's first live fill row went into the ledger as
+    `...,cfg=62.50@0.25(missed string parameter)` — the writer asked for one more `%s` than it
+    was given, and MQL5 appended its own missing-argument text INTO a data row. Nothing caught
+    it: the grammar pins counted specifiers, and none of them counted the arguments beside
+    them. A row is written by a format AND an argument list; only both together are a row.
+
+    Counted on the source, so a new writer cannot be added without being counted, and the two
+    ends of every writer must agree exactly — no surplus specifier (the live defect), no
+    surplus argument (a row that silently drops a measurement).
+    """
+    calls = _format_calls()
+    assert len(calls) >= 11, f"the ledger row writers must all be countable, found {calls}"
+    bad = [(ln, fmt, s, a) for ln, fmt, s, a in calls if s != a]
+    assert not bad, "format/argument mismatch (specifiers, arguments): " + "; ".join(
+        f"line {ln}: {s} vs {a} in {fmt}" for ln, fmt, s, a in bad)
+    # The one legitimate mention is a COMMENT recording the defect (the v1.25 note), so the
+    # check runs on the code with comments stripped: the text must not be in anything the
+    # compiler can put into a row.
+    assert MISSED_ARG not in strip_comments(src()), (
+        "the EA must never carry MQL5's missing-argument text in code: it belongs to no row "
+        "grammar, and it is a specifier/argument mismatch that put it there")
 
 
 def test_era_note_cites_the_register() -> None:
@@ -388,19 +484,30 @@ def test_the_census_is_read_back_at_init_and_captured_at_deinit():
     assert "DiagSnapshot()" in body("OnDeinit")
     r = body("DiagRestoreFromLedger")
     assert 'p[0] != "NOFILLSUM"' in r, "the snapshot row is the restore source"
-    assert "n < 12" in r, "a short row is not a snapshot — never partially believed"
+    # v1.27: the floor moved 12 -> 13 with the APPENDED `nodata` counter. It is a FLOOR and
+    # not a `>=`, deliberately: a v1.26 snapshot is 12 fields, and reading it as a snapshot
+    # would restore a confident ZERO for the counter it does not carry — the exact class of
+    # sign this program keeps paying for. A stale snapshot is not restored; the counters
+    # restart from zero and the journal says so.
+    assert "n < 13" in r, "a short row is not a snapshot — never partially believed"
     assert "g_diag_day = snap_day" in r and "g_diag_sig = DiagSignature(" in r, \
         "the day key and the signature both come back, so an unchanged state is not rewritten"
     assert "g_nofill_signal = c[0]" in r
     assert body("DiagSnapshot").count("MQL_TESTER") == 1, \
         "the snapshot is guarded like the census row it shadows"
     # The one row type the census added. Field count is the contract: prefix, epoch, day,
-    # then the nine counters NOFILL_KEYS names in the same order.
+    # then the counters NOFILL_KEYS names in the same order. The count is read from the key
+    # tuple and never written as a literal — the reader and this pin must move together, and
+    # a hand-written 9 here is how the reader would be left behind by the next append.
     code = strip_comments(src())
     m = re.search(r'"NOFILLSUM,%I64d,%d,%s"', code)
     assert m, "NOFILLSUM format moved — update this fixture and nofill_open_day together"
     from morning_status import NOFILL_KEYS, nofill_open_day
-    assert len(NOFILL_KEYS) == 9, "twelve fields = prefix + epoch + day + nine"
+    assert len(NOFILL_KEYS) == 10, "prefix + epoch + day + ten (v1.27 appended nodata)"
+    assert NOFILL_KEYS[-1] == "nodata"
+    assert "3 + len(NOFILL_KEYS)" in src() or "3 + len(NOFILL_KEYS)" in \
+        (REPO / "scripts" / "morning_status.py").read_text(encoding="utf-8"), \
+        "the reader derives its field count from the key tuple, not a literal"
     assert nofill_open_day.__doc__ and "NOFILLSUM" in nofill_open_day.__doc__
 
 
@@ -417,21 +524,22 @@ def test_nofill_reason_grammar_is_pinned():
 
 
 def test_nofill_format_string_shape():
-    """The NOFILL row: prefix + epoch + exactly 9 counters, comma grammar,
-    appended by PaperLog. Positional indexes here and in
-    morning_status.nofill_summary must stay in lockstep.
+    """The NOFILL row: prefix + epoch + the counters, comma grammar, appended by PaperLog.
+    Positional indexes here and in morning_status.nofill_summary must stay in lockstep.
 
-    9 since v1.19c, which APPENDED the news stand-down count: the counter had to be
-    visible or 'why did it not trade' answers with 'the calendar held it' only in a
-    journal line nobody greps, and appending (never inserting) keeps every historical
-    reader working. morning_status.NOFILL_KEYS is the other half of this pin.
+    9 counters since v1.19c, which APPENDED the news stand-down count, and 10 since v1.27,
+    which appended `nodata` (a bar the engine could not price). Both had to be visible or
+    'why did it not trade' answers incompletely — and APPENDING (never inserting) is what
+    keeps every historical reader working. morning_status.NOFILL_KEYS is the other half.
     """
-    code = strip_comments(src())
-    m = re.search(r'"NOFILL,%I64d((?:,%d){9})"', code)
-    assert m, "NOFILL format: epoch + exactly 9 comma-separated %%d counters"
-    assert m.group(1).count("%d") == 9
     from morning_status import NOFILL_KEYS
-    assert len(NOFILL_KEYS) == 9 and NOFILL_KEYS[-1] == "news", (
+    n = len(NOFILL_KEYS)
+    code = strip_comments(src())
+    m = re.search(r'"NOFILL,%I64d((?:,%d)+)"', code)
+    assert m, "NOFILL format: epoch + comma-separated %d counters"
+    assert m.group(1).count("%d") == n, (
+        f"the EA writes {m.group(1).count('%d')} counters, NOFILL_KEYS names {n}")
+    assert NOFILL_KEYS[-1] == "nodata", (
         "the reader's key list must carry the appended counter in the same position")
 
 

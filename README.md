@@ -12,19 +12,41 @@ There is exactly one live question here, and the repository is organised around 
 
 ---
 
-## Status — measured 2026-09-21
+## Status — measured 2026-09-22
 
 | | state |
 |---|---|
 | account | **1428765** @ `Upcomers-Server` (Upcomers Ltd.), XAUUSD, magic `7825001`, arm tag `U25` |
-| EA | `mql5/MIDASTOUCH/MidastouchAI.mq5` → **MIDAS1.20**, compiled 0 errors / 0 warnings, deployed binary in step with its source |
+| EA | `mql5/MIDASTOUCH/MidastouchAI.mq5` → **MIDAS1.29** (the exit-reason build: a close row now says WHO closed it — `SL`/`TP`/`SO`/`EXPERT`/`MANUAL-*`/`EXTERNAL-UNKNOWN` — instead of one `EXTERNAL` word for "the venue did it"; the sweep-shadow recorder of v1.28 rides unchanged), compiled **0 errors / 0 warnings**, the deployed binary in step with its source (`source=3ea31314 ex5=b1956658`, both copies hash-checked), and the running chart reloaded onto it: the ledger's own `ERA,MIDAS1.29,…,+sweep-shadow+exit-reason` row names it. The exit-reason vocabulary is record-only — no decision function reads it — and the parity flat gate that once passed vacuously on this start-up-attached arm now refuses on "armed but zero books discovered" and cross-checks the venue's own position book (`mt5_ops.venue_open_position_count`) |
 | arming | **ARMED BY OPERATOR OVERRIDE** (`artifacts/live/armed.json`) — real orders go out |
 | validation | **NOT VALIDATED.** The frozen walk-forward gate FAILED, and the walk-forward of the rule the arm actually trades also returned NOT VALIDATED |
-| risk | **0.25%** per trade ($62.50 of the $25,000 evaluation) |
-| fills | **0 opened, 0 closed.** The ledger holds 29 `ERA`, 58 `EQ`, 4 `NOFILLSUM` rows and no position row; the account's own history has no deal for this magic |
-| why no fills | every evaluated bar so far was refused — mostly `no_trigger`, then `NO-TRIGGER(mac=-1)`: the H1/H4 regime is unaligned |
-| supervisor | scheduled task `MitemshubPaperSupervisor` → this repository's own supervisor |
-| suite | **1279 passed, 10 skipped** · live import closure 27 (22 entry points) · **0 dangling** |
+| risk | **0.25%** per trade ($62.50 of the $25,000 evaluation); the venue's minimum lot takes **$41.20** of it |
+| fills | **1 opened, 1 closed — profitable.** 2026-09-22 14:00:00Z SHORT 0.01 XAUUSD @ 4333.07 (signal bar 13:45), **closed 6 min 37 s later by an order the venue attributes to the MetaTrader *mobile* application** (closing deal `magic 0`, `reason 1 = MOBILE`, empty comment, against the entry deal's `magic 7825001`, `reason 3 = EXPERT`, comment `MIDAS`) for **+$4.31 / +0.104R**; account 25,000 → **25,004.26**. The EA's own SL 4374.38 / TP 4250.77 were both placed server-side and **neither was touched** (0.95 % and 1.90 % of price away; its 720-min timeout was 12 h away), so **the arm's exit manager has never yet closed one of its own trades** — and the ledger's word for the close is `EXTERNAL`, which is also its word for a stop-out. Full audit: `docs/LIVE_EXIT_AUDIT_20260922.md` |
+| why so few fills | the census says no *safety* measure has refused anything — the refusals are the entry rule's. Live today (`NOFILLSUM`, UTC day 20718): `signal=28 no-trigger=24 mismatch=4` with `session=0 friday=0 spread=0 riskcap=0 breaker=0 news=0` |
+| parity | certificate of record `artifacts/midas_parity_result_20260922_2311.json` — **PASS** on real ticks at the armed threshold, python 9 trades / +0.2699R against the EA's 9 / +0.271R, `max|dR| 0.0004`, no over-tolerance pair (the same nine trades across v1.24 … v1.29, which is how a record-only change is measured). Certified on the **shadow path**; the live charts' load path is untouched by the run — and this run was the first gated by the FIXED flat gate (attach-config discovery + the venue cross-check) rather than the vacuous one the exit audit found |
+| account layer | certified in the same artifact, by the second pass (`--live-stance`): **SIZING PASS** on 7 closed fills, each sized the way the declared rule sizes it at the equity it had, **5 of them floored to the venue's min lot**. The **SHIPPING governor leg is VACUOUS** — no modelled rule reaches the 3 % cap in this 12-day window (largest day drawdown 0.318 %) — so the governor is exercised in the same artifact **at a threshold derived to bind** (`--breaker-stress`, keeping the arm's own 3 % cap and moving the *risk* to the 6.18 %/trade implied by the −0.583R day on 2026-09-11): **GOVERNED-PASS**, the mirror predicting 1 refusal from 07:15Z that day and the governed EA taking none of them while taking all 6 entries it said would survive. The stance's best-day cap was **$5,000/day until this pass corrected it to the EA's own $250/day** (target 5 % × best-day 20 % × size) — the window's best day is **+$78.23, 31.3 % of it** — and a share with no target is now refused rather than guessed |
+| supervisor | scheduled task `MIDAS Watchdog Autostart` → `scripts/midas_watchdog.py --loop 600`, running (re-splices the repo's pins onto the chart on drift), **and** the `MIDASTOUCH Arm Supervisor` task is now **registered and runs unattended** (`paper_supervisor.cmd`, `logon=S4U`, triggers `boot,time`, 20-min repeats, wake-to-run on). `live_readiness` still WARNs one leg: whether a WakeToRun timer actually wakes an **S0** host — and whether lid-close suspends it — is **not observable from `powercfg`**, so it is promoted by one measured night (`scripts/live_coverage.py`), not by a setting |
+| suite | **1623 passed, 10 skipped, 1 pre-existing environmental failure** (`test_forward_cell_prereg`: the venue corpus has grown to 662 entries against the study's pinned 658 — on no changed file's path) · live import closure 32 (23 entry points) · residue 63 (the new flatness harness) · **0 dangling** |
+
+**A gap this deploy exposed — and the leg that now closes it.** `live_readiness`'s build leg reads
+the **files**, not the chart. After the certified `.ex5` was copied over both destinations it went
+green (`source 6a2c9455 == the source the deployed binary was built from`) while the arm's own
+ledger still said **MIDAS1.26** — replacing the binary was **not** observed to re-initialise a
+**start-up-attached** expert (no re-init message in the terminal journal, no new `ERA` row, for
+~15 minutes with the market open). The reload needed a terminal relaunch (`mt5_ops.relaunch_terminal()`,
+with the attach config, which is also how the arm survives the relaunch at all), taken while the arm
+was **flat** and **outside session** — after which the ledger wrote
+`ERA,MIDAS1.27,…+census10+state-ctx+spread-hour`. Two facts came out of it and both are now
+enforced: a green build leg and a chart one build behind are different things, so a second leg —
+**`the CHART runs the deployed build`** — reads the `ERA` row the EA writes at every init and
+**BLOCKS** when it disagrees with the source's `APP_VERSION` (it reads the **armed** arm's book, so
+a retired tag's leftover ledger cannot fail it forever), and it WARNs rather than passes for every
+way the question cannot be answered. It also blocks when the binary a chart loads was written
+**after** the chart's own init: a process does not start from a file written later, so that case —
+the deploy with no relaunch, including one where the version was never bumped — is caught by the
+**ordering** rather than by the version, compared in the arm's **own** recorded clock frame, and
+against the later of the binary's mtime and the build record's own stamp (because `--deploy` copies
+with `copy2`, so the file carries the *scratch* build's time).
 
 Read that table for yourself — it is produced from the terminal, not from a document:
 

@@ -84,6 +84,15 @@ TERM_ROOT = os.path.join(os.environ.get("APPDATA", ""), "MetaQuotes", "Terminal"
 MAGICS = {"A2_fwd": 7788075, "B_tp24": 7788100, "C_v75": 7788125, "D_fwd": 7788150}
 MIN_TRADES = 30
 _CLI_ARGS = None   # set by main(); lets helpers read CLI options without threading args through every signature
+#: The deal source the [3b] live-fill reconciliation reads, injectable for the same reason
+#: `midas_watchdog.live_fill_reconciliation` and `midas_first_fill_packet.build_packet` take
+#: one: None means the LIVE TERMINAL, so a caller describing a SYNTHETIC world (the [3b]
+#: display tests) must be able to say "this world holds no account deals" without reaching
+#: the machine's real account. MEASURED 2026-09-22: the arm's first real fill turned
+#: `test_armed_world_marks_the_live_arm_live_and_the_paper_arm_paper` unhealthy — its own
+#: verdict depended on whether the arm had traded, which is a property of the machine, not
+#: of the code under test.
+LIVE_FILL_DEAL_READER = None
 STALE_TELEM_S = 2 * 3600  # telemetry older than this counts as stale
 WINDOW_DAYS = 3           # default journal audit window
 # Broker-vs-UTC offset tracking (health guide §4): the offset is read from
@@ -130,6 +139,25 @@ def _fmt_off(off_min: int) -> str:
     oh = int(off_min / 60)          # trunc toward zero, like C
     om = abs(off_min) % 60
     return f"{oh:+d} h {om:02d} min"
+
+
+def server_offset_min(state_path: str = OFFSET_STATE_PATH) -> int | None:
+    """The persisted broker-vs-UTC offset in minutes, or None when unrecorded.
+
+    Only for converting a SERVER-stamped epoch (every bar and fill epoch in this
+    program) into an age against UTC *now*. Display-only, and it never asserts: a
+    missing or unreadable state file returns None so the caller can say the frame is
+    unproven instead of ageing two clocks against each other.
+
+    MEASURED 2026-09-22: that is exactly what the [3b] live-position line did — a
+    fill acknowledged at server 16:00 (UTC 14:00) printed as `open -1.7h`.
+    """
+    try:
+        with open(state_path, encoding="utf-8") as fh:
+            last = json.load(fh).get("last_offset_min")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return int(last) if isinstance(last, (int, float)) else None
 # Init-silence canary grace, per EA: must exceed one bar interval because a
 # healthy EA's first journal line after init can be its first bar event
 # (MitemshubAI bars M15 -> 16m; V75MacroEngine bars M30 -> 31m).
@@ -669,21 +697,25 @@ def parse_ledger(path: str) -> dict:
                 if not parts:
                     continue
                 if parts[0] == "OPEN" and len(parts) >= 12:
-                    open_rows[parts[2]] = parts[1]
+                    open_rows[R.live_fill_key(parts) or f"line:{ln}"] = parts[1]
                 elif parts[0] == "LOPEN" and len(parts) >= 15:
-                    # 2026-09-18 go-live: LIVE-path rows. LOPEN[2] is the
-                    # posid; LCLOSE[2] matches it. Carried in open_rows so a
-                    # dangling LOPEN (a REAL open position) shows as live.
-                    open_rows[parts[2]] = parts[1]
+                    # 2026-09-18 go-live: LIVE-path rows. Carried in open_rows so a
+                    # dangling LOPEN (a REAL open position) shows as live — keyed on
+                    # the identity the row actually carries (R.live_fill_key), because
+                    # on a netting fill [2] is 0 and the position id is in the order
+                    # field. MEASURED 2026-09-22: keying [2] made the arm's one CLOSED
+                    # live fill read as an open position for the rest of the day, and
+                    # put "1 OPEN rows without CLOSE" on this tool's own problem list.
+                    open_rows[R.live_fill_key(parts) or f"line:{ln}"] = parts[1]
                 elif parts[0] == "LCLOSE" and len(parts) >= 6:
                     # pairs the dangling-LOPEN walk only — LCLOSE carries R,
                     # not $ pnl/veq, so it never enters the paper closed list
                     # (the live block prints live closes separately).
-                    open_rows.pop(parts[2], None)
+                    open_rows.pop(R.live_fill_key(parts), None)
                 elif parts[0] == "ERA":
                     continue   # provenance row (v26.39+/v2.24+); scripts/era.py owns it
                 elif parts[0] == "CLOSE" and len(parts) >= 8:
-                    open_rows.pop(parts[2], None)
+                    open_rows.pop(R.live_fill_key(parts), None)
                     res["closed"].append({"epoch": int(parts[1]), "reason": parts[3],
                                           "r": float(parts[5]), "pnl": float(parts[6]),
                                           "veq": float(parts[7]), "line": ln})
@@ -700,13 +732,68 @@ def parse_ledger(path: str) -> dict:
     return res
 
 
+_RISK_TAIL_READER = None
+
+
+def risk_tail_of(parts: list[str]) -> dict:
+    """The v1.22 keyed `cfg=<usd>@<pct>` token off a fill or STATE row, {} when absent.
+
+    Parsed by the WIRE-CONTRACT OWNER (`scripts/midas_first_fills_audit.py`) rather than
+    re-implemented here, so the token has exactly one grammar in this repository; imported
+    lazily so this module keeps its light import surface. Absence means the row predates
+    v1.22 (or is a tester row, which never carries it) — not a defect.
+    """
+    global _RISK_TAIL_READER
+    if _RISK_TAIL_READER is None:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from midas_first_fills_audit import read_risk_tail
+        _RISK_TAIL_READER = read_risk_tail
+    return _RISK_TAIL_READER(parts)
+
+
+_STATE_TAIL_READER = None
+
+
+def state_tail_of(parts: list[str]) -> dict:
+    """The v1.27 bar-context stamp off a STATE row, {} when the row carries none.
+
+    Parsed by the WIRE-CONTRACT OWNER (`scripts/midas_first_fills_audit.py`) rather than
+    re-implemented here, exactly as `risk_tail_of` is — the STATE row and the OPEN row now
+    carry the SAME `StateAppend()` tail, so one parser must read both or the two records can
+    come to describe one bar differently. Imported lazily to keep this module's surface light.
+
+    ABSENCE IS NOT A DEFECT: every STATE row written before v1.27 has no tail (and an OPEN row
+    before v1.19e either), and a strategy-tester row never will. The sentinels travel as they
+    are — `news == "na"` means the EA could not assert the news axis and `hour_utc == -1` means
+    no server offset could be vouched for, so a consumer must REFUSE on those rather than
+    default them.
+    """
+    global _STATE_TAIL_READER
+    if _STATE_TAIL_READER is None:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from midas_first_fills_audit import read_state_tail
+        _STATE_TAIL_READER = read_state_tail
+    return _STATE_TAIL_READER(parts)
+
+
 def live_grammar_view(path: str) -> dict:
     """Live-arm ledger view: LOPEN/LCLOSE/EQ grammar only.
 
     The live arm's equity is the BROKER ACCOUNT (not the virtual EQ rows),
     and open positions come from the dangling-LOPEN walk, so [3b] can show
-    the real-money arm without lying about either."""
+    the real-money arm without lying about either.
+
+    "Dangling" means: no LCLOSE carries the row's identity. This walk used to append
+    EVERY LOPEN and never pair any of them, so a closed fill stayed on the list and the
+    operator read a live position where the book held none. MEASURED 2026-09-22 on the
+    arm's first real fill: `LOPEN,1790092800,0,18874164,0,...` (posid 0 at fill time —
+    the order ticket is the position id) with its own
+    `LCLOSE,1790093197,18874164,EXTERNAL,4328.76000,0.104` below it printed as
+    "LIVE POSITION: SHORT ... open -1.7h" — negative age, because the row's epoch is
+    SERVER-stamped while the age was taken against UTC. The identity now comes from the
+    one rule all four readers share (mt5_ops.live_fill_key)."""
     out: dict = {"open": [], "lclose_ct": 0, "reasons": [], "problems": []}
+    opens: dict[str, dict] = {}
     try:
         with open(path) as f:
             for ln, line in enumerate(f, 1):
@@ -714,20 +801,50 @@ def live_grammar_view(path: str) -> dict:
                 # EA v1.16 writer (MidastouchAI.mq5 LOPEN PaperLog):
                 # LOPEN,epoch,posid,order,deal,dir,entry,sl,tp,lots,risk$,stop,timeout,tag
                 # = 14 fields; posid at [2], dir at [5]. Pinned to the MQ5
-                # format string by tests/test_midas_golive_grammar.py.
+                # format string by tests/test_midas_golive_grammar.py. v1.22 appends the
+                # keyed `cfg=<usd>@<pct>` token LAST, which is where `risk$` stops being the
+                # whole answer: it is what was TAKEN, `cfg` is what was CONFIGURED.
                 if parts[0] == "LOPEN" and len(parts) >= 14:
-                    out["open"].append({"posid": parts[2], "epoch": int(parts[1]),
-                                        "dir": int(parts[5]), "entry": float(parts[6]),
-                                        "sl": float(parts[7]), "tp": float(parts[8]),
-                                        "vol": float(parts[9]), "line": ln})
+                    opens[R.live_fill_key(parts) or f"line:{ln}"] = {
+                        "posid": parts[2], "epoch": int(parts[1]),
+                        "dir": int(parts[5]), "entry": float(parts[6]),
+                        "sl": float(parts[7]), "tp": float(parts[8]),
+                        "vol": float(parts[9]), "risk": float(parts[10]),
+                        "cfg_risk": risk_tail_of(parts), "line": ln}
                 elif parts[0] == "LCLOSE" and len(parts) >= 6:
                     out["lclose_ct"] += 1
                     out["reasons"].append(parts[3])
+                    opens.pop(R.live_fill_key(parts), None)
+        out["open"] = list(opens.values())
     except OSError as e:
         out["problems"].append(f"unreadable: {e}")
     except (ValueError, IndexError) as e:
         out["problems"].append(f"corrupt row: {e}")
     return out
+
+
+def risk_basis_text(pos: dict) -> str:
+    """One honest sentence about a live fill's CONFIGURED vs TAKEN risk, or "" when the row
+    predates the v1.22 stamp.
+
+    `taken` is the LOPEN row's own `risk$` field; `configured` is what the preset asked for.
+    They differ whenever the venue's lot step cannot express the budget, in either direction,
+    and a reader shown only the first number cannot tell a min-lot fill from a sized one. This
+    is a DISCLOSURE, not a rule violation: the venue's granularity is not something the arm
+    can breach. The opposite case — the floor lot risking MORE than configured — is a real
+    question, and it is named rather than hidden.
+    """
+    cfg = pos.get("cfg_risk") or {}
+    if "cfg_risk_usd" not in cfg:
+        return ""
+    cfg_usd, pct, taken = cfg["cfg_risk_usd"], cfg["cfg_risk_pct"], pos["risk"]
+    if cfg_usd <= 0:
+        return f"UNUSABLE: configured ${cfg_usd:.2f} ({pct:.2f}%) is not a budget"
+    gap = taken - cfg_usd
+    word = ("QUANTISED DOWN" if gap < -0.005
+            else "OVERSHOOT" if gap > 0.005 else "AS CONFIGURED")
+    return (f"took ${taken:.2f} of ${cfg_usd:.2f} configured ({pct:.2f}% of equity) — "
+            f"{word} ({gap:+.2f})")
 
 
 def print_floor_zones(inv: list[dict], unhealthy: bool) -> bool:
@@ -1205,7 +1322,54 @@ def print_midas_section() -> bool:
             print(paint(f"  journal retention: {msg}", "y"))
         else:
             print(f"  journal: {msg}")
+    print_shadow_record()
     return unhealthy
+
+
+#: The sweep-shadow forward record is quoted from its PUBLISHED artifact and
+#: never from the resolver: `scripts/midas_sweep_shadow.py` is research residue
+#: and must stay outside the live closure (the surface audit's 0-dangling gate),
+#: so this section reads `artifacts/sweep_shadow_forward.json` and imports
+#: nothing from the research layer. Tests monkeypatch SHADOW_ART.
+SHADOW_ART = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "artifacts", "sweep_shadow_forward.json")
+
+
+def print_shadow_record() -> None:
+    """[3b.1] The sweep-shadow forward record, as an artifact quote. Display-only.
+
+    The pre-registered forward verdict (docs/ASIA_SWEEP_FORWARD_PREREG_20260922.md)
+    is the resolver's business; this line exists so every morning report shows the
+    blind-evidence progress without anyone running the resolver by hand. A missing
+    or unreadable artifact is the normal state before rows exist and is reported as
+    such — never as an arm problem, and it never touches the unhealthy verdict.
+    """
+    try:
+        with open(SHADOW_ART, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        print("  [3b.1] sweep-shadow: no forward record published yet "
+              "(rows accumulate from 07:00Z; the resolver writes the artifact)")
+        return
+    checks = d.get("checks") or {}
+    rule = d.get("rule") or {}
+    variant = rule.get("variant", "SWEEP_CONT")
+    main = ((d.get("forward") or {}).get("results") or {}).get(variant) or {}
+    n = main.get("n") or 0
+    cov = checks.get("coverage")
+    age = ""
+    try:
+        hours = (datetime.now(timezone.utc)
+                 - datetime.fromisoformat(d.get("ts", ""))).total_seconds() / 3600.0
+        age = f", artifact {hours:.1f}h old"
+    except (ValueError, TypeError):
+        pass
+    print(f"  [3b.1] sweep-shadow: {d.get('verdict', '?')} — N={n} of "
+          f"{rule.get('n_target', 60)} resolved ({variant}) | EA rows "
+          f"{checks.get('rows_total', 0)}, in-window {checks.get('rows_in_window', 0)}, "
+          f"coverage {cov if cov is not None else '-'}, "
+          f"disagreements {checks.get('n_disagreements', 0)}, "
+          f"unmatched {checks.get('n_unmatched', 0)}{age}")
 
 
 def collect_midas_positions(charts: list[tuple[str, str]]) -> list[dict]:
@@ -1279,8 +1443,288 @@ def correlate_midas_positions(positions: list[dict],
 #: through the same zip, so the two rows cannot drift apart either.
 #: The order is the writer's literal argument order in the EA:
 #:   signal, mismatch, session, friday, spread, riskcap, breaker, no_trigger, news
+#:   (+ v1.27: nodata, appended)
 NOFILL_KEYS = ("signal", "mismatch", "session", "friday", "spread", "riskcap",
-               "breaker", "no_trigger", "news")
+               # v1.27 appended `nodata` LAST: the row is append-only and positional, so a new
+               # counter goes on the end and every reader's index list moves with the writer.
+               # It is NOT a refusal: nothing about the arm refused that bar, the engine could
+               # not measure a stop for it (`atr <= 0` / `stop <= 0`). Before v1.27 those two
+               # returns were not counted at all, so a bar the EA could not price was invisible
+               # in the one record built to answer "why didn't it trade".
+               "breaker", "no_trigger", "news", "nodata")
+
+
+#: v1.21 STATE row — the HUD's view, on the record. The order is POSITIONAL and is pinned
+#: against the EA's own format literal by tests/test_midas_hud.py, because the NOFILL
+#: lesson of 2026-09-21 was that a reader whose key order disagrees with the writer's field
+#: order mislabels every column from that point on, invisibly (a permutation of zeros is
+#: indistinguishable from a correct reading).
+STATE_KEYS = ("sig_ct", "mac", "h4", "h1", "trig", "rsi_x100", "in_session",
+              "lots_x100", "risk_x100", "day_pnl", "cap", "floor")
+
+
+def dir_word(d: int) -> str:
+    return "up" if d > 0 else ("down" if d < 0 else "?")
+
+
+def regime_word(mac: int) -> str:
+    if mac == 2:
+        return "not measured yet"
+    if mac > 0:
+        return "BULLISH"
+    if mac < 0:
+        return "BEARISH"
+    return "MIXED (H1/H4 disagree)"
+
+
+def state_last(path: str) -> dict | None:
+    """The most recent STATE row: what the chart's HUD was showing, read from the ledger.
+
+    WHY THE HUD NEEDS A READER AT ALL. A `Comment()` on a chart is not a record: it
+    changes with the next tick, it is gone when the terminal is closed, and it cannot be
+    audited tomorrow. The EA writes the same numbers into a STATE row, and this renders
+    them — so "what did it see at 14:15" is a question the file answers.
+
+    Keys: STATE_KEYS, positional after the prefix and the two epochs. A short row is
+    ignored rather than partially believed, and the last COMPLETE row wins.
+    """
+    last = None
+    try:
+        with open(path) as fh:
+            for line in fh:
+                p = line.rstrip("\n").split(",")
+                if len(p) < 14 or p[0] != "STATE":
+                    continue
+                row = {"ct": int(p[1])}
+                row.update(zip(STATE_KEYS, (int(p[2]), int(p[3]), int(p[4]), int(p[5]),
+                                            int(p[6]), int(p[7]), int(p[8]), int(p[9]),
+                                            int(p[10]), float(p[11]), float(p[12]),
+                                            float(p[13]))))
+                row["cfg_risk"] = risk_tail_of(p)   # v1.22, keyed: not a positional column
+                row["state_tail"] = state_tail_of(p)   # v1.27: the bar's own context
+                last = row
+    except (OSError, ValueError):
+        return None
+    return last
+
+
+def state_text(row: dict) -> str:
+    """The one rendering of a STATE row, so the CLI and the chart use the same words."""
+    cfg = row.get("cfg_risk") or {}
+    # The configured-vs-prospective line rides only when the row carries the v1.22 token, and
+    # it names the direction: a size the venue's lot step had to cut must not read like one
+    # that met the budget.
+    quant = ""
+    if "cfg_risk_usd" in cfg:
+        cfg_usd, taken = cfg["cfg_risk_usd"], row["risk_x100"] / 100
+        quant = (f" of ${cfg_usd:.2f} configured ({cfg['cfg_risk_pct']:.2f}%)"
+                 + (" QUANTISED DOWN" if taken < cfg_usd - 0.005
+                    else " OVERSHOOT" if taken > cfg_usd + 0.005 else " AS CONFIGURED"))
+    ctx = state_context_text(row.get("state_tail") or {})
+    return (f"H4 {dir_word(row['h4'])} / H1 {dir_word(row['h1'])} -> "
+            f"{regime_word(row['mac'])} | trigger "
+            f"{'LONG' if row['trig'] > 0 else ('SHORT' if row['trig'] < 0 else 'none')} "
+            f"| RSI {row['rsi_x100'] / 100:.1f} | "
+            f"{'in session' if row['in_session'] else 'outside session'} | "
+            f"{row['lots_x100'] / 100:.2f} lots risk ${row['risk_x100'] / 100:.2f}{quant} | "
+            f"day {row['day_pnl']:+.2f} of cap ${row['cap']:.0f} | floor ${row['floor']:.0f}"
+            + ctx)
+
+
+#: v1.27 STATE-row context (`StateAppend()`, the same tail an OPEN row carries).
+_SPREAD_HOURS = 24
+
+
+def state_context_text(tail: dict) -> str:
+    """The bar's own context, or "" when the row predates v1.27 (or is malformed).
+
+    THE SENTINELS ARE RENDERED AS SENTINELS, never defaulted. `hour_utc == -1` and
+    `news == "na"` are the EA saying it could not assert the axis, and printing them as an
+    hour or as "no news" is precisely the confident-wrong-value this program keeps paying for.
+    """
+    if not tail or "malformed" in tail:
+        return ""
+    hour = tail.get("hour_utc", -1)
+    hour_s = f"{hour:02d}Z" if hour >= 0 else "hour unasserted"
+    vol = tail.get("vol_ratio", 0.0)
+    vol_s = f"vol x{vol:.2f}" if vol > 0 else "vol unmeasurable"
+    news = tail.get("news", "na")
+    return (f" | bar context: {hour_s}, {vol_s}, news {news}, "
+            f"server offset {tail.get('off_min', -9999)} min")
+
+
+def spread_hours(path: str) -> dict | None:
+    """v1.27 SPREADHOUR: the arm's own spread by UTC hour, or None when it has written none.
+
+    WHY THE LEDGER AND NOT THE CORPUS. The session finding this arm's research produced rests
+    on the venue's spread being FLAT at 0.2 pts in every hour — and that flatness was read off
+    the data of record, not off the live feed. This reader is the other half: what the arm
+    actually measured. Returns the LAST row only (one is written per UTC day), with the hours
+    that carry samples, so an hour with no quotes is absent rather than reported as 0.0 —
+    which would read as the tightest hour of the day.
+    """
+    last = None
+    try:
+        with open(path) as f:
+            for line in f:
+                p = line.rstrip("\n").split(",")
+                # prefix + epoch + day + 24 x (hour, n, mean, max) = 3 + 96 fields.
+                if len(p) < 3 + 4 * _SPREAD_HOURS or p[0] != "SPREADHOUR":
+                    continue
+                try:
+                    hours = {}
+                    for h in range(_SPREAD_HOURS):
+                        base = 3 + 4 * h
+                        n = int(p[base + 1])
+                        if n > 0:
+                            hours[h] = {"n": n, "mean": float(p[base + 2]),
+                                        "max_x100": int(p[base + 3])}
+                    last = {"epoch": int(p[1]), "day": int(p[2]), "hours": hours}
+                except ValueError:
+                    continue
+    except OSError:
+        return None
+    return last
+
+
+def spread_hours_text(row: dict) -> str:
+    """One line: hour, sample count and mean spread, tightest-first, spread in POINTS."""
+    hours = row.get("hours") or {}
+    if not hours:
+        return "no quotes sampled"
+    ranked = sorted(hours.items(), key=lambda kv: kv[1]["mean"])
+    span = f"{ranked[0][1]['mean']:.2f}-{ranked[-1][1]['mean']:.2f}"
+    body = ", ".join(f"{h:02d}Z {v['mean']:.2f}({v['n']})" for h, v in ranked[:6])
+    return (f"{len(hours)}/24 hours sampled, mean spread {span} pts across them — "
+            f"tightest: {body}")
+
+
+#: v1.28 SWEEPSHADOW — the forward shadow record of the Asian-range sweep continuation.
+#: 13 fields: prefix, write, sig_open, utc_day, asian_hi, asian_lo, range_bars, side, first,
+#: reclaim, stop_d, off_min, version. `side` is nonzero ONLY on the first sweep of that day
+#: on that side, so it IS `SWEEP_CONT`'s direction; the mirror and the textbook reversal
+#: read are derivable from the row and are deliberately not stored.
+SWEEP_SHADOW_FIELDS = 13
+
+
+def sweep_shadow_last(path: str) -> dict | None:
+    """How much of the forward shadow the arm has recorded, and its last row.
+
+    THE COUNT IS THE POINT, not the last row. A `SWEEPSHADOW` row is written for EVERY
+    evaluated bar inside UTC 07-18 — not only when a sweep fired — so `rows` measures how
+    much of the window the arm was actually up for, and `fired` is the setup count the
+    forward record is accumulating. A reader shown only the last row could not tell "no
+    sweeps yet" from "the terminal was down", which is exactly the confusion the coverage
+    counter in `scripts/midas_sweep_shadow.py` exists to prevent.
+
+    Returns a dict with zero counts when the book is fine but holds no rows (the honest
+    answer on a v1.27 chart), and None only when the ledger cannot be read at all.
+    """
+    rows = fired = unreadable = 0
+    last = None
+    try:
+        with open(path) as f:
+            for line in f:
+                if not line.startswith("SWEEPSHADOW,"):
+                    continue
+                p = line.rstrip("\n").split(",")
+                if len(p) != SWEEP_SHADOW_FIELDS:
+                    unreadable += 1
+                    continue
+                try:
+                    row = {"write": int(p[1]), "sig_open": int(p[2]), "utc_day": int(p[3]),
+                           "asian_hi": float(p[4]), "asian_lo": float(p[5]),
+                           "range_bars": int(p[6]), "side": int(p[7]), "first": int(p[8]),
+                           "reclaim": int(p[9]), "stop_d": float(p[10]),
+                           "off_min": int(p[11]), "version": p[12]}
+                except ValueError:
+                    unreadable += 1
+                    continue
+                rows += 1
+                if row["side"] != 0:
+                    fired += 1
+                last = row
+    except OSError:
+        return None
+    return {"rows": rows, "fired": fired, "unreadable": unreadable, "last": last}
+
+
+def sweep_shadow_text(row: dict) -> str:
+    """One line. The frame is printed beside the bar, never subtracted silently."""
+    if row.get("rows", 0) == 0:
+        return ("no rows yet — the shadow starts on the next evaluated bar inside UTC 07-18"
+                + (f" ({row['unreadable']} unreadable row(s) skipped)"
+                   if row.get("unreadable") else ""))
+    last = row.get("last") or {}
+    off = last.get("off_min")
+    sig = last.get("sig_open") or 0
+    if off is not None and sig and off != STATE_OFF_UNKNOWN:
+        when = datetime.fromtimestamp(sig - off * 60, timezone.utc).strftime("%m-%d %H:%M")
+        frame = f"{when}Z (server +{off}min)"
+    else:
+        frame = "frame unasserted"
+    return (f"{row['rows']} row(s), {row['fired']} with a sweep (the setup count) — "
+            f"last {frame} side {last.get('side')} range "
+            f"{last.get('asian_hi'):.2f}/{last.get('asian_lo'):.2f} "
+            f"({last.get('range_bars')} bars) stop {last.get('stop_d'):.2f}")
+
+
+#: The EA's "no offset may be named" sentinel. Repeated here rather than imported from
+#: `live_readiness` so this module stays free of the prop layer.
+STATE_OFF_UNKNOWN = -9999
+
+
+#: v1.23 SPEC row — the venue's self-inconsistency as the EA recorded it. Fields are
+#: KEYED (`tv=`, `ts=`, `cs=`, `broker=`, `settled=`, `used=`, `ratio=`), so no column
+#: order can be misread here; only the row's own UTC epoch is positional after the prefix.
+SPEC_FIELDS = ("tv", "ts", "cs", "broker", "settled", "used", "ratio")
+
+
+def spec_last(path: str) -> dict | None:
+    """The most recent SPEC row: the venue spec the EA observed and what it sized on.
+
+    WHY THIS EXISTS. Until v1.23 the EA re-printed `TICK VALUE MISMATCH` from every
+    caller of `DollarPerUnitPerLot()` — the 15-minute heartbeat refreshes the HUD and
+    writes the STATE row, both of which call it — so the same two static numbers
+    repeated all day and buried the very refusals the journal exists to carry. It now
+    prints once per session (or when the numbers move) and records those same moments
+    as a SPEC row, which is why this reader exists: the journal is allowed to be quiet
+    only if the file still answers what the numbers were.
+
+    Keyed fields, so a changed writer or an extended row cannot silently mislabel a
+    column (the NOFILL lesson, 2026-09-21). A row missing any field is ignored rather
+    than partially believed, and the last COMPLETE row wins.
+    """
+    best: dict | None = None
+    try:
+        with open(path) as f:
+            for line in f:
+                p = line.strip().split(",")
+                if len(p) < 3 or p[0] != "SPEC":
+                    continue
+                try:
+                    row: dict = {"ct": int(p[1])}
+                    for tok in p[2:]:
+                        k, _, v = tok.partition("=")
+                        if k in SPEC_FIELDS and v:
+                            row[k] = float(v)
+                except ValueError:
+                    continue
+                if all(k in row for k in SPEC_FIELDS):
+                    best = row
+    except OSError:
+        return None
+    return best
+
+
+def spec_text(row: dict) -> str:
+    """The one rendering of a SPEC row, so the CLI and the journal use the same words."""
+    if row["settled"] > 0:
+        return (f"broker tv/ts={row['broker']:.2f} vs order_calc_profit {row['settled']:.2f} per "
+                f"price unit (ratio {row['ratio']:.2f}) — venue spec self-inconsistent; "
+                f"sized on the settled value")
+    return (f"broker tv/ts={row['broker']:.2f} vs contract {row['cs']:.2f} per price unit "
+            f"(ratio {row['ratio']:.2f}) — order_calc_profit unavailable; sized on geometry")
 
 
 def nofill_open_day(path: str) -> dict | None:
@@ -1294,20 +1738,35 @@ def nofill_open_day(path: str) -> dict | None:
     back at init); this reads it, so "why didn't it trade" answers during the day and
     survives the reloads — which is exactly when the operator is asking.
 
-    Keys: the nine NOFILL_KEYS plus `day` (the UTC day number the counters belong to).
-    The row is append-only and positional, so the last COMPLETE row wins and a shorter
-    row is ignored rather than partially believed.
+    Keys: the NOFILL_KEYS plus `day` (the UTC day number the counters belong to). The row
+    is append-only and positional, so the last COMPLETE row wins and a shorter row is
+    ignored rather than partially believed.
+
+    v1.27: THE FLOOR IS THE SAME ONE THE EA USES, and that is deliberate. `DiagRestoreFromLedger`
+    refuses a snapshot written before the `nodata` append (12 fields) because restoring it would
+    invent a ZERO for the counter it does not carry. If this reader accepted that row it would
+    report a day-in-progress the EA had itself DISCARDED — two readers of one row disagreeing
+    about whether it counts, which is the R6 lesson. A pre-append row is therefore not a partial
+    state here either: it is a shorter complete state, and it is refused.
+
+    v1.27: THE SLICE IS DERIVED FROM THE KEY TUPLE, not written as `12`. `nodata` was
+    appended as the tenth counter, so the writer's row is now 13 fields while a v1.26 row is
+    12 — and a literal `p[3:12]` would silently read nine of ten counters and report the last
+    one as absent. Every consumer that counts fields by hand is one append away from the
+    mislabel this module's NOFILL reader was rebuilt to prevent, so the count lives in one
+    place. A 9-counter row still parses (zip stops at the shorter side); `nodata` is then
+    simply absent rather than zero, which is the honest reading of a row that predates it.
     """
     try:
         best: dict | None = None
         with open(path) as f:
             for line in f:
                 p = line.strip().split(",")
-                if len(p) < 12 or p[0] != "NOFILLSUM":
+                if len(p) < 3 + len(NOFILL_KEYS) or p[0] != "NOFILLSUM":
                     continue
                 try:
                     row = {"day": int(p[2]), "epoch": int(p[1])}
-                    row.update(zip(NOFILL_KEYS, map(int, p[3:12])))
+                    row.update(zip(NOFILL_KEYS, map(int, p[3:3 + len(NOFILL_KEYS)])))
                 except ValueError:
                     continue
                 best = row
@@ -1326,10 +1785,16 @@ def nofill_summary(path: str, now_ts: float | None = None) -> dict | None:
         with open(path) as f:
             for line in f:
                 p = line.strip().split(",")
-                if len(p) >= 10 and p[0] == "NOFILL":
+                # v1.27: the counter count comes from NOFILL_KEYS, never a literal, so appending
+                # a counter cannot leave a reader behind. This reader is deliberately TOLERANT
+                # (prefix, epoch, at least one counter): it is a 24h AGGREGATE over rows that
+                # may predate a counter, and zip drops the absent key rather than inventing a
+                # zero for it. The strict floor belongs on the SNAPSHOT reader, where a missing
+                # field would be restored as a confident zero — see nofill_open_day.
+                if len(p) > 2 and p[0] == "NOFILL":
                     try:
                         if int(p[1]) >= cutoff:
-                            for key, v in zip(NOFILL_KEYS, map(int, p[2:11])):
+                            for key, v in zip(NOFILL_KEYS, map(int, p[2:2 + len(NOFILL_KEYS)])):
                                 agg[key] = agg.get(key, 0) + v
                     except ValueError:
                         continue
@@ -1467,6 +1932,36 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
     veq_s = f"{veq:.2f}" if veq is not None else "n/a"
     start_s = f" (start {start:.2f})" if start is not None else ""
     print(f"  ledger: {os.path.basename(ledger_path)} | age {age_s} | veq {veq_s}{start_s}")
+    st = state_last(ledger_path)       # v1.21: the same view the chart's HUD shows
+    if st:
+        # THE TWO CLOCKS IN THIS ROW ARE DIFFERENT ON PURPOSE, and conflating them is a
+        # whole-offset error that reads as a plausible time. The row's own timestamp is UTC
+        # (TimeUTCNow); the bar epoch it evaluated is SERVER-stamped, like every bar epoch in
+        # this program (the parity work pinned the offset for exactly this reason). So the
+        # bar is labelled `server`, not converted here — a conversion needs the era table,
+        # and the offset line below already reports the offset this terminal is running.
+        written = (datetime.fromtimestamp(st["ct"], timezone.utc).strftime("%m-%d %H:%M")
+                   if st["ct"] else "n/a")
+        bar = (datetime.fromtimestamp(st["sig_ct"], timezone.utc).strftime("%m-%d %H:%M")
+               if st["sig_ct"] else "n/a")
+        print(f"  view (ledger STATE, written {written} UTC | last bar {bar} server): "
+              f"{state_text(st)}")
+    sp = spec_last(ledger_path)        # v1.23: the venue spec the EA last observed
+    if sp:
+        sp_written = datetime.fromtimestamp(sp["ct"], timezone.utc).strftime("%m-%d %H:%M")
+        print(f"  venue spec (ledger SPEC, written {sp_written} UTC): {spec_text(sp)}")
+    sh = spread_hours(ledger_path)     # v1.27: the arm measuring its own spread by hour
+    if sh:
+        sh_day = (datetime.fromtimestamp(sh["epoch"], timezone.utc).strftime("%m-%d")
+                  if sh["epoch"] else "n/a")
+        print(f"  spread by hour (ledger SPREADHOUR, day {sh_day} UTC): {spread_hours_text(sh)}")
+        print("    (record only — no rule reads it; the corpus is flat across hours on this "
+              "venue, and this is the live check of that)")
+    sw = sweep_shadow_last(ledger_path)   # v1.28: the forward sweep shadow, no order path
+    if sw is not None:
+        print(f"  sweep shadow (ledger SWEEPSHADOW): {sweep_shadow_text(sw)}")
+        print("    (record only — NO order path; resolved against the forward "
+              "pre-registration by scripts/midas_sweep_shadow.py)")
     od = nofill_open_day(ledger_path)  # v1.20: the day IN PROGRESS, restart-proof
     if od and od.get("signal"):
         top = sorted(((k, v) for k, v in od.items()
@@ -1484,22 +1979,54 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
         news = nf.get("news", 0)
         if news and not any(k == "news" for k, _ in top):
             line += (", " if line else "") + f"news={news}"
+        # v1.27: `nodata` is guaranteed a place for the mirror-image reason. It is NOT a
+        # refusal — nothing about the arm refused those bars, the ENGINE could not measure a
+        # stop for them — and it is nonzero only when the feed or history is degraded, which is
+        # exactly when a top-4 cut must not be allowed to hide it behind ordinary counts.
+        nod = nf.get("nodata", 0)
+        if nod and not any(k == "nodata" for k, _ in top):
+            line += (", " if line else "") + f"nodata={nod}"
         print("  no-fill (24h): " + line
               + "  (NOFILL diagnostics — reasons the engine did not trade)")
     if is_live:
         # The LIVE arm's block: open positions from dangling LOPEN rows, equity
         # is the BROKER ACCOUNT (the virtual EQ rows are inert in live mode).
         if lv["open"]:
+            # ONE CLOCK. The row's epoch is the venue's SERVER clock; `now` is UTC, so the
+            # age is only meaningful once the persisted offset is added back (see
+            # server_offset_min). Unrecorded offset -> say so rather than print a
+            # confident negative age.
+            off_min = server_offset_min()
+            unproven = "" if off_min is not None else \
+                " [frame unproven: no clock offset on record]"
             for o in lv["open"]:
-                age_h_o = (datetime.now().timestamp() - o["epoch"]) / 3600
+                age_h_o = ((datetime.now().timestamp() + (off_min or 0) * 60)
+                           - o["epoch"]) / 3600
                 print(paint(f"  LIVE POSITION: {'LONG' if o['dir'] > 0 else 'SHORT'} "
                             f"{o['vol']} lots @ {o['entry']:.2f} | SL {o['sl']:.2f} "
                             f"TP {o['tp']:.2f} | open {age_h_o:.1f}h "
-                            f"(timeout 720 min; SL/TP server-side)", "b"))
+                            f"(timeout 720 min; SL/TP server-side){unproven}", "b"))
+                # v1.22: the fill's own configured-vs-taken risk, from the row. Without it
+                # the operator reads `risk$` alone and cannot see that the venue's lot step
+                # has been halving (or doubling) what the preset asks for.
+                note = risk_basis_text(o)
+                if note:
+                    print(f"                risk {note} (from the LOPEN row)")
             if lv["lclose_ct"]:
                 print(f"  (prior live closes counted in the closed line below)")
         else:
-            print("  live: flat (armed; signals in-session 06-20 UTC only)")
+            # The window is the EA's InpSessionStartHour..EndHour applied to BAR EPOCHS,
+            # i.e. the BROKER SERVER frame - not UTC. The line said "UTC" until
+            # 2026-09-22, when the arm's own STATE rows showed the gate classifying server
+            # hours 9..14 while real UTC was 07..12: on this venue (UTC+2) "06-20 UTC" was
+            # really 04:00-18:00 UTC, two hours of the operator's trading day at each end.
+            # Read from the preset rather than restated, so the two cannot drift again.
+            sh = re.search(r"(?m)^InpSessionStartHour\s*=\s*(\d+)", txt)
+            eh = re.search(r"(?m)^InpSessionEndHour\s*=\s*(\d+)", txt)
+            win = (f"{int(sh.group(1)):02d}-{int(eh.group(1)):02d} SERVER"
+                   if sh and eh else "its preset window")
+            print(f"  live: flat (armed; signals in-session {win} only - the gate classifies "
+                  f"bar epochs, so this is NOT UTC)")
         # The venue holds the second copy of what this arm did. A flat ledger is NOT a
         # health claim: it is either "nothing traded yet" or "the EA is not running", and
         # only the account's own deal history can tell those apart
@@ -1508,7 +2035,8 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
             from midas_watchdog import live_fill_reconciliation
             mm = re.search(r"(?m)^InpMagic\s*=\s*(\d+)", txt)
             rec = live_fill_reconciliation(ledger_path,
-                                          magic=int(mm.group(1)) if mm else 0)
+                                          magic=int(mm.group(1)) if mm else 0,
+                                          reader=LIVE_FILL_DEAL_READER)
             print(f"  fills: {rec['detail']}")
             if not rec["healthy"]:
                 problems.append("live fills: " + rec["detail"])
@@ -1569,6 +2097,26 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
             problems.append(f"watchdog escalated: {wd_line}")
     except ImportError:
         print("  watchdog: midas_watchdog module unavailable")
+    # The heartbeat-gap alarm (2026-09-22). The watchdog line above answers "is the arm
+    # beating NOW" — it reads the ledger's age at the moment it runs, so it cannot see the
+    # hours when it did not run, and on the morning of 2026-09-22 that was 407 consecutive
+    # minutes with nothing said about them. This line answers "was anything watching at
+    # 03:00", from the recorded pass timeline, and it stays until a human acknowledges it.
+    try:
+        from live_coverage import alarm_line, prereg
+        cov_line = alarm_line()
+        if cov_line and "PROBLEM" in cov_line:
+            print(paint(f"  coverage: {cov_line}", "r"))
+            problems.append(f"heartbeat gap: {cov_line}")
+        elif cov_line:
+            print(f"  coverage: {cov_line}")
+        else:
+            rule = prereg()
+            print(f"  coverage: no unacknowledged heartbeat-gap alarm "
+                  f"(none over {rule['gap_alarm_min']} min between passes, no ledger "
+                  f"heartbeat over {rule['heartbeat_alarm_min']} min)")
+    except ImportError:
+        print("  coverage: live_coverage module unavailable")
     for p in problems:
         print(paint(f"  PROBLEM: {p}", "r"))
     return bool(problems)

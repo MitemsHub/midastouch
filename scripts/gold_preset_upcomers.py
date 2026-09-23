@@ -69,6 +69,126 @@ ACCOUNT_SIZE = 25_000.0
 #: above the venue's min-lot floor (~$33 for a stop this wide), so the EA can size within it
 #: instead of the floor forcing an overshoot.
 RISK_PERCENT = "0.25"
+
+#: STRATEGY MODE, and it is the mode the certification machinery was actually run on.
+#:
+#: The arm was armed on InpMode=0 (ORIGINAL), and the arming record flagged the mismatch
+#: itself: every parity window and the walk-forward gate certify InpMode=1
+#: (REVERSE_DIRECTION), and the 2026-09-21 12:18 parity PASS is a REVERSE_DIRECTION pass.
+#: Running mode 0 meant no parity run and no gate verdict spoke about the live
+#: configuration at all — in either direction.
+#:
+#: WHAT THIS CHANGE IS NOT: a claim that mode 1 is the better mode. Both are NO-SHIP on
+#: the pre-registered gate (pf < 1.30 AND expectancy < +0.15R, both modes), and the venue
+#: sweep (artifacts/midas_sweep_20260921.json) has ORIGINAL ahead in three of the four
+#: windows and mode 1 ahead in the one window a mode could not have been selected on:
+#:
+#:   window             ORIGINAL                     REVERSE_DIRECTION
+#:   is1  (in-sample)    142 tr  +0.1668R  pf 1.390   186 tr  +0.0402R  pf 1.076
+#:   is2  (in-sample)    209 tr  +0.1166R  pf 1.223   259 tr  +0.0297R  pf 1.003
+#:   wf                  115 tr  +0.0953R  pf 1.128   151 tr  +0.0098R  pf 0.930
+#:   oos  (out-of-sample) 94 tr  +0.0697R  pf 1.141   108 tr  +0.0759R  pf 1.158
+#:
+#: So the case is configuration integrity — a certified NAME that matches the certified
+#: CONFIGURATION — plus the only out-of-sample window, where mode 1 wins on expectancy,
+#: on total (+8.199R against +6.555R) and on max drawdown (5.41R against 6.87R), with 15%
+#: more fills. Mode 0's in-sample lead is the lead of a mode that was chosen there; it is
+#: not evidence. Neither number is large, and neither mode is validated.
+#:
+#: THE MECHANISM, MEASURED ON THIS ARM'S OWN LEDGER (not inferred from the sweep): of the 31
+#: bars the EA evaluated from 2026-09-21 20:00 UTC on, every bar that carried a trigger at
+#: all (3 of them, each mac=-1/trig=+1) was refused by ORIGINAL's macro requirement and is
+#: an entry under mode 1. Mode 1 is not a superset — it refuses the agreement case
+#: (mac == trig) that ORIGINAL takes — so it trades a different set, not simply more.
+#:
+#: The M1 FORWARD-COLLECTION CONTROL STAYS ORIGINAL: protocol §2/§10 Amendment 2 pins it
+#: to the plainest variant, and its own header records the 2026-09-17 incident where an
+#: unregistered drift put mode=2 on that arm. Mode is therefore an ARM-level key pinned in
+#: tests/test_midas_golive_grammar.py (ARM_MODE), not part of the family-wide literal.
+MODE = "1"
+
+#: THE TRIGGER THRESHOLD (Bollinger deviation), amended 2026-09-22 because the arm was flat.
+#:
+#: WHY IT MOVED. The arm has placed ZERO trades, and its own refusal census says why: over the
+#: UTC day's 25 evaluated bars, 21 carried no trigger at all ('notr') and the 4 that did were
+#: refused by the mode; every protective counter — session, friday, spread, riskcap, breaker,
+#: news — was 0. So no safety measure had refused anything, and the fill rate was decided by how
+#: often a trigger fires. That is a threshold, not a gate: this changes the trigger's
+#: sensitivity and touches no protective rule, no size and no mode.
+#:
+#: THE MEASUREMENT (pre-registered 2026-09-22 in docs/FREQUENCY_AXES_PREREG_20260922.md BEFORE
+#: it ran; artifact artifacts/midas_frequency_axes_20260922.json). Engine: midas_sweep.run_mode
+#: UNCHANGED, every keyword at its certified default. Corpus: the VENUE'S OWN BARS
+#: (data/forex/xauusd/*_upcomers.csv) shifted into true UTC — NOT the retired 50,000-bar
+#: research series, whose bytes were deleted 2026-09-21 and whose table is what seeded (and
+#: then failed to confirm) this hypothesis. Mode: REVERSE_DIRECTION, the armed mode.
+#: Harness self-check (binding): it must reproduce the pinned wfv law n=53 / +14.2563R first.
+#:
+#:   HELD OUT — oos 2026-04-01 -> 2026-09-16, 168 days, window = what the arm actually runs
+#:   k      n     /day   zero-entry days   expR     pf      win     ddR    netR
+#:   2.0  111    0.66        50.3%       -0.003   0.981   0.414    7.6    -0.29   <- was
+#:   1.5  130    0.77        40.8%       +0.087   1.201   0.462    6.5   +11.30   <- now
+#:   1.0  140    0.83        37.3%       -0.009   0.966   0.414    8.9    -1.33
+#:   SELECT — wf 2025-09-15 -> 2026-03-31: 2.0 = +0.426R / pf 2.377, and 1.5 = +0.500R / pf 2.798
+#:   (same ordering, different span), against 1.0 = +0.394R / pf 2.192.
+#:
+#: So 1.5 is better than the incumbent on BOTH spans, on the entry rate AND on quality, and it
+#: is the cell that survived the pre-registered rule (raise entries/day, lose <=0.10R of
+#: expectancy, lose <=2R of drawdown, on the held-out window): +17% entries, expectancy from
+#: -0.003R to +0.087R, drawdown 7.6R -> 6.5R, days with no entry 50.3% -> 40.8%.
+#:
+#: THE PRIOR THIS FALSIFIED, AND WHY IT IS RECORDED RATHER THAN QUIETLY DROPPED. The Sep-18
+#: sweep (artifacts/midas_variant_research_20260918.json, the retired series) showed smaller k
+#: better at EVERY RSI band, monotonically, and pointed at k=1.0. On the venue's own bars in
+#: the held-out window k=1.0 is the WORST of the three: negative expectancy in every window
+#: tested, pf < 0.97. The mechanism is visible in the code: the trigger is `bb_touch`, ELSE
+#: the RSI branch (`elif t_rsi >= 70 / <= 30`), so narrowing the band does not ADD to the RSI
+#: trigger, it DISPLACES it — at k=1.0 the band touches often enough to swallow the RSI
+#: signals that carry the edge, and the trade set becomes band-touch-only mean reversion.
+#: 1.5 is the point where both branches still contribute. A monotone in-sample sweep could not
+#: have shown this; only a held-out window on the market the EA trades did.
+#:
+#: WHAT THIS IS NOT. Not a validation and not a claim of profitability: at +0.087R over 130
+#: trades the t-statistic is ~0.9, so the held-out expectancy is statistically indistinguishable
+#: from zero, and the venue's own gate (pf>=1.30, expectancy>=+0.15R) is still FAILED. It is an
+#: ordering between three thresholds that held on two spans and one market, measured under a
+#: pre-registered rule; the account remains an operator override on an unvalidated strategy.
+#: A PARITY PASS AT 1.5 WAS RUN AND PASSED, 2026-09-22: `--window tickcov --live-stance` on real
+#: ticks, artifact artifacts/midas_parity_result_20260922_1654.json — the pass of record, because
+#: it ran the build the arm runs (v1.25, source 011e0ab9) — python 9 trades / +0.2699R
+#: against the EA's 9 / +0.271R, keys agreeing, max|dR| 0.0004. The certificate is about this
+#: configuration and not a no-op: the FIRST pass at 1.5 ran a trade set that MOVED from 2.0's
+#: (two entries present at 2.0 are gone, two new ones appear), and the trade set has not moved
+#: since — which is the measurement that the two builds after it (v1.24, v1.25) are telemetry and
+#: fill-row integrity respectively. It certifies engine equivalence, not profitability: the
+#: venue's gate is still FAILED and the operator override still stands.
+#: THAT SAME ARTIFACT ALSO CARRIES THE ACCOUNT LAYER, which no earlier pass could: a SECOND pass
+#: in the arm's OWN stance (`--live-stance`: risk 0.25 %, the prop governor on, live execution,
+#: all read from MidastouchAI_upcomers_gold_LIVE.set) reported SIZING PASS on 7 closed fills —
+#: each sized the way the declared rule sizes it at the equity it actually had, 5 of them floored
+#: to the venue's min lot — with the governor leg VACUOUS (no modelled rule bound: the largest
+#: day drawdown was 0.318 % of the 3 % cap). The BAR pass pins those inputs OFF, so before this
+#: the sizing and the governor were certified nowhere.
+#: (The earlier 14:02Z, 14:26Z and 14:47Z passes, artifacts ..._1502.json, ..._1526.json and
+#: ..._1547.json, certify the SAME contract with the same nine trades on the PREVIOUS builds
+#: (v1.23 and v1.24); all are kept, and none is counted twice.)
+BB_DEV = "1.5"
+#: The SPREAD COST CAP (InpSpreadCapPctStop), measured 2026-09-23 BEFORE the change was
+#: made — the veto is `spread > cap% x stop`, so the cap in R is cap% / 100. The certified
+#: engine of record's own entry costs on the 130 held-out fills (oos, venue corpus, UTC
+#: 04-18): mean 0.0080R, p90 0.0141R, p99 0.0184R, max 0.0193R — so the OLD 1.5% cap
+#: (0.015R) sat INSIDE the certified trade set's own cost distribution and would have
+#: refused 7 of the 130 certified fills (+1.133R of certified expectancy) on cost alone.
+#: The live venue regime that exposed this (SPREADHOUR, 2026-09-23): $0.47-0.50 spread on
+#: a ~$25 stop = 0.0188-0.0200R, above 1.5% and below 2.0%. 2.5% is the smallest tenth
+#: step that (a) refuses 0 of the 130 certified fills — the cap admits the exact strategy
+#: that was validated instead of carving it, (b) covers the live regime with margin, and
+#: (c) stays a quarter of the engine's own G7 ceiling (mean spread cost > 0.10R fails the
+#: self-check) — 0.025R <= 0.0333R. Trigger, stop, target, session, mode and sizing are
+#: UNCHANGED: the trade set is identical; only the cost gate's floor moved, and it moved
+#: DOWN in effective terms (from vetoing part of the certified set to vetoing none of it).
+#: Recorded as amendment 10 in artifacts/live/armed.json on the same commit.
+SPREAD_CAP_PCT = "2.5"
 #: Distinct from the Deriv-era 7801001 so a ledger cannot mix two eras' fills.
 MAGIC = 7825001
 ARM_TAG = "U25"
@@ -198,6 +318,21 @@ def build(comments: list[str], source_keys: dict[str, str], declared: dict[str, 
         "; would make the only forward record we have unrepresentative of the account it",
         "; is supposed to represent.",
         ";",
+        f"; STRATEGY MODE IS {MODE} (REVERSE_DIRECTION) — THE ONE THE CERTIFICATION RAN ON",
+        "; (2026-09-22). The arm was armed on InpMode=0 (ORIGINAL), which no parity pass and",
+        "; no gate verdict describes: the walk-forward gate certifies mode 1 and FAILED it",
+        "; too. So this aligns the NAME to the certified CONFIGURATION; it is not a claim that",
+        "; mode 1 is the better mode. Venue bars (artifacts/midas_sweep_20260921.json):",
+        ";   ORIGINAL           is1 142tr +0.1668R | is2 209tr +0.1166R | wf 115tr +0.0953R",
+        ";   REVERSE_DIRECTION  is1 186tr +0.0402R | is2 259tr +0.0297R | wf 151tr +0.0098R",
+        ";   oos (the one window not used to pick a mode): ORIGINAL 94tr +0.0697R pf 1.141",
+        ";   maxDD 6.87R, REVERSE_DIRECTION 108tr +0.0759R pf 1.158 maxDD 5.41R, +8.199R vs",
+        ";   +6.555R total and 15% more fills. Both modes are NO-SHIP on the gate.",
+        "; MEASURED on this arm's own ledger: all 3 of the 31 evaluated bars that carried a",
+        "; trigger (each mac=-1/trig=+1) were refused by ORIGINAL and are entries under mode",
+        "; 1. Mode 1 also refuses the agreement case, so it trades a different set, not more.",
+        "; The change is an arming-record amendment (artifacts/live/armed.json), not an edit.",
+        ";",
         f"; RISK PER TRADE IS {RISK_PERCENT}%, AND IT IS A MEASURED NUMBER (2026-09-21).",
         "; The EA's own default is 1.00%, which the sizing scan in",
         "; artifacts/gold_prereg_no_target.json measures as breaching the venue's 3% daily line",
@@ -259,6 +394,9 @@ def build(comments: list[str], source_keys: dict[str, str], declared: dict[str, 
         "InpArmTag": ARM_TAG,
         "InpPaperEquity": f"{ACCOUNT_SIZE:.1f}",
         "InpRiskPercent": RISK_PERCENT,     # see RISK_PERCENT: the measured survivable size
+        "InpMode": MODE,                    # see MODE: the parity/gate-certified mode
+        "InpBBDev": BB_DEV,                 # see BB_DEV: the measured trigger threshold
+        "InpSpreadCapPctStop": SPREAD_CAP_PCT,   # see SPREAD_CAP_PCT: the measured cost gate
         "InpLiveExecution": "true" if live else "false",
         # v1.19e: the state stamp, ON for this arm. Its default is false so the frozen
         # Deriv-era baseline preset and every certified parity run stay byte-identical;

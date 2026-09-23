@@ -92,3 +92,78 @@ def test_a_crashing_pass_is_never_a_silent_success(monkeypatch):
         raise RuntimeError("watchdog import failed")
     monkeypatch.setattr(ps.wd, "check", boom)
     assert ps.one_pass() == 1, "a supervisor that cannot run must not report success"
+
+
+# --- the coverage record (2026-09-22) ------------------------------------------
+#
+# Measured that morning: 54 passes in 25.3 h where a 20-minute cadence owes 76, zero
+# passes in the 01:00-06:00 UTC hours, one gap of 407 minutes. The passes that DID happen
+# recorded nothing about the ones that did not, so these pin the three rules that make a
+# night measurable: every real pass is recorded, a dry run is not a pass, and a NEW gap
+# is an exit code while a standing one is not.
+
+def _quiet(monkeypatch, alarm_new=False, alarm=None):
+    monkeypatch.setattr(ps.wd, "check",
+                        lambda dry_run=False: {"action": "NONE", "ledgers": []})
+    monkeypatch.setattr(ps.wd, "watchdog_summary", lambda: ("summary", False))
+    monkeypatch.setattr(ps.lc, "record_pass",
+                        lambda record, verdict="OK": {"alarm": alarm,
+                                                      "alarm_new": alarm_new})
+
+
+def test_a_new_heartbeat_gap_alarm_is_never_a_silent_success(monkeypatch, capsys):
+    _quiet(monkeypatch, alarm_new=True,
+           alarm={"kind": "supervision-gap", "gap_min": 407.3,
+                  "detail": "no supervision pass for 407.3 min"})
+    assert ps.one_pass() == 1, "the pass that first sees a hole must go red"
+    out = capsys.readouterr().out
+    assert "ALARM supervision-gap" in out and "407.3min" in out
+
+
+def test_a_standing_alarm_does_not_re_red_every_pass(monkeypatch):
+    """A task that goes red every 20 minutes is noise that hides the real alerts; the
+    standing alarm is carried by the alarm record, alerts.log and [3b] instead."""
+    _quiet(monkeypatch, alarm_new=False,
+           alarm={"kind": "supervision-gap", "gap_min": 407.3, "detail": "d"})
+    assert ps.one_pass() == 0
+
+
+def test_a_dry_run_records_no_coverage(monkeypatch):
+    """'What would have happened' is not a pass that happened."""
+    called = []
+    monkeypatch.setattr(ps.wd, "check",
+                        lambda dry_run=False: {"action": "NONE", "ledgers": []})
+    monkeypatch.setattr(ps.lc, "record_pass", lambda *a, **k: called.append(1))
+    assert ps.one_pass(dry_run=True) == 0
+    assert called == []
+
+
+def test_every_real_pass_is_recorded_with_its_verdict(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(ps.wd, "check",
+                        lambda dry_run=False: {"action": "RESTUP", "ledgers": [],
+                                               "problem": "ledger stale"})
+    monkeypatch.setattr(ps.wd, "watchdog_summary", lambda: ("summary", False))
+    monkeypatch.setattr(ps.lc, "record_pass",
+                        lambda record, verdict="OK": seen.update(record=record,
+                                                                  verdict=verdict)
+                        or {"alarm": None, "alarm_new": False})
+    assert ps.one_pass() == 0
+    assert seen["verdict"] == "OK" and seen["record"]["action"] == "RESTUP"
+
+
+def test_the_supervisor_and_the_readiness_leg_name_one_task():
+    """The task the installer registers, the reader verifies and the readiness leg reports
+    must be the same string, or a green leg describes a task nobody runs."""
+    import live_readiness
+    ps1 = PS1.read_text(encoding="utf-8")
+    assert f'[string]$TaskName = "{live_readiness.SUPERVISOR_TASK}"' in ps1
+    assert live_readiness.SUPERVISOR_TASK in (SCRIPTS / "unattended.py").read_text(
+        encoding="utf-8")
+
+
+def test_the_supervisor_reads_the_standing_alarm_in_status(monkeypatch, capsys):
+    monkeypatch.setattr(ps.wd, "watchdog_summary", lambda: ("0 restups", False))
+    monkeypatch.setattr(ps.lc, "alarm_line", lambda: "PROBLEM: supervision-gap — 407 min")
+    assert ps.main(["--status"]) == 1
+    assert "PROBLEM: supervision-gap" in capsys.readouterr().out

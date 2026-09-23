@@ -95,6 +95,14 @@ def test_wf_regen_unchanged_by_the_amendment():
     Reproducibility of the pinned numbers was verified before pinning them: the parity harness's
     own wfv run on the same window, basis and corpus reports 53 trades / +14.2563R (artifact
     artifacts/midas_parity_result_20260921_1213.json), and the veto count was measured as 0.
+
+    RE-POINTED AGAIN 2026-09-22, 53 -> 56 trades: the contract's trigger threshold moved
+    (midas_parity.BB_DEV 2.0 -> 1.5, the pre-registered frequency study
+    docs/FREQUENCY_AXES_PREREG_20260922.md), and the python leg's trigger array moves with it —
+    that is what "one contract" means, and it necessarily moves this law's trade count. The
+    figure was measured by this test's own code path on the venue corpus at the account basis:
+    n=56, +15.9352R, vetoed=0. WHAT DID NOT MOVE IS THE CLAIM: the min-lot veto still never
+    fires on this window, which is the amendment-6 invariant this law exists to protect.
     """
     import midas_parity as P
     spec = P._window_spec("wfv")
@@ -109,6 +117,6 @@ def test_wf_regen_unchanged_by_the_amendment():
         rr = P.M.run_mode(spec["mode"], spec["t0"], spec["t1"], data)
     finally:
         P.M._BASIS = prev
-    assert len(rr.trades) == 53
-    assert abs(sum(t["r"] for t in rr.trades) - 14.256) < 5e-4
+    assert len(rr.trades) == 56
+    assert abs(sum(t["r"] for t in rr.trades) - 15.9352) < 5e-4
     assert rr.vetoed == 0, "the veto fired on the venue corpus — amendment 6's unchanged-claim is FALSE"

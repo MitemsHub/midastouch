@@ -13,7 +13,13 @@ InpArmTag=M1
 InpMode=0
 InpMacroEmaPeriod=20
 InpBBPeriod=20
-InpBBDev=2.0
+; 2026-09-22: 2.0 -> 1.5, following the family pin (gold_preset_upcomers.BB_DEV, and
+; midas_parity.BB_DEV). The strategy may not vary between presets — only the MODE does, and
+; this control stays ORIGINAL (protocol §2/§10 Amendment 2). tests/test_midas_golive_grammar.py
+; asserts every preset against one literal for exactly that reason. Measurement:
+; docs/FREQUENCY_AXES_PREREG_20260922.md. This control is attached to no chart today, so
+; nothing live changes here; the file moves so the family runs ONE strategy.
+InpBBDev=1.5
 InpRSIPeriod=14
 InpRSIUpper=70.0
 InpRSILower=30.0
@@ -23,7 +29,7 @@ InpTpMult=2.0
 InpTimeoutMinutes=720
 InpSessionStartHour=6
 InpSessionEndHour=20
-InpSpreadCapPctStop=1.5
+InpSpreadCapPctStop=2.5
 InpFridayCutoffHour=20
 InpUseNewsFilter=false
 InpStaleMinutes=30

@@ -51,11 +51,21 @@ PRIMARY_SESSION = (6, 20)
 EXIT_STOP = 1.0                 # the parent rule's stop: the geometry is NOT re-optimised here
 
 
-def news_axis(epoch: np.ndarray, n: int) -> tuple[np.ndarray | None, str | None]:
+def news_axis(epoch: np.ndarray, n: int, *, as_of: int | None = None) -> tuple[np.ndarray | None, str | None]:
     """Per-bar "inside a top-tier blackout" mask, or (None, reason) when unmeasurable.
 
     Reads the SAME module, window and filter the EA uses at runtime, and refuses on the module's
     own freshness/coverage terms rather than inventing a weaker one.
+
+    `as_of` (v2, 2026-09-23): the instant freshness is judged AT, defaulting to the corpus's
+    last bar. A FROZEN snapshot always ages past a MOVING corpus tail — a fetch pushes the tail
+    forward and a 24h freshness rule turns a perfectly usable calendar into a refusal that has
+    nothing to do with the window being judged (measured: the 09-23 fetch moved the tail 45.5h
+    past the 09-21 snapshot and broke the forward-cell pin on its second leg). A caller that
+    judges a DECLARED window passes that window's end: the question is whether the calendar was
+    current when the judged window happened, not whether it is current now. Coverage still
+    refuses honestly if the snapshot ends before `as_of` — a calendar that does not reach the
+    judged instant is exactly the silent no-op stand-down this module exists to prevent.
     """
     try:
         import midas_parity  # noqa: PLC0415  (imported late: it reaches for the terminal)
@@ -72,7 +82,7 @@ def news_axis(epoch: np.ndarray, n: int) -> tuple[np.ndarray | None, str | None]
         return None, f"the calendar at {path} is unusable: {exc}"
     except Exception as exc:
         return None, f"the calendar at {path} could not be parsed ({type(exc).__name__}: {exc})"
-    problem = nc.source_problem(cal, int(epoch[n - 1]))
+    problem = nc.source_problem(cal, int(epoch[n - 1] if as_of is None else as_of))
     if problem:
         return None, f"the calendar is unusable at the window end: {problem}"
     events = nc.top_tier_events(cal)

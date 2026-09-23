@@ -185,6 +185,7 @@ def _paper_world(monkeypatch) -> None:
     monkeypatch.setattr(ms.R, "arming_state",
                         lambda *a, **k: {"armed": False, "override": False, "arm": "",
                                          "summary": "no arming record — execution is OFF"})
+    _no_account_deals(monkeypatch)
 
 
 def _charts_of(term_root: str) -> list[tuple[str, str]]:
@@ -236,11 +237,24 @@ def test_section_quiet_when_flat_or_opposed(tmp_path, monkeypatch, capsys):
 
 # --- the [3b] section in the ARMED world (2026-09-21 operator override) -------------
 
+def _no_account_deals(monkeypatch) -> None:
+    """Pin the other machine-state dependency: the account's deal history.
+
+    [3b] reconciles the live ledger against the ACCOUNT, so a synthetic world without this
+    still reads the real terminal. MEASURED 2026-09-22: the arm's first live fill turned
+    `test_armed_world_...(the paper arm paper)` unhealthy — the exact class of dependency
+    `preset_for_tag(armed=...)` exists to remove. The fixtures below hold no account deals,
+    so the world says so (morning_status.LIVE_FILL_DEAL_READER).
+    """
+    monkeypatch.setattr(ms, "LIVE_FILL_DEAL_READER", lambda *a, **k: [])
+
+
 def _armed_world(monkeypatch) -> None:
     """The record names the U25 arm and says, in its own field, that it is an override."""
     monkeypatch.setattr(ms.R, "arming_state", lambda *a, **k: {
         "armed": True, "override": True, "arm": ACCOUNT_ARM,
         "summary": "ARMED BY OPERATOR OVERRIDE — the walk-forward gate FAILED"})
+    _no_account_deals(monkeypatch)
 
 
 def test_armed_world_marks_the_live_arm_live_and_the_paper_arm_paper(tmp_path, monkeypatch, capsys):

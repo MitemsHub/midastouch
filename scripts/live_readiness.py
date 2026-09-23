@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +42,131 @@ from midas_prop.execution.prop_execution import (  # noqa: E402
 )
 
 SYMBOL = "XAUUSD"
+
+#: The task that supervises the arm. Named for the ARM, not for a paper run: MEASURED
+#: 2026-09-22, its predecessor (`MitemshubPaperSupervisor`) was interactive-logon-only, so
+#: the arm was unguarded for 407 consecutive minutes in the middle of a night while the
+#: task itself reported Ready.
+SUPERVISOR_TASK = "MIDASTOUCH Arm Supervisor"
+
+#: MT5's SYMBOL_FILLING_MODE bits, named so the check reads as what it is.
+FILLING_FOK = 1
+FILLING_IOC = 2
+
+#: The EA's own geometry, mirrored for the probe: `InpSlAtrMult` and `InpSlAtrMult * InpTpMult`
+#: from the preset the arm runs, plus its `InpDeviationPoints`. The probe asks whether the
+#: VENUE accepts an order of this shape; it is not a second sizing engine.
+PROBE_SL_ATR_MULT = 2.0
+PROBE_TP_R = 2.0
+PROBE_DEVIATION_POINTS = 20
+
+#: Retcodes that mean the venue declined to even consider the request, as opposed to
+#: refusing the order's shape. Neither is a pass: an unasked question is not an answer.
+RETCODE_DONE = 0
+RETCODE_MARKET_CLOSED = 10018
+RETCODE_TRADE_DISABLED = 10017
+RETCODE_ALGO_DISABLED = 10027
+UNDECIDED_RETCODES = (RETCODE_MARKET_CLOSED, RETCODE_TRADE_DISABLED, RETCODE_ALGO_DISABLED)
+
+
+def filling_verdict(mode: int) -> tuple[bool, str]:
+    """(ok, detail) for a symbol's supported filling modes.
+
+    The EA sends through CTrade, whose `FillingCheck(symbol)` prefers FOK when the symbol
+    lists it and otherwise IOC — and sets INVALID_FILL, sending nothing, when the symbol
+    lists NEITHER. So the question is not "does the venue support my favourite mode" but
+    "can the EA's own resolver reach a supported one", and that is what this mirrors.
+
+    MEASURED 2026-09-21: this venue's XAUUSD reports filling_mode=0x2 (IOC only) while
+    CTrade's constructor defaults to FOK. The default never reaches the wire because
+    FillingCheck rewrites it per symbol — read out of the installed `Trade.mqh`, not
+    assumed — which is exactly why the mode has to be re-checked every run rather than
+    proven once by hand.
+    """
+    if mode & FILLING_FOK and mode & FILLING_IOC:
+        return True, "FOK+IOC supported; CTrade resolves to FOK"
+    if mode & FILLING_IOC:
+        return True, "IOC only; CTrade resolves to IOC (its FOK default must not reach the wire)"
+    if mode & FILLING_FOK:
+        return True, "FOK only; CTrade resolves to FOK"
+    return False, (f"neither FOK nor IOC is listed (filling_mode=0x{mode:X}) — CTrade's "
+                   f"resolver fails and no order is ever sent")
+
+
+def h1_atr_closed(mt5, symbol: str, period: int = 14) -> float:
+    """Wilder ATR(period) on CLOSED H1 bars, or 0.0 when the series is not readable.
+
+    `start=1` skips the forming bar: an ATR taken from a bar that is still moving is not the
+    value the EA would size on, and the probe must ask about the order the arm would send.
+    """
+    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 1, period + 30)
+    if rates is None or len(rates) < period + 2:
+        return 0.0
+    tr = []
+    for i in range(1, len(rates)):
+        hi, lo, pc = float(rates[i]["high"]), float(rates[i]["low"]), float(rates[i - 1]["close"])
+        tr.append(max(hi - lo, abs(hi - pc), abs(lo - pc)))
+    atr = sum(tr[:period]) / period
+    for t in tr[period:]:
+        atr = (atr * (period - 1) + t) / period
+    return atr
+
+
+def accept_check(mt5, symbol: str, *, atr: float, min_lot: float,
+                 volume_step: float) -> tuple[bool | None, str]:
+    """Ask the VENUE to price and margin a real min-lot order. SEND NOTHING.
+
+    WHY THIS IS A GATE AND NOT A PARAGRAPH IN A CHANGELOG. On 2026-09-21 the order path was
+    proven by hand, once: `order_check` returned retcode 0 with $241.76 of margin on a
+    0.01-lot gold order. A hand proof decays — the venue can change its filling mode, the
+    account can lose its trade permissions, and the next person to ask "does it work" would
+    have to remember how it was done and repeat it. This is that proof, run every time.
+
+    `order_check` is read-only BY CONSTRUCTION: MT5 prices the request against the server and
+    returns retcode/margin without placing anything. There is no `order_send` in this file and
+    a test pins its absence.
+
+    Three answers, not two:
+      * `True`  — the venue ACCEPTED the request (retcode 0).
+      * `False` — the venue refused its shape (wrong filling mode, bad volume, bad stops).
+      * `None`  — the venue could not be asked (market closed, trading disabled). This is not
+                  a pass and not a failure; it is an unconfirmed check, and it renders WARN.
+    """
+    lots = max(min_lot, volume_step if volume_step > 0 else min_lot)
+    stop = atr * PROBE_SL_ATR_MULT
+    if stop <= 0:
+        return None, "no ATR — the probe cannot size a stop, so no request was built"
+    tick = mt5.symbol_info_tick(symbol)
+    info = mt5.symbol_info(symbol)
+    if tick is None or info is None or not getattr(tick, "ask", 0):
+        return None, "no tick/spec — the venue could not be asked"
+    ask = float(tick.ask)
+    digits = int(getattr(info, "digits", 2))
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": lots,
+        "type": mt5.ORDER_TYPE_BUY, "price": ask,
+        "sl": round(ask - stop, digits), "tp": round(ask + stop * PROBE_TP_R, digits),
+        "deviation": PROBE_DEVIATION_POINTS, "type_filling": mt5.ORDER_FILLING_IOC,
+        "comment": "readiness probe (never sent)",
+    }
+    try:
+        chk = mt5.order_check(request)
+    except Exception as exc:                          # pragma: no cover — bridge failure
+        return None, f"order_check raised {type(exc).__name__}: {exc}"
+    if chk is None:
+        return None, f"order_check returned None (last_error {mt5.last_error()}) — UNCONFIRMED"
+    rc = int(chk.retcode)
+    if rc == RETCODE_DONE:
+        return True, (f"venue ACCEPTED a {lots:g}-lot buy, stop ${stop:.2f} "
+                      f"({PROBE_SL_ATR_MULT:g}xATR), margin ${float(chk.margin):,.2f} — "
+                      f"nothing was sent")
+    if rc in UNDECIDED_RETCODES:
+        return None, (f"the venue could not be asked now (retcode {rc}: "
+                      f"{getattr(chk, 'comment', '')}) — UNCONFIRMED, not a pass")
+    return False, (f"venue REFUSED the order shape: retcode {rc} "
+                   f"({getattr(chk, 'comment', '')}) — a signal would be rejected here")
+
+
 ARM_PATH = ROOT / "artifacts" / "live" / "armed.json"
 VALIDATION_PATH = ROOT / "artifacts" / "live" / "validation_record.json"
 ACCOUNTS_JSON = ROOT / "configs" / "mt5" / "accounts.json"
@@ -112,6 +238,294 @@ def deployed_build_state(source: Path, deployed: list[Path],
                            f"the source, but that is not proof it was built from it"
                            f" (the compiler is not bit-reproducible) — run "
                            f"scripts/compile_midas.py --deploy")
+
+
+#: THE BUILD THE SOURCE DEFINES. The EA states it in two places that are pinned equal to
+#: each other (`tests/test_midas_hud.py`: `#property version` == `#define APP_VERSION`), and
+#: the same string is what the EA appends in the `ERA` row it writes at every init — which
+#: is the only reason the build a CHART is running can be read from outside the terminal.
+APP_VERSION_RE = re.compile(r'^\s*#define\s+APP_VERSION\s+"([^"]+)"', re.M)
+
+#: The arm's ledger name, as the EA's own `PaperFile()` builds it. Derived here rather than
+#: globbed, so the leg reads the book of the arm the ARMING record names and not a retired
+#: tag's leftover file.
+ARM_LEDGER_TMPL = "MIDASTOUCH_paper_{symbol}_{tag}.csv"
+
+
+def source_build_tag(source: Path) -> str | None:
+    """The build tag the SOURCE defines, or None when it states none.
+
+    None is a real answer and not a default: a source with no `APP_VERSION` cannot be
+    compared with a chart, and inventing a tag from a filename, a timestamp or a compiled
+    size is exactly how a leg goes green on nothing. It mirrors `deployed_build_state`'s
+    refusal to guess provenance the compiler cannot prove.
+    """
+    try:
+        text = source.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = APP_VERSION_RE.search(text)
+    return m.group(1) if m else None
+
+
+def last_era_stamp(ledger: Path) -> tuple[str, int] | None:
+    """`(tag, epoch)` off the LAST well-formed `ERA,<tag>,<epoch>,<note>` row, or None.
+
+    The LAST one, because the EA appends that row at every init: a chart is running the
+    build it last initialised into. A short row is SKIPPED rather than read generously —
+    an `ERA` line with no tag is not a statement about a build, and parsing one as `""`
+    would compare two empty strings and pass, which is the failure mode this file keeps
+    learning about.
+    """
+    try:
+        fh = ledger.open(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    last: tuple[str, int] | None = None
+    with fh:
+        for line in fh:
+            parts = line.strip().split(",")
+            if len(parts) < 3 or parts[0] != "ERA" or not parts[1]:
+                continue
+            try:
+                last = (parts[1], int(parts[2]))
+            except ValueError:
+                continue            # a malformed stamp is not a stamp; the one above stands
+    return last
+
+
+def _stamp_text(epoch: int, now: datetime, off: int | None = None) -> str:
+    """An `ERA` epoch rendered in UTC, with the venue offset applied and printed.
+
+    LEDGER EPOCHS ARE SERVER-STAMPED (`TimeCurrent()`), so reading one with a UTC
+    converter prints a plausible time two hours out — the whole-offset error this repo has
+    already paid for once. The offset used is printed beside the answer so the reader never
+    has to trust the subtraction, and `off` lets a caller hand in the ARM'S OWN recorded
+    offset instead of today's (see `init_offset_min`).
+    """
+    off = venue_offset_min(now) if off is None else off
+    utc = datetime.fromtimestamp(epoch - off * 60, tz=timezone.utc)
+    age_min = (now - utc).total_seconds() / 60.0
+    return f"{utc:%m-%d %H:%M}Z, {age_min:.0f} min ago (server +{off}min)"
+
+
+#: How far a binary may postdate the chart's own init and still count as the same event.
+#: The `ERA` epoch resolves to one second and the offset is applied by hand, so a deploy
+#: followed immediately by a relaunch can legitimately land inside the same minute. The
+#: margin is a MINUTE, not an hour: the failure this leg exists for was a deploy ~4 minutes
+#: after the init, and a tolerance wide enough to swallow that would swallow the finding.
+INIT_ORDER_TOLERANCE_S = 60
+
+#: `STATE_OFF_UNKNOWN` in the EA: the two clocks disagree, so no offset may be named. It is
+#: an assertion of NOT KNOWING, and reading it as a number would put a 166-hour error into
+#: every conversion that used it.
+STATE_OFF_UNKNOWN = -9999
+
+
+def init_offset_min(ledger: Path) -> int | None:
+    """The offset the ARM ITSELF recorded at the init the `ERA` row belongs to, or None.
+
+    The `STATE` row written right after that `ERA` row carries `off_min` — the offset the
+    EA measured with `TimeTradeServer() - TimeGMT()` at that moment. Converting the `ERA`
+    epoch with TODAY'S measured offset is right almost always and an hour wrong across a
+    DST step; using the arm's own reading removes the assumption instead of documenting it.
+    None when the row predates v1.27 (no tail), when the offset is the not-knowing
+    sentinel, or when it is outside ±14 h — the caller then falls back to the measured one.
+    """
+    try:
+        fh = ledger.open(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    last_era_line = -1
+    lines: list[str] = []
+    with fh:
+        for i, line in enumerate(fh):
+            lines.append(line)
+            if line.startswith("ERA,"):
+                last_era_line = i
+    for line in lines[last_era_line + 1:]:
+        parts = [p for p in line.strip().split(",") if not p.startswith("cfg=")]
+        if not parts or parts[0] != "STATE":
+            continue
+        # ONLY the init row: it is the one written beside the ERA row, so its offset is the
+        # offset that stamps THAT epoch. A later STATE row could belong to a different era of
+        # the venue's clock, which is the thing being avoided. The tail is the LAST FIVE
+        # fields (`sig_ct,hour_utc,vol_ratio,news,off_min`) and it rides inside the row's
+        # existing `%s`, so a v1.26 row — which has no tail at all — is skipped by length
+        # rather than read as an offset by position.
+        if len(parts) < 19:
+            return None
+        try:
+            off = int(parts[-1])
+        except ValueError:
+            return None
+        if off == STATE_OFF_UNKNOWN or abs(off) > 14 * 60:
+            return None
+        return off
+    return None
+
+
+def armed_arm_tag() -> str:
+    """The arm tag the arming record names, or `""` when nothing is armed.
+
+    Read through `mt5_ops.arming_state` — the one reader for "are we live?" — so this leg
+    and the watchdog cannot disagree about which book is the live one.
+    """
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import mt5_ops  # noqa: PLC0415
+        return str(mt5_ops.arming_state(str(ROOT)).get("arm") or "")
+    except Exception:      # noqa: BLE001 — an unreadable record is not a crash here
+        return ""
+
+
+def running_ledgers(term_data: Path | None, tag: str) -> list[Path]:
+    """The ledgers of charts that are RUNNING here — the armed arm's first.
+
+    NOT "every MIDASTOUCH ledger in Files/". A retired arm's book, or the parity harness's
+    own tagged file, sits in that folder for the rest of the program's life; a leg that
+    read them would fail forever over a chart nobody started. So the armed arm's book is
+    DERIVED from its tag, and a machine with no arming record falls back to the arms this
+    install actually attaches (start-up config + chart profiles), which is the same
+    discovery `morning_status` and the watchdog use.
+    """
+    if term_data is None:
+        return []
+    files = term_data / "MQL5" / "Files"
+    if tag:
+        return [files / ARM_LEDGER_TMPL.format(symbol=SYMBOL, tag=tag)]
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import mt5_ops  # noqa: PLC0415
+        arms = (list(mt5_ops.startup_attached_arms(str(term_data)))
+                + list(mt5_ops.inventory_arms(str(term_data))))
+    except Exception:      # noqa: BLE001
+        return []
+    out: list[Path] = []
+    for arm in arms:
+        p = Path(str(arm.get("ledger") or ""))
+        if str(p) and p not in out:
+            out.append(p)
+    return out
+
+
+def deploy_stamp(chart_binary: Path | None,
+                 record: Path | None = None) -> float | None:
+    """When the current deploy happened, from the two records that can say — the LATER one.
+
+    BOTH, because each is blind to a different case. `scripts/compile_midas.py --deploy`
+    copies with `shutil.copy2`, so the deployed file carries the SCRATCH build's mtime: a
+    compile that finished before a chart's init and was copied after it would read as older
+    than the init — as in step — while the file really was replaced underneath a running
+    expert. The build record's `utc` is written after the copies, so it sees that case; and
+    a HAND copy that never touches the script is seen only by the mtime. Neither reading is
+    an identity check — that is the hash leg's job, above — they are ordering evidence.
+    """
+    stamps: list[float] = []
+    if chart_binary is not None and chart_binary.is_file():
+        stamps.append(chart_binary.stat().st_mtime)
+    if record is not None and record.is_file():
+        try:
+            iso = str(json.loads(record.read_text(encoding="utf-8")).get("utc") or "")
+            stamps.append(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp())
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass          # no usable stamp from the record; the mtime above still speaks
+    return max(stamps) if stamps else None
+
+
+def running_build_state(source: Path, ledgers: list[Path], *,
+                        terminal_checked: bool,
+                        chart_binary: Path | None = None,
+                        deploy_record: Path | None = None) -> tuple[str, str]:
+    """Is the build the CHART is running the build this SOURCE defines?
+
+    Returns `("ok" | "stale" | "unconfirmed", detail)`.
+
+    WHY THIS LEG EXISTS, MEASURED 2026-09-22. The leg above answers "is the binary a chart
+    WOULD load the one this source produces", and after a certified deploy it answered YES
+    while the arm's own ledger still said `ERA,MIDAS1.26,…`. Replacing the `.ex5` did NOT
+    re-initialise a **start-up-attached** expert: no re-init line in the terminal's
+    journal, no new `ERA` row, fifteen minutes, market open. A green build leg and a chart
+    one build behind are therefore two different facts, and only the second one is a chart
+    trading the wrong binary. This leg reads the chart's OWN statement — the `ERA` row the
+    EA appends at every init — because that is the only place the running build says what
+    it is, and it is the same word a human reads on the chart.
+
+    AND THE OTHER DIRECTION, which the version comparison alone cannot see: a chart can be
+    initialised into the RIGHT version and still not be the file on disk, because the file
+    was replaced afterwards. The arm's statement covers the binary that existed at its init
+    and nothing that came later. When `chart_binary` (the copy a chart loads) was written
+    AFTER that init, the running chart CANNOT be that binary — a process does not start
+    from a file written after it — so the version leg would be reading a fact about a file
+    nobody is running. That case arises when source was edited and redeployed without a
+    version bump, which is exactly the discipline the pins cannot enforce; it is a FAIL
+    because the same fix applies (re-initialise the expert, after which the version
+    comparison is authoritative again), and because a live-money chart whose provenance
+    cannot be vouched for is the state this file exists to refuse rather than to tolerate.
+    """
+    want = source_build_tag(source)
+    if not want:
+        return "unconfirmed", (f"{source.name} states no APP_VERSION, so the build a chart "
+                               f"is running cannot be compared with it")
+    if not terminal_checked:
+        return "unconfirmed", ("no running terminal: the charts' own ERA rows cannot be "
+                               "read, so the build they are running is UNKNOWN — the repo "
+                               "copy is a record, not a chart")
+    if not ledgers:
+        return "unconfirmed", ("no arm ledger to read: nothing here names a chart this "
+                               "install is running, so the build it runs is UNKNOWN rather "
+                               "than in step")
+    now = datetime.now(timezone.utc)
+    binary_written = deploy_stamp(chart_binary, deploy_record)
+    in_step: list[str] = []
+    behind: list[str] = []
+    superseded: list[str] = []
+    silent: list[str] = []
+    for path in ledgers:
+        seen = last_era_stamp(path)
+        if seen is None:
+            silent.append(path.name)
+            continue
+        tag, epoch = seen
+        # The arm's own recorded offset when it has one (v1.27+), today's measured one
+        # otherwise: see `init_offset_min` for why that is not the same thing.
+        off = init_offset_min(path)
+        when = _stamp_text(epoch, now, off)
+        if tag != want:
+            behind.append(f"{path.stem} is running {tag} (last init {when})")
+            continue
+        if binary_written is not None:
+            init_utc = epoch - (venue_offset_min(now) if off is None else off) * 60
+            if binary_written > init_utc + INIT_ORDER_TOLERANCE_S:
+                wrote = datetime.fromtimestamp(binary_written, tz=timezone.utc)
+                superseded.append(
+                    f"{path.stem} initialised into {tag} at {when}, but the deploy that "
+                    f"produced the binary a chart loads is stamped {wrote:%m-%d %H:%M}Z — "
+                    f"after that init, so the chart is running an EARLIER binary of the same "
+                    f"version (source edited and redeployed without a version bump, or the "
+                    f"build recompiled and re-deployed). Behaviour may be identical; what is "
+                    f"proven is the ordering: the chart's own statement does not cover the "
+                    f"file on disk")
+                continue
+        in_step.append(f"{path.stem} is running {tag} (last init {when})")
+    if behind:
+        return "stale", (f"the CHART is not running the deployed build: {'; '.join(behind)} "
+                         f"against this source's {want} — so the binary on disk is not what "
+                         f"trades. Re-initialise the expert on it (relaunch the terminal "
+                         f"WITH its attach config, e.g. mt5_ops.relaunch_terminal(), or the "
+                         f"registered stop-copy-verify-relaunch in scripts/midas_deploy_v118.py)")
+    if superseded:
+        return "stale", (f"the chart is not running the binary that exists: {'; '.join(superseded)}. "
+                         f"Re-initialise the expert so its own statement covers the file "
+                         f"(relaunch the terminal WITH its attach config, e.g. "
+                         f"mt5_ops.relaunch_terminal(), or the registered "
+                         f"stop-copy-verify-relaunch in scripts/midas_deploy_v118.py); after "
+                         f"that, the version this leg reads is the version that trades")
+    if in_step:
+        return "ok", "the running chart names the build this source defines: " + \
+                      "; ".join(in_step)
+    return "unconfirmed", (f"no ERA row yet in {', '.join(silent)}: the arm has not "
+                           f"initialised into a build, so which one it would run is UNKNOWN")
 
 
 #: The gold week as this venue trades it, in UTC. MEASURED, not assumed: the daily
@@ -358,7 +772,40 @@ def main() -> int:
                 else:
                     add("market open (live tick)", False, "no tick available")
 
-    # ---- 1b. operator-managed state that can silently point at a past era - #
+                # ---- 1a-order-path. CAN THIS ARM PLACE AN ORDER AT ALL? ----------#
+                #
+                # MEASURED 2026-09-21, the day the first live proof was done by hand: a
+                # 0.01-lot XAUUSD request was ACCEPTED by the venue (retcode 0, $241.76 of
+                # margin) and the arm's own filling mode had to be settled by reading the
+                # installed Trade.mqh. Both facts were true and neither was checked by
+                # anything that runs on a schedule — so "does it work" depended on someone
+                # remembering. These two legs are that proof, made routine.
+                ok_fill, detail_fill = filling_verdict(int(getattr(info, "filling_mode", 0)))
+                add("symbol filling mode is usable", ok_fill, detail_fill)
+                report["filling"] = {"mode": int(getattr(info, "filling_mode", 0)),
+                                    "usable": ok_fill, "detail": detail_fill}
+                atr_h1 = h1_atr_closed(mt5, SYMBOL)
+                if atr_h1 <= 0:
+                    add("order path accept-check (min lot, nothing sent)", None,
+                        "no ATR(H1) from the terminal feed — the venue could not be asked "
+                        "about an order of this shape: UNCONFIRMED, not a pass",
+                        blocking=False)
+                else:
+                    ok_acc, detail_acc = accept_check(
+                        mt5, SYMBOL, atr=atr_h1,
+                        min_lot=float(getattr(info, "volume_min", 0.01)),
+                        volume_step=float(getattr(info, "volume_step", 0.01)))
+                    # blocking only when the venue REFUSED the shape (False): an
+                    # unconfirmed check (None) must not stop the arm, and must not pass.
+                    add("order path accept-check (min lot, nothing sent)", ok_acc, detail_acc,
+                        blocking=(ok_acc is False))
+                    report["order_path"] = {"atr_h1": round(atr_h1, 4),
+                                           "sl_atr_mult": PROBE_SL_ATR_MULT,
+                                           "accepted": ok_acc, "detail": detail_acc}
+
+    # ---- 1b. the supervisor: registered, UNATTENDED, and able to run --------- #
+    #
+    # FOUR QUESTIONS, AND ONLY THE FIRST ONE WAS ASKED BEFORE 2026-09-22.
     #
     # A Task Scheduler entry embeds an ABSOLUTE path, so renaming this folder leaves the
     # task pointing at a directory that no longer exists. It then fires on schedule and
@@ -367,26 +814,110 @@ def main() -> int:
     # stale VPS hosting record audited on 2026-09-19: a marker whose mere presence, or
     # whose stale content, keeps asserting an arrangement that has ended.
     #
-    # Measured, not assumed: the action is read back from the scheduler and its target
-    # must resolve to a file INSIDE the repo root this script is running from.
-    task_name = "MitemshubPaperSupervisor"
+    # MEASURED 2026-09-22 — the path check passed and the arm was still unguarded for most
+    # of a night. `MitemshubPaperSupervisor` was Ready, pointed inside this repo, and ran
+    # with `logon=Interactive`, i.e. only while a human was signed in: 54 passes in 25.3 h
+    # where a 20-minute cadence owes 76, ZERO passes in the 01:00-06:00 UTC hours, one gap
+    # of 407 minutes. So "registered" is not the property that matters:
+    #
+    #   1. does the action resolve to a file inside THIS repo?          (the old check)
+    #   2. would it still run at 03:00 with nobody signed on?           (unattended.py)
+    #   3. can THIS HOST hold it — or does the schedule evaporate when the lid shuts?
+    #                                                                  (host_power.py)
+    #   4. has a gap already been recorded and not acknowledged?        (live_coverage.py)
+    #
+    # (2) and (3) block, because both are machine faults this program can fix, and the
+    # difference between them is the whole lesson: (2) says the schedule is wrong, (3)
+    # says the machine is. A logon-only task now FAILS the readiness review instead of
+    # rendering green beside a live arm.
+    task_name = SUPERVISOR_TASK
     task_path, task_err = _scheduled_task_target(task_name)
-    if task_err:
-        add(f"scheduled task {task_name}", False,
-            f"could not be queried ({task_err}) — the supervisor's schedule is "
-            f"UNCONFIRMED, not absent", blocking=False)
+    if task_err == "not registered":
+        add(f"scheduled task target", False,
+            f"{task_name} is not registered: nothing is supervising the arm. Register "
+            f"it with scripts/install_paper_task.ps1 -Apply.", blocking=True)
+    elif task_err:
+        add(f"scheduled task target", None,
+            f"{task_name}: could not be queried ({task_err}) — the supervisor's schedule "
+            f"is UNCONFIRMED, not absent", blocking=False)
     elif task_path is None:
-        add(f"scheduled task {task_name}", False,
-            "not registered: nothing is supervising the paper run. Reinstall with "
-            "scripts/install_paper_task.ps1 -Apply if it should be running.",
-            blocking=False)
+        add(f"scheduled task target", False,
+            f"{task_name} is not registered: nothing is supervising the arm. Register it "
+            f"with scripts/install_paper_task.ps1 -Apply.", blocking=True)
     else:
         inside = ROOT in task_path.parents or task_path.parent == ROOT
-        add(f"scheduled task {task_name}", inside and task_path.is_file(),
-            f"target {task_path}" if inside and task_path.is_file() else
-            (f"STALE: the task points at {task_path}, which is outside {ROOT} "
+        add(f"scheduled task target", inside and task_path.is_file(),
+            f"{task_name} -> {task_path}" if inside and task_path.is_file() else
+            (f"STALE: {task_name} points at {task_path}, which is outside {ROOT} "
              f"or no longer exists. Re-run scripts/install_paper_task.ps1 -Apply."
-             if not inside else f"target missing: {task_path}"))
+             if not inside else f"target missing: {task_path}"),
+            blocking=not (inside and task_path.is_file()))
+
+    try:
+        import unattended as _unattended  # noqa: PLC0415 — one reader for this question
+        ok_un, detail_un = _unattended.verify_task(task_name)
+        report["supervisor_unattended"] = {"ok": ok_un, "task": task_name,
+                                           "detail": detail_un}
+        add("supervisor runs unattended", ok_un, detail_un, blocking=True)
+    except Exception as exc:      # noqa: BLE001 — unreadable is never a pass
+        report["supervisor_unattended"] = {"ok": None, "error": str(exc)}
+        add("supervisor runs unattended", None,
+            f"the task definition could not be read ({exc}): UNCONFIRMED, not a pass",
+            blocking=False)
+
+    try:
+        import host_power as _power  # noqa: PLC0415
+        posture, p_err = _power.read_posture()
+        if posture is None:
+            report["host_power"] = {"ok": None, "error": p_err}
+            add("host can hold supervision overnight", None,
+                f"the power posture could not be read ({p_err}): UNCONFIRMED",
+                blocking=False)
+        else:
+            # Three states, because the middle one is real: a host with nothing measured
+            # WRONG that this program still cannot certify from powercfg alone (S0 Low
+            # Power Idle: whether a wake timer wakes it, and whether the unreadable lid
+            # policy suspends it, are not observable here). It renders WARN and does not
+            # block — the thing that promotes it is one measured night, not a setting —
+            # while a measured defect (wake timers off, a standing sleep timer) still
+            # blocks, because that one has a fix.
+            hv = posture["verdict"]
+            report["host_power"] = {"ok": hv == "hold", "verdict": hv, **posture}
+            add("host can hold supervision overnight",
+                True if hv == "hold" else (None if hv == "unverified" else False),
+                "; ".join(posture["problems"]) if posture["problems"] else
+                (f"wake timers {posture['wake_timers']}, sleep/hibernate never, "
+                 f"sleep states: {posture['sleep_states']}"),
+                blocking=(hv == "cannot"))
+    except Exception as exc:      # noqa: BLE001
+        report["host_power"] = {"ok": None, "error": str(exc)}
+        add("host can hold supervision overnight", None,
+            f"the power posture could not be read ({exc}): UNCONFIRMED",
+            blocking=False)
+
+    try:
+        import live_coverage as _cover  # noqa: PLC0415
+        line = _cover.alarm_line()
+        st = _cover.alarm_state()
+        report["heartbeat_alarm"] = {"present": st.get("present", False),
+                                     "current": st.get("current", False),
+                                     "kind": st.get("kind"), "detail": st.get("detail")}
+        if st.get("present"):
+            add("no unacknowledged heartbeat gap", not st.get("current"),
+                f"{line} — acknowledge with scripts/live_coverage.py --ack once the "
+                f"night it describes has been read",
+                blocking=bool(st.get("current")))
+        else:
+            # An absent check must still be REPORTED: a leg that disappears when the
+            # state is clean reads as a leg that was never asked, which is the defect
+            # this tool exists to catch.
+            add("no unacknowledged heartbeat gap", True,
+                "none outstanding (the rule is applied on every supervision pass; "
+                "scripts/live_coverage.py --prereg states it)", blocking=False)
+    except Exception as exc:      # noqa: BLE001
+        report["heartbeat_alarm"] = {"present": None, "error": str(exc)}
+        add("no unacknowledged heartbeat gap", None,
+            f"the alarm record could not be read ({exc}): UNCONFIRMED", blocking=False)
 
     # ---- 1c. the deployed EA build ---------------------------------------- #
     #
@@ -408,6 +939,27 @@ def main() -> int:
                        "checked": [str(p) for p in deployed_bins]}
     add("deployed EA build matches its source", build_state == "ok", build_detail,
         blocking=(build_state == "stale"))
+
+    # ---- 1d. the RUNNING build: what the chart is actually executing -------- #
+    #
+    # 1c asks whether a chart WOULD load the right binary. This asks whether the chart IS
+    # on it, which is a different question and — measured 2026-09-22 — had a different
+    # answer from it: a certified binary in step with its source, and an arm whose own ERA
+    # row still named the previous build. Blocking FAIL when a chart can be READ and
+    # disagrees (that chart is trading a binary nobody certified); WARN when it cannot be
+    # read, because an unasked question is not a pass.
+    run_bins = running_ledgers(term_data, armed_arm_tag())
+    run_state, run_detail = running_build_state(
+        EA_SOURCE, run_bins, terminal_checked=term_data is not None,
+        # The TERMINAL's copy, i.e. the file a chart here loads — not the repo's record of
+        # it. The ordering question is about the file the running expert came from.
+        chart_binary=(deployed_bins[-1] if term_data is not None else None),
+        deploy_record=BUILD_RECORD)
+    report["running_build"] = {"state": run_state, "detail": run_detail,
+                              "source_tag": source_build_tag(EA_SOURCE),
+                              "ledgers": [str(p) for p in run_bins]}
+    add("the CHART runs the deployed build", run_state == "ok", run_detail,
+        blocking=(run_state == "stale"))
 
     # ---- 2. authorisation ------------------------------------------------ #
     # TWO QUESTIONS, TWO ANSWERS (2026-09-21). `ArmingGate` answers "may the PYTHON

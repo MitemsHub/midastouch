@@ -378,5 +378,12 @@ def test_the_old_false_label_is_gone_and_the_reason_is_recorded() -> None:
 
 def test_the_no_fill_census_counts_news_vetoes() -> None:
     assert "g_nofill_news" in EA_CODE
-    assert "g_nofill_brk, g_nofill_notr, g_nofill_news));" in EA_CODE, \
-        "the daily NOFILL row must carry the news count, appended so old readers keep working"
+    # v1.27 appended `nodata` after `news`, so the row's tail is now `...,g_nofill_news,\n    # g_nofill_nodata));`. The pin is written against the APPEND-ONLY property rather than the
+    # exact tail text, because the counter list is documented as append-only and a literal
+    # pin makes every future append look like a regression of the news count it is not.
+    m = re.search(r"g_nofill_brk,\s*g_nofill_notr,\s*g_nofill_news,?\s*(g_nofill_nodata)?\s*\)\)",
+                  EA_CODE)
+    assert m, "the daily NOFILL row must carry the news count, appended so old readers keep working"
+    assert "g_nofill_news" in EA_CODE[
+        EA_CODE.index("void DiagRollIfNewDay")::][:2000], \
+        "the census row is what carries it"

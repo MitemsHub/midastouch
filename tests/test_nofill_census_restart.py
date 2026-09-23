@@ -80,11 +80,13 @@ def _ledger(tmp_path: Path, rows: list[str], name: str = "ledger.csv") -> str:
     return str(p)
 
 
-#: 9 counters in the writer's field order:
-#: signal, mismatch, session, friday, spread, riskcap, breaker, no_trigger, news
+#: The counters in the writer's field order:
+#: signal, mismatch, session, friday, spread, riskcap, breaker, no_trigger, news, nodata
+#: (`nodata` appended by v1.27: a bar the engine could not price. It is NOT a refusal.)
 def _c(signal: int, mismatch: int, session: int, friday: int, spread: int,
-       riskcap: int, breaker: int, no_trigger: int, news: int) -> list[int]:
-    return [signal, mismatch, session, friday, spread, riskcap, breaker, no_trigger, news]
+       riskcap: int, breaker: int, no_trigger: int, news: int, nodata: int = 0) -> list[int]:
+    return [signal, mismatch, session, friday, spread, riskcap, breaker, no_trigger, news,
+            nodata]
 
 
 # --- the field order: the defect that made the record lie -----------------------------
@@ -100,14 +102,19 @@ def test_the_reader_names_the_rows_fields_in_the_writers_order(tmp_path):
     counters = [1, 2, 3, 4, 5, 6, 7, 8, 9]
     p = _ledger(tmp_path, [f"ERA,MIDAS1.19,{BASE},pertick-fills", roll(BASE + 60, counters)])
     agg = nofill_summary(p, now_ts=BASE + 120)
+    # The 24h AGGREGATE stays tolerant of a row that predates a counter: zip stops at the
+    # shorter side, so `nodata` is ABSENT rather than zero — the honest reading of a row the
+    # EA wrote before the counter existed. (The per-day SNAPSHOT reader is strict by design;
+    # see nofill_open_day's docstring for why the two differ.)
     assert agg == {"signal": 1, "mismatch": 2, "session": 3, "friday": 4, "spread": 5,
                    "riskcap": 6, "breaker": 7, "no_trigger": 8, "news": 9}, agg
+    assert "nodata" not in agg, "a pre-v1.27 row must not invent a nodata count"
     assert NOFILL_KEYS == ("signal", "mismatch", "session", "friday", "spread",
-                           "riskcap", "breaker", "no_trigger", "news")
+                           "riskcap", "breaker", "no_trigger", "news", "nodata")
 
 
 def test_the_snapshot_row_is_read_with_the_same_order_as_the_census_row(tmp_path):
-    counters = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    counters = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     p = _ledger(tmp_path, [snap(BASE, DAY, counters)])
     od = nofill_open_day(p)
     assert od["day"] == DAY
@@ -218,10 +225,15 @@ def test_a_previous_days_roll_is_not_reported_as_the_open_day(tmp_path):
 
 def test_the_census_has_exactly_one_writer_and_it_is_the_day_roll():
     code = strip_comments(src())
-    writers = re.findall(r'"NOFILL,%I64d(?:,%d){9}"', code)
+    # The counter count comes from NOFILL_KEYS, never a literal: v1.27 appended `nodata` and
+    # a hand-written `{9}` here is how this pin would have been left behind by the append
+    # rather than moved with it.
+    # NB `%`-formatting a regex that is full of `%d` is a trap: the operator eats them. The
+    # pattern is assembled by concatenation for that reason.
+    pat = '"NOFILL,%I64d(?:,%d){' + str(len(NOFILL_KEYS)) + '}"'
+    writers = re.findall(pat, code)
     assert len(writers) == 1, "one census row type, one writer"
-    assert '"NOFILL,%I64d(?:,%d){9}"' not in writers  # sanity: the literal is the match
-    assert re.search(r'"NOFILL,%I64d(?:,%d){9}"', body("DiagRollIfNewDay")), \
+    assert re.search(pat, body("DiagRollIfNewDay")), \
         "the census row is written by the roll, not by a veto path"
     assert "DiagCounters()" in body("DiagRollIfNewDay") or \
         body("DiagRollIfNewDay").count("g_nofill_notr") == 1, \

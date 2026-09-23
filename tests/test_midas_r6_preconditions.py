@@ -100,21 +100,26 @@ def test_banner_dropped_the_calendar_pending_label() -> None:
 
 def test_every_reader_of_the_news_input_is_registered_here() -> None:
     """Every reader of InpUseNewsFilter is a DECISION, so the set is pinned: a new one
-    must be registered deliberately rather than appearing silently.
+    must be registered deliberately rather than appearing silently. The one v1.21 addition
+    is deliberately NOT a decision — the HUD's NEWS line reports the switch, and it is
+    display-only by construction (it writes no state and no decision reads it).
 
-    Pin shape: 7 occurrences in comment-stripped source and exactly TWO
+    Pin shape: 8 occurrences in comment-stripped source and exactly TWO
     `if(InpUseNewsFilter)` readers — the init block (refresh + report) and the entry
     veto — plus the BAR-replay refusal (condition + message), the input declaration,
-    the banner field, and the refresher's own early return. String-literal stripping is
+    the banner field, the refresher's own early return, and the v1.21 display echo
+    `if(!InpUseNewsFilter)` in NewsText(). String-literal stripping is
     deliberately NOT used — quote pairing across MQL continuation lines is fragile and
     silently swallows regions (found while writing this test)."""
     s = src()
     total = len(re.findall(r"InpUseNewsFilter", s))
     guards = len(re.findall(r"if\(InpUseNewsFilter\)", s))
-    assert total == 7 and guards == 2, (
-        f"expected 7 sites / 2 guards (input, BAR refusal + its message, init block, "
-        f"banner, refresh early-return, entry veto); got {total} sites / {guards} "
-        f"guards — a new READER of this input must be registered in this test")
+    display = len(re.findall(r"if\(!InpUseNewsFilter\)", s))
+    assert total == 8 and guards == 2 and display == 1, (
+        f"expected 8 sites / 2 guards / 1 display echo (input, BAR refusal + its message, "
+        f"init block, banner, refresh early-return, entry veto, HUD NEWS line); got "
+        f"{total} sites / {guards} guards / {display} display — a new READER of this input "
+        f"must be registered in this test")
 
 
 # --- the harness mirror (one-commit python+EA law) ------------------------------
@@ -163,8 +168,37 @@ def test_ea_version_is_the_r6_build() -> None:
     define = re.search(r'#define\s+APP_VERSION\s+"MIDAS(\d+)\.(\d+)"', s)
     assert prop and define and prop.groups() == define.groups()
     # R6 shipped as v1.16; the tree advanced through v1.17 (P5 telemetry), v1.18 (NOFILL
-    # diagnostics), v1.19 (the P6 build block) and v1.20 (the restart-persistent refusal
-    # census) — each a registered never-abort build, and the pin follows that history.
+    # diagnostics), v1.19 (the P6 build block), v1.20 (the restart-persistent refusal
+    # census), v1.21 (the HUD view + the STATE row), v1.22 (the configured-risk stamp on
+    # every fill row), v1.23 (the deduped venue-spec warning + its SPEC ledger record) and
+    # v1.24 (the ledger-backed LIVE CENSUS: the tally counts the ledger's own LCLOSE rows and
+    # is restored at init, so an armed arm can no longer print `trades: 0/30` after a closed
+    # live trade) and v1.25 (THE THREE DEFECTS THE ARM'S OWN FILL EXPOSED: the fill row's entry
+    # price resolved from the position or the entry deal and labelled `entry=pending` when it
+    # cannot be, the `%s`-count/argument mismatch that printed `(missed string parameter)` on
+    # every fill row, and day-P&L attribution by POSITION because the venue stamps the CLOSING
+    # deal with magic 0) and v1.26 (WHAT `vEq` MEANS ON AN ARMED ARM: the HUD's equity line and
+    # every live heartbeat EQ row carry the arm's own equity - the venue's account on the live
+    # path, the paper book on the paper path - instead of the paper counter that never moves on
+    # an armed arm, labelled with which record it is reading) and v1.27 (THE FOUR REFUSALS THAT
+    # SAID NOTHING NOW SAY WHY, THE STATE ROW CARRIES THE BAR'S OWN CONTEXT, THE ARM MEASURES
+    # ITS OWN SPREAD BY HOUR, AND A BAR THAT COULD NOT BE PRICED IS COUNTED RATHER THAN DROPPED:
+    # the session and Friday gates set g_last_action, the two pricing guards get their own
+    # APPENDED tenth counter `nodata` instead of inflating the refusal census, StateAppend()
+    # rides every STATE row before the keyed cfg token, SPREADHOUR records the live spread per
+    # UTC hour, and the census snapshot floor moved 12 -> 13 with the append)
+    # — each a registered never-abort build, and the pin follows that history.
+    # v1.28 (2026-09-22): THE SWEEP SHADOW — the Asian-range sweep continuation recorded
+    # forward with NO ORDER PATH (a `SWEEPSHADOW` row per evaluated bar inside UTC 07-18,
+    # carrying the setup and never an outcome, resolved by scripts/midas_sweep_shadow.py
+    # against docs/ASIA_SWEEP_FORWARD_PREREG_20260922.md; record-only, so the entry, exit,
+    # size, veto and protective rules are untouched and the certified trade set is unchanged).
     # A NEW RELEASE EXTENDS THIS LIST, it does not replace it.
-    assert define.group(2) in ("16", "17", "18", "19", "20"), \
+    # v1.29 (2026-09-22): THE EXIT REASON WORD — the LCLOSE row names who closed the trade
+    # (SL/TP/SO from the OUT deal's DEAL_REASON, EXPERT when the closing deal bears our
+    # magic, MANUAL-* for the platform's client/web/mobile/other family, EXTERNAL-UNKNOWN
+    # only when nothing is known) instead of one EXTERNAL word for "the venue did it";
+    # record-only vocabulary, no decision reads it, so the certified trade set is unchanged).
+    assert define.group(2) in ("16", "17", "18", "19", "20", "21", "22", "23", "24",
+                               "25", "26", "27", "28", "29"), \
         "tree version outside registered history"

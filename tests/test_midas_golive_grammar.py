@@ -15,6 +15,12 @@ LOPEN[2]; LCLOSE carries R, not $). Pinned here:
     LCLOSE rows never enter the PAPER closed list (no $pnl/veq on them);
   * morning_status.live_grammar_view: open positions + close count + exit
     reasons, including a corrupt-row fail-closed problem;
+  * THE ROW A REAL NETTING FILL WRITES: every fixture here used a realistic posid,
+    so all four pairing readers passed while the live arm's own book read NOT FLAT
+    (2026-09-22 — `LOPEN,1790092800,0,18874164,0,...`, posid 0 at fill time, whose
+    LCLOSE carries 18874164). That is the gate `midas_parity` refuses to stop the
+    terminal over, so the pin below is what keeps a closed fill from blocking a
+    certification run, and what keeps a zero from closing a position;
   * the parity harness ledger_flatness: same LIVE-grammar awareness (a
     dangling LOPEN refuses the cert session's terminal stop);
   * the presets: EVERY one of them is paper-only. The contract asserted here is
@@ -73,15 +79,28 @@ def test_lopen_writer_shape_is_14_fields_and_parsers_agree(tmp_path: Path) -> No
     15-field parser contract against a 14-field writer — the first live fill
     would have been invisible to [3b] AND the restart gate) cannot recur."""
     specs = _writer_specs("LOPEN")
-    # 14 specifiers before v1.19e, 15 now: the state stamp rides as ONE appended specifier
-    # that expands to five comma-separated fields at fill time, or to NOTHING when the stamp
-    # is off (a tester row) — which is why the row is 14 fields or 19, never 15. The head is
-    # unchanged, and `tests/test_state_label_contract.py` pins the stamp's own shape.
+    # 14 specifiers before v1.19e, 15 now, and every addition is APPENDED as ONE specifier:
+    # the v1.19e state stamp expands to five comma-separated fields at fill time (or to
+    # NOTHING when the stamp is off — a tester row) and the v1.22 configured-risk token
+    # concatenates after it into the SAME specifier. So the row is 14 fields, 19 with the state
+    # stamp, never a half-widened head. The head is unchanged, and
+    # `tests/test_state_label_contract.py` pins both stamps' own shape.
+    #
+    # v1.25 MEASURED WHY THE COUNT IS THE CONTRACT: the writer asked for FOUR `%s` after the
+    # timeout field while passing THREE arguments, and the row the arm wrote reads
+    # `LOPEN,1790092800,...,cfg=62.50@0.25(missed string parameter)` — MQL5's own missing-
+    # argument text, inside a data row. Fifteen specifiers, fifteen arguments.
     assert len(specs) == 15, specs
-    # %s%s (tag + _FLOORED suffix) join into one field: 13 comma fields + prefix
+    # %s%s (tag + _FLOORED suffix) join into one field, then state-with-cfg: 13 comma fields
     assert specs[-3:] == ["%s", "%s", "%s"]
     parts = LOPEN.split(",")
     assert len(parts) == 14 and parts[0] == "LOPEN"
+    # and the two python consumers of the row see the v1.22 tail without a re-parse: the
+    # wire-contract owner reads the token off the END, so a pre-v1.22 row is simply unstamped
+    import midas_first_fills_audit as ffa
+    assert ffa.read_risk_tail(parts) == {}, "a pre-v1.22 row carries no configured-risk stamp"
+    assert ffa.read_risk_tail(parts + ["cfg=62.50@0.25"]) == {
+        "cfg_risk_usd": 62.50, "cfg_risk_pct": 0.25}
     # parser indices: posid [2], dir [5] — the writer's deal id sits at [4]
     v = ms.live_grammar_view(_write(tmp_path, LOPEN_DANGLING))
     assert v["problems"] == [] and len(v["open"]) == 1
@@ -180,6 +199,64 @@ def test_parity_harness_flatness_sees_the_live_row(tmp_path: Path) -> None:
     assert res["open_positions"] and res["open_positions"][0]["ticket"] == "2048845860"
     res2 = R.ledger_flatness(_write(tmp_path, LOPEN_CLOSED))
     assert res2["flat"] and res2["closed"] == 1
+
+
+# --- the NETTING fill: which identifier the row carries at write time (2026-09-22) ---
+
+#: THE ARM'S FIRST REAL FILL, verbatim from the live ledger (account 1428765, XAUUSD,
+#: magic 7825001, server 16:00 = UTC 14:00). The EA writes LOPEN as the fill is
+#: ACKNOWLEDGED, and on a netting account the position id is not resolvable yet: [2] is 0
+#: and the ORDER ticket [3] — which on netting IS the position id — carries the identity
+#: the venue later uses for the position (18874164). The trailing
+#: `(missed string parameter)` is the EA's own format-specifier defect, kept in the fixture
+#: because that is what the row actually says.
+LOPEN_NETTING = (
+    "LOPEN,1790092800,0,18874164,0,-1,0.00000,4374.38000,4250.77000,0.01,41.20,41.20143,"
+    "43200,U25,1790091900,13,1.39453,out,120,cfg=62.50@0.25(missed string parameter)")
+LCLOSE_NETTING = "LCLOSE,1790093197,18874164,EXTERNAL,4328.76000,0.104"
+
+
+def test_netting_fill_pairs_with_its_close_in_every_reader(tmp_path: Path) -> None:
+    """Four readers keyed a fill on [2] alone; a real netting fill writes 0 there.
+
+    MEASURED 2026-09-22. Every fixture above uses a realistic posid, so all four passed
+    while the live arm's book was reported NOT FLAT — and `mt5_ops.ledger_flatness` is
+    the gate `midas_parity` refuses to stop the terminal over, i.e. the arm's own first
+    fill blocked the certification run. The venue is the authority: 0 open positions,
+    one closing deal on 18874164 for +4.31.
+    """
+    import mt5_ops as R  # noqa: E402
+    book = _write(tmp_path, [LOPEN_NETTING, LCLOSE_NETTING, "EQ,25004.26"])
+    fl = R.ledger_flatness(book)
+    assert fl["flat"] and fl["open_positions"] == [] and fl["closed"] == 1, fl
+    h = wd.ledger_health(book, NOW)
+    assert h["flat"] and h["open_positions"] == [] and h["closed"] == 1, h
+    assert ms.parse_ledger(book)["problems"] == []
+    v = ms.live_grammar_view(book)
+    assert v["open"] == [] and v["lclose_ct"] == 1 and v["reasons"] == ["EXTERNAL"], v
+
+
+def test_dangling_netting_fill_is_still_a_live_position(tmp_path: Path) -> None:
+    """The correction must not buy the opposite error: the same row WITHOUT its LCLOSE is
+    a real open position and every gate must still refuse on it."""
+    import mt5_ops as R  # noqa: E402
+    book = _write(tmp_path, [LOPEN_NETTING])
+    assert not R.ledger_flatness(book)["flat"]
+    assert not wd.ledger_health(book, NOW)["flat"]
+    v = ms.live_grammar_view(book)
+    assert len(v["open"]) == 1 and v["open"][0]["vol"] == 0.01
+    assert ms.parse_ledger(book)["problems"] == []
+
+
+def test_a_row_with_no_identifier_is_never_paired(tmp_path: Path) -> None:
+    """A zero is not an identifier, and an empty one is not either. Two rows that both
+    carry no identity must not close each other: pairing them reports a real-money
+    position as flat, the strictly worse failure (see mt5_ops.live_fill_key)."""
+    import mt5_ops as R  # noqa: E402
+    rows = ["LOPEN,1790092800,0,0,0,-1,4333.07,4374.38,4250.77,0.01,41.20,41.20143,43200,U25",
+            "LCLOSE,1790093197,0,EXTERNAL,4328.76000,0.104"]
+    assert not R.ledger_flatness(_write(tmp_path, rows))["flat"]
+    assert not wd.ledger_health(_write(tmp_path, rows), NOW)["flat"]
 
 
 def test_live_grammar_view_closes_and_reasons(tmp_path: Path) -> None:
@@ -307,21 +384,52 @@ def test_execution_switch_by_preset(arm: str) -> None:
 
 #: The certified strategy values. None of these changed when the venue changed —
 #: trading is the same work, and this is the set the pre-registered studies fitted.
+#:
+#: MODE IS THE ONE ARM-LEVEL KEY, pinned separately in ARM_MODE below. 2026-09-22: the U25
+#: arm ran InpMode=0 (ORIGINAL) while every parity window and the walk-forward gate certify
+#: InpMode=1 (REVERSE_DIRECTION) — the arming record flagged the mismatch itself. The arm
+#: was amended to mode 1, which is better on every venue-measured axis (OOS 04-01→09-16:
+#: +0.0759R / pf 1.158 / DD 5.41R / 108 fills against ORIGINAL's +0.0697R / 1.141 / 6.87R /
+#: 94) and is what the 2026-09-21 12:18 parity PASS certifies. The M1 forward-collection
+#: control STAYS ORIGINAL: protocol §2/§10 Amendment 2 pins it to the plainest variant, and
+#: its own header records the 2026-09-17 unregistered mode drift as an incident.
+#: InpBBDev MOVED 2.0 -> 1.5 on 2026-09-22, and it is the one value here that changed for a
+#: reason other than the venue: the arm was flat with every protective counter at zero, so the
+#: binding constraint was how often a trigger fires. Pre-registered and measured on the venue's
+#: own bars (docs/FREQUENCY_AXES_PREREG_20260922.md, artifacts/midas_frequency_axes_20260922.json,
+#: self-check n=53/+14.2563R): held-out 2026-04-01 -> 09-16, 1.5 takes 130 fills with +0.087R /
+#: pf 1.201 / 6.5R dd against 2.0's 111 fills with -0.003R / pf 0.981 / 7.6R dd, and it leads on
+#: the selection span too. It is an ordering between thresholds, NOT a validation: t is ~0.9 and
+#: the venue's gate is still FAILED. midas_parity.BB_DEV carries the same value, and no parity
+#: pass has been re-run at it yet (armed.json names that as the outstanding obligation).
 CERTIFIED_STRATEGY = {
-    "InpMode": "0", "InpMacroEmaPeriod": "20", "InpBBPeriod": "20",
-    "InpBBDev": "2.0", "InpRSIPeriod": "14", "InpRSIUpper": "70.0",
+    "InpMacroEmaPeriod": "20", "InpBBPeriod": "20",
+    "InpBBDev": "1.5", "InpRSIPeriod": "14", "InpRSIUpper": "70.0",
     "InpRSILower": "30.0", "InpAtrPeriod": "14", "InpSlAtrMult": "2.0",
     "InpTpMult": "2.0", "InpTimeoutMinutes": "720",
     "InpSessionStartHour": "6", "InpSessionEndHour": "20",
-    "InpSpreadCapPctStop": "1.5", "InpEntryTF": "15", "InpBarModel": "false",
+    # AMENDED 2026-09-23 (armed.json amendment 10): 1.5% of stop sat INSIDE the certified
+    # engine's own entry-cost distribution (max 0.0193R over the 130 held-out fills), i.e.
+    # the certified strategy itself violated the old cap. 2.5% admits every certified
+    # fill, covers the live regime that exposed it, and stays a quarter of the G7 0.10R
+    # ceiling. The generator (SPREAD_CAP_PCT), the presets and this pin move together.
+    "InpSpreadCapPctStop": "2.5", "InpEntryTF": "15", "InpBarModel": "false",
     "InpStaleMinutes": "30", "InpFridayFlatHour": "20",
     "InpDailyLossCapPct": "3.0", "InpUseNewsFilter": "false",
 }
 
 
+#: arm -> mode. An arm may not run a mode outside this map: adding one is a deliberate act
+#: (an arming-record amendment for a live arm, or a protocol pin for a control).
+# The keys are the arm names this file enumerates (the preset stem minus the
+# `MidastouchAI_` prefix and the `_gold.set` suffix), NOT the repo file names.
+ARM_MODE = {"M1": "0", "upcomers": "1", "upcomers_gold_LIVE": "1"}
+
+
 @pytest.mark.parametrize("arm", _presets_on_disk())
 def test_every_preset_runs_the_certified_strategy(arm: str) -> None:
-    """Identity and account size may vary per preset; the strategy may not.
+    """Identity and account size may vary per preset; the strategy may not — except the
+    mode, which is pinned per arm in ARM_MODE (see the comment on CERTIFIED_STRATEGY).
 
     Asserted against a literal rather than against the other preset: two files that
     drifted together would agree with each other while both being wrong.
@@ -329,6 +437,10 @@ def test_every_preset_runs_the_certified_strategy(arm: str) -> None:
     vals = _preset_vals(f"MidastouchAI_{arm}_gold.set")
     for k, v in CERTIFIED_STRATEGY.items():
         assert vals.get(k) == v, f"{arm}: {k}={vals.get(k)!r}, certified {v!r}"
+    assert arm in ARM_MODE, f"{arm}: no registered mode — an unregistered arm must not ship"
+    assert vals.get("InpMode") == ARM_MODE[arm], (
+        f"{arm}: InpMode={vals.get('InpMode')!r}, registered {ARM_MODE[arm]!r} — a mode change "
+        f"is an arming-record amendment, never an input edit")
 
 
 def test_live_preset_is_dedicated_and_certified_shape() -> None:

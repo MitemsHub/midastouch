@@ -148,8 +148,15 @@ def run(forward: bool = False) -> dict:
     atr_lookup = gim.h1_atr_lookup(ms.load_bars(H1_PATH))
     primary_days, aux_days = samples(days, consumed)
     if forward:                                  # the declared forward primary, when it exists
-        fwd = [d for d in sorted(days) if d > FORWARD_FROM]
-        primary_days = primary_days + fwd
+        # Forward days enter the primary sample through the SAME declared shape filter as
+        # every other day — `samples()` has already applied it, and the unconditional append
+        # this used to do was a second, looser selector: measured 2026-09-23, it admitted
+        # 2026-09-22 (final stamp 22:45, past the declared 22:30 boundary) into the primary
+        # rows, so the artifact contradicted its own selector on the same run (pinned by
+        # tests/test_gold_reversal_into_close.py). The forward declaration (protocol
+        # §Declared forward primary) is a DATE extension of the declared rule, not a
+        # different rule: shaped forward days (2026-09-23) join the primary here because
+        # they already sit in `primary_days`, unshaped ones stay out of it.
         aux_days = [d for d in aux_days if d <= FORWARD_FROM]
 
     primary = collect(primary_days, days, atr_lookup, anchor_policy="day_open")

@@ -37,11 +37,11 @@ OTHER = 7801001  # the paper arms' magic
 
 
 def _deal(ticket, magic, dtype=0, entry=0, profit=0.0, price=4300.0,
-          volume=0.01, time=1789734000.0, comment=""):
+          volume=0.01, time=1789734000.0, comment="", position_id=9001):
     return SimpleNamespace(ticket=ticket, magic=magic, type=dtype,
                            entry=entry, profit=profit, price=price,
                            volume=volume, time=time, comment=comment,
-                           position_id=9001, commission=0.0)
+                           position_id=position_id, commission=0.0)
 
 
 def _pos(ticket, magic, ptype=0, price_open=4390.0, sl=4370.0, tp=4430.0,
@@ -65,6 +65,28 @@ def test_positions_and_trade_deals_filtered_to_lv_magic():
         {}, now_epoch=1789734100.0)
     assert [p["ticket"] for p in state["positions"]] == [1]
     assert [d["ticket"] for d in state["deals"]] == [11]
+
+
+def test_the_close_of_our_own_position_is_adopted_when_the_venue_stamps_it_with_magic_zero():
+    """MEASURED 2026-09-22 on the gold arm, and this monitor reads the SAME venue: the venue stamped
+    the ENTRY deal with the arm's magic and the CLOSING deal with **magic 0** (the platform executed
+    it; its reason field read MOBILE). A broker-evidence monitor filtered on the deal's own magic
+    therefore never saw a position END — `first_fill_seen` and the ring would both read "still open"
+    for a trade the venue had closed, which is the one thing this monitor exists to catch.
+    """
+    deals = [_deal(1, LV, entry=0), _deal(2, 0, entry=1, profit=1.06)]
+    state = mon.build_state(_acct(), [], deals, {}, 1789734000.0)
+    tickets = [d["ticket"] for d in state["deals"]]
+    assert 1 in tickets and 2 in tickets, tickets
+    assert state["deals_attributed_by_position"] == [2]
+
+
+def test_a_close_of_a_position_we_never_opened_is_not_adopted():
+    """Fail closed, and the direction matters: a stranger's close inside the ring would be another
+    trader's P&L presented as this arm's broker evidence."""
+    deals = [_deal(3, 0, entry=1, profit=-9.99, position_id=4242)]
+    state = mon.build_state(_acct(), [], deals, {}, 1789734000.0)
+    assert state["deals"] == [] and state["deals_attributed_by_position"] == []
 
 
 def test_balance_op_captured_regardless_of_magic():

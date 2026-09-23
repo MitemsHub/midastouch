@@ -34,7 +34,7 @@
 //| passing forward gate, in its own reviewed build.                 |
 //+------------------------------------------------------------------+
 #property copyright "MIDASTOUCH"
-#property version   "1.20"   // v1.20: the RESTART-PERSISTENT REFUSAL CENSUS (NOFILLSUM + the UTC-day roll). v1.19 described two different builds — with and without the census — and a version tag that cannot tell them apart is worse than no tag: the ledger's ERA row is how a replay knows which behaviour produced it. v1.19: P6 build block (InpEntryTF default M15 = certified) + TP-preset axis
+#property version   "1.29"   // v1.29: THE EXIT REASON WORD - A CLOSE ROW NOW SAYS WHO CLOSED IT. MEASURED 2026-09-22 (docs/LIVE_EXIT_AUDIT_20260922.md): the arm's first live fill was closed by a MOBILE order (closing deal magic 0, DEAL_REASON_MOBILE) and the ledger's word for it was EXTERNAL - the same word a server-side stop-out gets - because the external-adoption path read the OUT deal's PRICE only and never DEAL_REASON or DEAL_MAGIC. The adoption scan now names the close: DEAL_REASON_SL/TP/SO -> SL/TP/SO (a server-side exit, even though the EA did not place the closing order); a closing deal bearing our magic -> EXPERT (the EA's own close, e.g. TIMEOUT or FRIDAY-FLAT, whose LiveClosePosition row was somehow lost); otherwise the platform's CLIENT/WEB/MOBILE family -> MANUAL-CLIENT/MANUAL-WEB/MANUAL-MOBILE. Unknown reasons (rollover, vmargin, split, any future platform value - this toolchain's ENUM_DEAL_REASON has no OTHER member) fall through to EXTERNAL-UNKNOWN - a row must never render a guessed word as known. Nothing reads the word: no entry, exit, size or protective rule consumes it, it is record-only, and the LCLOSE reason slot merely widens its vocabulary, which every reader of the row parses positionally and tolerantly (the reconciliation pins accept the v1.28 vocabulary unchanged). v1.28: THE SWEEP SHADOW - THE ASIAN-RANGE SWEEP CONTINUATION IS RECORDED FORWARD AND NEVER TRADED. `docs/ASIA_SWEEP_PREREG_20260922.md` REFUSED to port this mechanism (its pre-registered primary window failed on all three variants) and the same run reported the strongest number in this program on its SECONDARY window: UTC 07-18, 152 held-out trades, +0.1955R, pf 1.499, t +2.21, against the mirror at -0.1584R and the textbook reversal read at -0.1425R. It prescribed exactly one next step - record it forward with NO ORDER PATH AT ALL - and this is that step. A `SWEEPSHADOW` row is appended for every evaluated bar inside UTC 07:00-18:00, carrying the setup (the day's Asian range, the sweep side, whether this bar is the first sweep of that side, the reclaim flag, the certified stop distance) and NEVER an outcome, because the EA cannot know the future and a row claiming an R its writer could not have measured is not evidence; `scripts/midas_sweep_shadow.py` resolves those rows through the engine of record's own `run_mode`, so the arithmetic is not re-implemented on either side. The block reads no order state, consults no governor, increments no census counter, returns no direction to the entry path, and is called from exactly ONE place - beside the per-bar STATE row in `TrackFreshM15Bar` - which `tests/test_midas_v128_record.py` pins. The rule this record will be judged by was fixed in the forward pre-registration BEFORE any row existed (N >= 60 resolved outcomes, t >= 2.4, >= 0.30 fills/day, mean positive, and the two direction checks still negative or the verdict is VOID). v1.27: THE FOUR REFUSALS THAT SAID NOTHING NOW SAY WHY, THE STATE ROW CARRIES THE BAR'S OWN CONTEXT, THE ARM MEASURES ITS OWN SPREAD BY HOUR, AND A BAR THAT COULD NOT BE PRICED IS COUNTED RATHER THAN DROPPED. MEASURED 2026-09-22, from two passes over this arm's own held-out fills and its own live ledger. (1) THE SILENT REFUSALS. `TrackFreshM15Bar` had four return points that wrote no reason anywhere the operator looks: the session gate and the Friday cutoff incremented the census and returned WITHOUT setting `g_last_action`, so the chart's `last:` line still showed the PREVIOUS bar's action; and the two pricing guards (`atr <= 0`, `stop <= 0`) returned before the census as well, so they were not counted either - the operator's question is "why didn't it trade", and for four refusals this file had no answer. All four now name themselves, and the pricing pair gets its OWN counter - `nodata`, appended as position 10 - rather than inflating the refusal census, because nothing about the arm refused those bars: the ENGINE could not measure a stop for them. The label says `unpriced`, not `vetoed`. (2) THE STATE ROW WAS THINNER THAN THE FILL ROW. The OPEN row has carried the bar's own context since v1.19e (sig_ct, hour_utc, vol_ratio, news, off_min) while the STATE row - written for EVERY evaluated bar - carried none of it, so the bars this arm REFUSES, 83% of them, were exactly the ones with no context on the record. `StateAppend()` now rides every STATE row before the keyed `cfg=` token, from the SAME function the fill rows call, so one parser reads both. (3) THE ARM'S OWN SPREAD BY HOUR. `SPREADHOUR,<epoch>,<day>,` + 24 x `<hour>,<n>,<mean>,<max_x100>` written at each daily roll and sampled once per tick. The session finding this arm's research produced rests on the venue's spread being FLAT across hours - and that flatness was read off the CORPUS. This is the live arm measuring the same thing, so the two can be compared instead of assumed. (4) THE CENSUS FLOOR MOVED WITH THE COUNTER: `DiagRestoreFromLedger` now requires 13 fields, so a v1.26 snapshot is NOT read as one - a row whose missing 10th counter would otherwise restore as a confident zero, which is the exact class of sign this program keeps paying for. DISPLAY/RECORD ONLY: no entry, exit, size, veto or protective rule reads any of it, every write stays gated out of tester/BAR runs so certified parity ledgers stay byte-identical, and the trade set the engine produces is unchanged (measured, see the parity certificate). v1.26: WHAT `vEq` MEANS ON AN ARMED ARM. MEASURED 2026-09-22 from the operator's own screenshot: with the account at 25,004.26 the chart printed `vEq: $25,000.00 (start $25,000.00)` and the ledger's heartbeat printed `EQ,25000.00`, while every other reader (the account, morning_status's `veqs`, the live-fill reconciliation) said 25,004.26. The number was `g_paper_eq`, and on an ARMED arm the paper book never trades - `LiveSendOrder` is the only entry path that runs - so it was a FROZEN CONSTANT standing where the arm's equity belongs. Same defect class as the v1.24 `trades: 0/30`, and worse in consequence: equity is the number the governor's shield and day caps are read from, so the chart disagreed with the figure the RISK RULES use. One meaning, two books: the HUD's vEq line and every live heartbeat EQ row now carry the ARM's equity - the venue's account on the live path, the paper book on the paper path - and the HUD label says which (`vEq: $25,004.26 acct (bal $25,004.26, +4.26 vs the $25,000 basis)`). The EQ row's basis changes on a live ledger, so the ERA note gains `+acct-eq`. Display/record only: no entry, exit, size or protective rule reads it, the paper arm's rows are byte-identical, and every write is gated out of tester/BAR runs so certified parity ledgers stay byte-identical. v1.25: THE THREE DEFECTS THE ARM'S OWN FILL EXPOSED, fixed together because they are one story about what a fill row can know at the moment it is written. (1) THE ENTRY PRICE WAS A ZERO. MEASURED: the first live fill row reads `LOPEN,...,0.00000,...`, because the price came from ResultPrice() at the instant of acknowledgement, when on this venue that field is 0 and the position is not yet selectable - while the true 4333.07 was in the position and in the entry deal within the same second, and the row's own reader reported `entry price: ledger 0.0 vs venue 4333.07` for the rest of the fill's life. The ack now resolves the price from the position or the entry deal before the row goes out; if neither answers inside a bounded wait the row says `entry=pending` rather than printing a 0 in a price column, and an `LENTRY,<epoch>,<identity>,<price>,<source>` row amends it as soon as the venue reports it (at init, which also heals a row written by an earlier build, and again the moment it resolves). (2) `(missed string parameter)` ON EVERY FILL ROW. MEASURED on the same row: the LOPEN format carried FOUR `%s` for THREE arguments, and the paper OPEN row carried the same off-by-one from the same copy - so MQL5 appended its own missing-argument text after the cfg token. Fixed in both writers, and pinned by a test that counts specifiers against arguments in both. (3) A CLOSING DEAL IS NOT ALWAYS OURS TO STAMP. MEASURED from the venue's own history: the entry deal carried magic 7825001 and the CLOSING deal carried magic 0 (the platform's reason field reads MOBILE - it was executed outside the EA). The day's realised P&L filtered OUT deals on `DEAL_MAGIC == InpMagic`, so it ignored every externally-closed trade - and that number is what the Best Day cap and the day's reconstructed opening equity are measured from, i.e. a RISK-path number. Attribution is now by POSITION (an OUT deal is ours iff its position has an IN deal bearing our magic), the unmatched case is logged rather than dropped, and the unmatched case is the direction the governor must not silently prefer. All three are additive or strictly more truthful: no entry, exit, size or protective rule moves, and every change is gated out of tester/BAR runs so certified parity ledgers stay byte-identical. v1.24: THE ARM'S REALIZED RECORD IS ON THE CHART, and it says which record it is. MEASURED 2026-09-22: one live fill closed at +0.104R while the chart printed `trades: 0/30 | cumR +0.00` and every reader of the ledger said 1/30 - because BOTH live close paths wrote their LCLOSE row and neither touched a counter, and the paper counters an armed arm can see restart empty on every reload. The tally now counts the ledger's own LCLOSE rows (restored at init, exactly like the NOFILL census), the governor line names an unmeasured state instead of printing zeros, and the label says which tally is speaking. Display-only and read-only: no decision reads any of it, and it is gated out of tester/BAR runs so certified parity ledgers stay byte-identical. v1.23: THE VENUE'S SELF-INCONSISTENCY IS PRINTED ONCE PER SESSION (or on change) and the same moments append a keyed `SPEC` row to the ledger, so the journal stops repeating a static fact while the fact stays on the record. MEASURED 2026-09-22: the 15-minute heartbeat calls DollarPerUnitPerLot() twice per beat (the STATE row writer and the HUD refresh) and re-printed the identical warning all day, burying the VETO/NOFILL refusals it exists to protect. No decision reads any of it — the sizing authority ladder is unchanged, and the record is gated out of tester/BAR runs so certified parity ledgers stay byte-identical. v1.22: THE FILL ROW CARRIES THE CONFIGURED RISK (`cfg=<usd>@<pct>`, appended last) beside the risk it actually took, so the gap between InpRiskPercent and the venue's minimum lot is visible in the journal rather than only in a verification run. Purely additive and gated out of tester runs, so certified parity ledgers stay byte-identical. v1.21: THE HUD SHOWS THE ENGINE'S VIEW (regime H4/H1, trigger, RSI, gates, sizing, governor) and serialises the same numbers into a `STATE` ledger row, so the chart and the record cannot disagree. Additive by construction: the HUD is display-only and no decision reads any of it. v1.20: the RESTART-PERSISTENT REFUSAL CENSUS (NOFILLSUM + the UTC-day roll). v1.19 described two different builds — with and without the census — and a version tag that cannot tell them apart is worse than no tag: the ledger's ERA row is how a replay knows which behaviour produced it. v1.19: P6 build block (InpEntryTF default M15 = certified) + TP-preset axis
 // Tester agents wipe their Files sandbox at pass start: this property makes
 // the tester copy the recorded-spread series from <data>\MQL5\Files into the
 // agent for every BAR-mode pass (name must be the literal staged file).
@@ -147,8 +147,34 @@ ulong          g_pp_ticket = 0;
 double         g_paper_eq = 0.0, g_paper_start = 0.0;
 double         g_cum_r = 0.0;
 int            g_trades = 0, g_wins = 0;
+// v1.24 THE ARM'S OWN RECORD (display only, ledger-backed). The two counters above count
+// VIRTUAL trades and start empty after every reload, so on an ARMED arm they read 0/30 while
+// the record says otherwise: MEASURED 2026-09-22, one live fill closed at +0.104R, the chart
+// printed `trades: 0/30 ... cumR +0.00` while `morning_status` read `closed: 1/30` from the
+// same ledger's LCLOSE rows. The go-live gate counts the ARM's closed trades, so the chart
+// counts those rows. Restored from the ledger at init (LiveCensusRestoreFromLedger, the same
+// shape as the NOFILL census) and incremented by the ONE helper both live close paths call
+// (LiveCensusAdd), so the two paths cannot drift apart. No decision reads any of it.
+int            g_live_closed = 0, g_live_wins = 0;
+double         g_live_cum_r = 0.0;
 string         g_last_action = "boot";   // v1.10 HUD: last engine action (display only)
 string         g_lv_last_error = "";     // v1.18: last live-order failure detail (diagnostics)
+// v1.21 HUD STATE (display only, and the ONLY input the HUD has). Every one of these is
+// written by the DECISION path at the moment it computed the value — never recomputed by
+// the display path — and the STATE row writer serialises the same numbers into the ledger
+// as a `STATE` row. That is what keeps the HUD from becoming a second source of truth: what the
+// chart shows, the record carries, and the CLI report reads it back from the file rather
+// than from memory. Nothing here is read by any decision.
+int            g_hud_mac = 2;            // 2 = not measured yet; -1/0/+1 = MacroState()
+int            g_hud_h4  = 0, g_hud_h1 = 0;   // per-timeframe directions behind the macro
+int            g_hud_trig = 0;           // trigger on the last closed entry bar (-1/0/+1)
+double         g_hud_rsi = 0.0;          // RSI on that bar (display echo)
+datetime       g_hud_sig_ct = 0;         // the entry bar that was evaluated
+double         g_hud_daypnl = 0.0;       // today's equity change from the UTC-day anchor
+double         g_hud_cap = 0.0;         // the Best Day cap in dollars
+ double        g_hud_floor = 0.0;        // the trailing-shield floor
+string         g_hud_gov = "n/a";       // last governor reading ("" = clear)
+bool           g_hud_sess_ok = false;    // was the evaluated bar inside the session window
 // v1.18 NOFILL diagnostics (register review item 1): per-M15-bar veto
 // accounting, so "why didn't it trade" is answered from evidence, not
 // memory. Rows are appended to paper-file ledgers only — the BAR parity
@@ -156,7 +182,17 @@ string         g_lv_last_error = "";     // v1.18: last live-order failure detai
 int            g_nofill_signal = 0, g_nofill_mism = 0, g_nofill_session = 0,
                g_nofill_friday = 0, g_nofill_spread = 0, g_nofill_riskcap = 0,
                g_nofill_brk = 0, g_nofill_notr = 0, g_nofill_wrote = 0,
-               g_nofill_news = 0;   // v1.19c: news stand-down (reason in the journal line)
+               g_nofill_news = 0,   // v1.19c: news stand-down (reason in the journal line)
+               g_nofill_nodata = 0; // v1.27: the bar could not be priced (ATR/stop <= 0)
+// v1.27 SPREAD BY HOUR. The one live quantity the outside research turned on and the one
+// this program had never measured per hour: doctrine says the thin hours carry wider spreads,
+// and the CORPUS says this venue is flat at 0.2 pts in every hour. That claim was read off
+// the data of record; this is the live arm recording its own, so the two can be compared
+// instead of assumed. Sum/count/max per UTC hour, rolled into a SPREADHOUR row once a day.
+// DISPLAY/RECORD ONLY — no entry, exit, size, veto or protective rule reads any of it.
+double         g_spread_sum[24];
+int            g_spread_n[24];
+int            g_spread_max_x100[24];
 // v1.20: the census' DAY KEY and the signature of what was last recorded. Both are
 // restored from the ledger at init, so the counters above survive an EA reload instead
 // of being zeroed by it. See DiagRestoreFromLedger for the failure this replaces.
@@ -205,6 +241,7 @@ ulong  g_lv_order  = 0;              // entry order ticket (provenance)
 ulong  g_lv_deal   = 0;              // entry deal ticket (provenance)
 int    g_lv_dir = 0;                 // live direction (telemetry columns: atr_at_entry + spread_at_open appended in v1.13)
 double g_lv_entry = 0, g_lv_sl = 0, g_lv_tp = 0, g_lv_stop = 0, g_lv_vol = 0;
+bool   g_lv_entry_pending = false;   // v1.25: the fill row went out with no price resolved yet
 datetime g_lv_open_time = 0;
 datetime g_lv_expiration = 0;    // research timeout mirrored on the real position
 int    g_brk_day = -1;               // daily-loss-breaker day key (UTC yyyymmdd)
@@ -228,7 +265,7 @@ double DollarPerUnit()
    return DollarPerUnitPerLot(dpu) ? dpu : 0.0;
 }
 
-#define APP_VERSION  "MIDAS1.20"   // v1.20: the census build (see #property version). The banner, the ledger's ERA row and every reader of them move together — tests/test_midas_hud.py pins #property == APP_VERSION so the two can never drift apart
+#define APP_VERSION  "MIDAS1.29"   // v1.29: the exit-reason build (see #property version). v1.28: the sweep-shadow build (see #property version). v1.27: the four-silent-refusals / bar-context / spread-by-hour build (see #property version). v1.26: the arm's-equity build. v1.25: the fill-row-integrity build (see #property version). v1.24: the live-record build (see #property version). v1.23: the spec-record build (see #property version). The banner, the ledger's ERA row and every reader of them move together — tests/test_midas_hud.py pins #property == APP_VERSION so the two can never drift apart
 #define SPREAD_FLOOR 0.10              // $ — MUST equal midas_sweep.SPREAD_FLOOR
 #define LEDGER_BASE  "MIDASTOUCH_paper"
 
@@ -263,6 +300,179 @@ string ModeName(const int m)
 //| parity runs need byte-identical ledgers and untouched charts     |
 //| (source test tests/test_midas_hud.py pins that law).             |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| v1.21 HUD view (display only). Every line below is built from a   |
+//| value the DECISION path already computed and stashed (regime,     |
+//| trigger, RSI, session flag, governor readings) or from a pure     |
+//| read of the instrument (ATR, spread, spec). No trading state is    |
+//| written here, no decision reads anything here, and every number    |
+//| the sizing helper produces is serialised into the ledger's STATE   |
+//| row by its writer — so the chart and the record cannot disagree,    |
+//| and `morning_status` can print the same view from the file.         |
+//+------------------------------------------------------------------+
+string DirWord(const int d) { return d > 0 ? "up" : (d < 0 ? "down" : "?"); }
+
+string RegimeText()
+{
+   if(g_hud_mac == 2) return "H4 ? / H1 ? -> not measured yet";
+   string m = (g_hud_mac > 0) ? "BULLISH"
+            : (g_hud_mac < 0 ? "BEARISH" : "MIXED (H1/H4 disagree)");
+   return StringFormat("H4 %s / H1 %s -> %s (macro %+d)",
+                       DirWord(g_hud_h4), DirWord(g_hud_h1), m, g_hud_mac);
+}
+
+string TriggerText()
+{
+   string t = (g_hud_trig > 0) ? "LONG" : (g_hud_trig < 0 ? "SHORT" : "none");
+   string when = (g_hud_sig_ct > 0)
+               ? TimeToString(g_hud_sig_ct, TIME_DATE | TIME_MINUTES) : "n/a";
+   return StringFormat("%s | RSI(14) %.1f | last bar %s", t, g_hud_rsi, when);
+}
+
+string GateText()
+{
+   double stop = InpSlAtrMult * AtrNow();
+   double sprd = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double lim  = (stop > 0.0) ? stop * InpSpreadCapPctStop / 100.0 : 0.0;
+   return StringFormat("bar %s the %02d-%02d UTC window | tick spread $%.2f vs cap $%.2f",
+                       g_hud_sess_ok ? "inside" : "OUTSIDE",
+                       InpSessionStartHour, InpSessionEndHour, sprd, lim);
+}
+
+// The CONFIGURED risk in dollars, on the display basis (the governor's account size). ONE
+// definition: the sizing below, the HUD's SIZING line and the STATE row's `cfg` token all
+// divide the same two numbers, so the chart, the record and the fill rows cannot disagree
+// about what the arm was ASKED to risk. The fill rows carry their own path's basis instead
+// (PaperEquity(), or account equity on the live path) because that is the same quantity the
+// fill's sizing already divided — the two are always a PAIR off one basis, never two bases.
+//
+// v1.22 exists because the pair is not decorative here: 0.25% of $25,000 is $62.50 and the
+// venue's 0.01 step yields $31.84 at the current stop width, so EVERY fill on this account
+// takes roughly half its budget, and the row used to carry only the second number.
+double ConfiguredRiskUsd()
+{
+   return PropGovernorSize() * InpRiskPercent / 100.0;
+}
+
+// The one sizing computation in the file's display layer. Both the HUD line and the STATE
+// row call it, so a number on the chart is the number in the record.
+void SizingNumbers(double &lots, double &risk_usd, double &stop_usd, bool &minlot_over)
+{
+   lots = 0.0; risk_usd = 0.0; stop_usd = 0.0; minlot_over = false;
+   double dpu = 0.0;
+   double atr = AtrNow();
+   if(!DollarPerUnitPerLot(dpu) || atr <= 0.0 || dpu <= 0.0) return;
+   stop_usd = InpSlAtrMult * atr;
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0.0) step = vmin;
+   double per_lot = stop_usd * dpu;             // $ risk per 1.00 lot at this stop
+   double budget  = ConfiguredRiskUsd();
+   lots = MathFloor(budget / per_lot / step) * step;
+   if(lots < vmin) lots = vmin;                 // the venue's floor, not a choice
+   risk_usd = lots * per_lot;
+   minlot_over = (vmin * per_lot > budget);     // this is the risk-cap veto, stated early
+}
+
+// Naming the configured risk beside the taken one, in one sentence, on the chart and in the
+// record: `QUANTISED DOWN` is the venue's lot step leaving part of the budget unspent (this
+// account's standing case), `OVERSHOOT` is the floor lot risking MORE than configured (which
+// amendment 6 still permits under InpMaxRiskPct), and neither is a rule breach — it is the
+// venue's granularity, and the operator's job is to see it rather than infer it.
+string RiskQuantisationWord(double taken_usd, double cfg_usd)
+{
+   if(cfg_usd <= 0.0) return "";
+   if(taken_usd < cfg_usd - 0.005) return " QUANTISED DOWN";
+   if(taken_usd > cfg_usd + 0.005) return " OVERSHOOT";
+   return " AS CONFIGURED";
+}
+
+string SizingText()
+{
+   double lots, risk, stop;
+   bool minlot_over;
+   SizingNumbers(lots, risk, stop, minlot_over);
+   if(stop <= 0.0) return "unavailable (no ATR / bad spec)";
+   double cfg = ConfiguredRiskUsd();
+   return StringFormat("%.2f lots, risk $%.2f of $%.2f configured (%.2f%%)%s on %.1fxATR(H1)=$%.2f%s",
+                       lots, risk, cfg, InpRiskPercent,
+                       RiskQuantisationWord(risk, cfg), InpSlAtrMult, stop,
+                       minlot_over ? "  [MIN-LOT EXCEEDS BUDGET -> risk-cap veto]" : "");
+}
+
+string GovernorText()
+{
+   if(!InpPropGuard) return "guard OFF (InpPropGuard=false)";
+   // An UNMEASURED governor must say so rather than print zeros. MEASURED 2026-09-22: after
+   // each reload the panel read `floor $0 | today +0.00 of cap $0 | n/a` until the first bar
+   // was evaluated - up to a full bar interval of looking like a governor that is off or a
+   // configuration with no caps, while the arm ran with InpPropGuard=true and real limits.
+   if(g_hud_cap == 0.0 && g_hud_floor == 0.0 && g_hud_gov == "n/a")
+      return "guard ON - readings not measured yet (this process has evaluated no bar)";
+   return StringFormat("floor $%.0f | today %+.2f of cap $%.0f | %s",
+                       g_hud_floor, g_hud_daypnl, g_hud_cap,
+                       g_hud_gov == "" ? "CLEAR" : g_hud_gov);
+}
+
+string TradesText()
+{
+   // The realized record, and WHICH record it is. On an armed arm the paper tally is the
+   // wrong one by construction, so a live arm prints the ledger's own closed-trade count and
+   // says where it came from: a bare `1/30` beside `0/30` in the report is how a chart and a
+   // record disagree while both look right. The gate needs 30 closed trades on the ARM.
+   if(!InpLiveExecution)
+      return StringFormat("%d/30 paper closed | wins %d | cumR %+.2f",
+                          g_trades, g_wins, g_cum_r);
+   return StringFormat("%d/30 LIVE closed (ledger LCLOSE rows) | wins %d | cumR %+.2f",
+                       g_live_closed, g_live_wins, g_live_cum_r);
+}
+
+string NewsText()
+{
+   if(!InpUseNewsFilter) return "stand-down OFF - the gate is not applied";
+   string age = (g_news_written_at > 0)
+              ? StringFormat("file written %s", TimeToString(g_news_written_at, TIME_DATE|TIME_MINUTES))
+              : "no file written by this EA";
+   return "stand-down ON (fail-closed) | " + age;
+}
+
+//+------------------------------------------------------------------+
+//| The STATE row: the HUD's view, on the record. Written whenever    |
+//| the HUD is refreshed and on every evaluated bar, so "what did it  |
+//| see at 14:15" is answerable from the file and not only from a      |
+//| chart that has since changed. Paper ledgers only; the BAR replay   |
+//| never reaches this, so certified ledgers stay byte-identical.      |
+//+------------------------------------------------------------------+
+void StateRowWrite()
+{
+   if(MQLInfoInteger(MQL_TESTER)) return;
+   if(InpBarModel) return;
+   double lots, risk, stop;
+   bool minlot_over;
+   SizingNumbers(lots, risk, stop, minlot_over);
+   // v1.22: the same keyed `cfg=<usd>@<pct>` token the fill rows carry, so the gap between
+   // the configured risk and the size the venue allows is on the record from the FIRST
+   // evaluated bar rather than only from the first fill — and it is the same token and the
+   // same source as the fill rows', so a reader needs one parser for both.
+   // v1.27: THE SAME TAPE THE FILL ROWS CARRY, ON EVERY EVALUATED BAR. MEASURED 2026-09-22:
+   // the STATE row carried the engine's view (regime, trigger, RSI, sizing, governor) but NOT
+   // the bar's own CONTEXT — hour_utc, vol_ratio, news, off_min — while the OPEN row had
+   // carried it since v1.19e. So the live record was THINNER than the offline one: the four
+   // axes the forward-cell prereg labels this arm by could be read off a fill and not off a
+   // bar, i.e. exactly the bars this arm refuses (83% of them) were the ones with no context.
+   // It is the SAME `StateAppend()` the fill rows call, so one parser reads both, and the
+   // keyed `cfg=` token still rides LAST because `_split_risk_tail` reads it off the END.
+   // No positional specifier is added: both stamps ride inside the row's existing `%s`.
+   // Nothing decides anything from this — the STATE row is display/record only, it is
+   // gated out of tester/BAR runs, and the `cfg` token is still `RiskAppend(...)` itself.
+   PaperLog(StringFormat("STATE,%I64d,%I64d,%d,%d,%d,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f%s",
+            (long)TimeUTCNow(), (long)g_hud_sig_ct, g_hud_mac, g_hud_h4, g_hud_h1,
+            g_hud_trig, (int)MathRound(g_hud_rsi * 100.0), g_hud_sess_ok ? 1 : 0,
+            (int)MathRound(lots * 100.0), (int)MathRound(risk * 100.0),
+            g_hud_daypnl, g_hud_cap, g_hud_floor,
+            StateAppend() + RiskAppend(ConfiguredRiskUsd())));   // v1.19e tail | v1.22 cfg
+}
+
 void HudUpdate()
 {
    if(MQLInfoInteger(MQL_TESTER)) return;   // parity: draw nothing in the tester
@@ -275,16 +485,23 @@ void HudUpdate()
       // label read `tf=PERIOD_M15` on an H1 chart and read as a contradiction. The
       // invariant is pinned by tests/test_midas_hud.py.
       "MIDASTOUCH %s | mode=%d %s | entryTF=%s | session %02d-%02d UTC\n"
-      "vEq: $%.2f (start $%.2f) | pos: %s\n"
-      "trades: %d/30 (gate reads at n=60) | wins %d | cumR %+.2f\n"
-      "eval: %d no-trade bars | V: mis %d no-trg %d sess %d spr %d\n"
+      "%s | pos: %s\n"
+      "REGIME   %s\n"
+      "TRIGGER  %s\n"
+      "GATES    %s\n"
+      "SIZING   %s\n"
+      "GOVERNOR %s\n"
+      "NEWS     %s\n"
+      "trades: %s\n"
+      "eval: %d no-trade bars | V: mis %d no-trg %d sess %d spr %d nodata %d\n"
       "last: %s",
       APP_VERSION, (int)InpMode, ModeName((int)InpMode), EnumToString(InpEntryTF),
       InpSessionStartHour, InpSessionEndHour,
-      PaperEquity(), g_paper_start, pos,
-      g_trades, g_wins, g_cum_r,
+      EquityText(), pos,
+      RegimeText(), TriggerText(), GateText(), SizingText(), GovernorText(), NewsText(),
+      TradesText(),
       g_nofill_signal, g_nofill_mism, g_nofill_notr, g_nofill_session,
-      g_nofill_spread, g_last_action));
+      g_nofill_spread, g_nofill_nodata, g_last_action));
 }
 
 string PaperFile()
@@ -309,6 +526,52 @@ void PaperLog(string line)
 }
 
 double PaperEquity() { return g_paper_eq; }
+
+//+------------------------------------------------------------------+
+//| WHAT `vEq` MEANS ON AN ARMED ARM (v1.26).                        |
+//|                                                                  |
+//| MEASURED 2026-09-22, from the operator's own screenshot: with    |
+//| the account at 25,004.26 the chart printed `vEq: $25,000.00      |
+//| (start $25,000.00)` and the ledger's EQ heartbeat printed        |
+//| `EQ,25000.00`. Both were `g_paper_eq`, and on an ARMED arm the   |
+//| paper book never trades — `LiveSendOrder` is the only entry      |
+//| path that runs — so that number is a FROZEN CONSTANT standing    |
+//| where the arm's equity belongs. It is the same defect class as   |
+//| the v1.24 `trades: 0/30` (a chart understating the arm's own     |
+//| record), and it matters more: equity is what the governor's      |
+//| shield and day caps are read from, so the chart disagreed with   |
+//| the number the risk rules actually use.                          |
+//|                                                                  |
+//| One meaning, two books: the arm's equity. The PAPER arm's is its |
+//| own book (unchanged, byte-identical, so tester/BAR ledgers don't |
+//| move); the LIVE arm's is the venue's account. The label says     |
+//| which, because a bare number beside a record is how a chart and  |
+//| a ledger disagree while both look right.                         |
+//+------------------------------------------------------------------+
+double DisplayEquity()
+{
+   if(InpLiveExecution) return AccountInfoDouble(ACCOUNT_EQUITY);
+   return PaperEquity();
+}
+
+// The EQ heartbeat row, written through ONE site so the basis can never drift from the
+// display again. Paper arm: PaperEquity(), byte-identical to every EQ row before this.
+void LogEquityRow()
+{
+   PaperLog(StringFormat("EQ,%.2f", DisplayEquity()));
+}
+
+// The HUD's equity line. The paper form is v1.10's, verbatim; the live form names the
+// source, the balance it came with, and the declared basis it is measured against.
+string EquityText()
+{
+   if(!InpLiveExecution)
+      return StringFormat("vEq: $%.2f (start $%.2f)", PaperEquity(), g_paper_start);
+   double eq  = AccountInfoDouble(ACCOUNT_EQUITY);
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   return StringFormat("vEq: $%.2f acct (bal $%.2f, %+.2f vs the $%.2f basis)",
+                       eq, bal, bal - InpPaperEquity, InpPaperEquity);
+}
 
 //+------------------------------------------------------------------+
 //| BAR parity model: load the recorded per-bar M15 spread series    |
@@ -406,6 +669,36 @@ bool AtrAtShift(int k, double &out)
 }
 
 //+------------------------------------------------------------------+
+//| v1.23 SESSION DEDUPE for the venue self-inconsistency.            |
+//|                                                                  |
+//| MEASURED 2026-09-22: the TICK VALUE MISMATCH line below printed   |
+//| from EVERY caller of DollarPerUnitPerLot() — and on the live arm  |
+//| the 15-minute heartbeat calls it twice (StateRowWrite +           |
+//| HudUpdate), every evaluated bar calls it again, and the sizing    |
+//| sites add one per attempt — so the same two static numbers        |
+//| repeated all day and buried the VETO/NOFILL refusals the journal  |
+//| exists to carry. The warning now prints on the FIRST observation  |
+//| of a session (this EA process) and again only when either number  |
+//| MOVES materially; the same two moments append a keyed `SPEC` row  |
+//| so the evidence outlives the journal scroll. The globals reset at |
+//| init, so a reload is a new session and prints once.               |
+//+------------------------------------------------------------------+
+double g_spec_warn_broker = 0.0;   // broker tv/ts at the last print (0 = not yet this session)
+double g_spec_warn_used   = 0.0;   // authoritative value at the last print
+
+// True on the first observation of the session, or when either number moved past the
+// relative band. The band is 0.5%: OrderCalcProfit is a quote and the raw spec fields
+// are static, so anything a human would call "the same numbers" stays silent; a broker
+// spec change (or a contract/quote redefinition) breaks the band and re-arms the print.
+bool SpecMoved(double broker_now, double used_now)
+{
+   if(g_spec_warn_broker <= 0.0 || g_spec_warn_used <= 0.0)
+      return true;
+   return MathAbs(broker_now - g_spec_warn_broker) / g_spec_warn_broker > 0.005 ||
+          MathAbs(used_now - g_spec_warn_used) / g_spec_warn_used > 0.005;
+}
+
+//+------------------------------------------------------------------+
 //| Dollar value of one 1.0 price-unit move per 1.0 lot.             |
 //|                                                                  |
 //| AUTHORITY ORDER (2026-09-20, measured on Upcomers XAUUSD):        |
@@ -461,11 +754,52 @@ bool DollarPerUnitPerLot(double &out)
                   cs, ts, tv);
       return false;
    }
+   // v1.23: deduped print + ledger record, written at the same two moments. The first
+   // line of the session is byte-identical to the one v1.22 printed on every call, so
+   // nothing that greps the journal for the warning breaks; a changed pair says so and
+   // names what it was, because "it changed" is itself the evidence an operator needs.
    if(via_tv > 0.0 && MathAbs(out - via_tv) / out > 0.05)
-      PrintFormat(VersionTag() + "TICK VALUE MISMATCH broker tv/ts=%.2f vs settled %.2f per price unit "
-                  "(ratio %.2f) — venue spec is self-inconsistent; sizing on the settled value",
-                  via_tv, out, via_tv / out);
+   {
+      if(SpecMoved(via_tv, out))
+      {
+         if(g_spec_warn_broker > 0.0)
+            PrintFormat(VersionTag() + "TICK VALUE MISMATCH CHANGED: broker tv/ts=%.2f vs settled %.2f "
+                        "per price unit (ratio %.2f; was tv/ts=%.2f vs settled %.2f) — sizing on the settled value",
+                        via_tv, out, via_tv / out, g_spec_warn_broker, g_spec_warn_used);
+         else
+            PrintFormat(VersionTag() + "TICK VALUE MISMATCH broker tv/ts=%.2f vs settled %.2f per price unit "
+                        "(ratio %.2f) — venue spec is self-inconsistent; sizing on the settled value",
+                        via_tv, out, via_tv / out);
+         SpecRecord(tv, ts, cs, settled, via_tv, out);
+         g_spec_warn_broker = via_tv;
+         g_spec_warn_used   = out;
+      }
+   }
    return true;
+}
+
+//+------------------------------------------------------------------+
+//| v1.23 SPEC row — the venue's self-inconsistency, ON THE RECORD.   |
+//|                                                                  |
+//| Written at exactly the moments the deduped journal line prints    |
+//| (first observation of the session, and every material change), so |
+//| quieting the journal cannot lose the evidence: the numbers the    |
+//| arm sized against are in the file even though the line is not     |
+//| scrolling. Fields are KEYED, never positional: the NOFILL         |
+//| mislabel (2026-09-21) was a reader/writer column-order             |
+//| disagreement that a permutation of zeros made invisible, so this  |
+//| row cannot be misread by position on either side.                 |
+//| Gated out of the strategy tester and the BAR replay exactly like  |
+//| the STATE row: certified parity ledgers stay byte-identical, and  |
+//| the BAR ledger is a reproduction artifact, not an observation.    |
+//+------------------------------------------------------------------+
+void SpecRecord(double tv, double ts, double cs, double settled,
+                double broker, double used)
+{
+   if(MQLInfoInteger(MQL_TESTER)) return;
+   if(InpBarModel) return;
+   PaperLog(StringFormat("SPEC,%I64d,tv=%.5f,ts=%.5f,cs=%.2f,broker=%.2f,settled=%.4f,used=%.4f,ratio=%.4f",
+              (long)TimeUTCNow(), tv, ts, cs, broker, settled, used, broker / used));
 }
 
 void PrintFloorTable()
@@ -556,6 +890,18 @@ double AtrNow()
 }
 
 //+------------------------------------------------------------------+
+//| The session window, defined ONCE (v1.21). The live gate and the   |
+//| HUD's GATES line both call this, so "is this bar tradable" cannot |
+//| have two answers. The rule is on the bar's OPEN hour.             |
+//+------------------------------------------------------------------+
+bool InSessionBar(const datetime bar_open)
+{
+   MqlDateTime d;
+   TimeToStruct(bar_open, d);
+   return (d.hour >= InpSessionStartHour && d.hour < InpSessionEndHour);
+}
+
+//+------------------------------------------------------------------+
 //| Macro state on CLOSED bars: +1 up, -1 down, 0 divergent.         |
 //+------------------------------------------------------------------+
 int MacroState()
@@ -566,6 +912,11 @@ int MacroState()
    if(CopyClose(_Symbol, PERIOD_H1, 1, 1, c1) != 1) return 0;
    if(CopyClose(_Symbol, PERIOD_H4, 1, 1, c4) != 1) return 0;
    bool h1_up = c1[0] > e1[0], h4_up = c4[0] > e4[0];
+   // v1.21: the two directions are stashed for the HUD and the STATE row. This is the
+   // ONLY place they are computed, so the display cannot disagree with the decision: the
+   // same two booleans that decide the entry also name the regime on the chart.
+   g_hud_h4 = h4_up ? 1 : -1;
+   g_hud_h1 = h1_up ? 1 : -1;
    if(h1_up && h4_up) return 1;
    if(!h1_up && !h4_up) return -1;
    return 0;
@@ -578,6 +929,11 @@ int MacroState()
 int TriggerOnClosedBar()
 {
    double up[], lo[], rsi[];
+   // v1.21 display echo: the RSI reading on the evaluated bar, taken once here so the HUD
+   // can answer "how close was it" without a second read of its own. Pure read, no effect
+   // on the trigger below, and the value is also what the STATE row carries.
+   double rr_hud[];
+   if(CopyBuffer(g_m15_rsi, 0, 1, 1, rr_hud) == 1) g_hud_rsi = rr_hud[0];
    if(CopyBuffer(g_m15_bb, 1, 1, 1, up) != 1) return 0;   // UPPER_BAND
    if(CopyBuffer(g_m15_bb, 2, 1, 1, lo) != 1) return 0;   // LOWER_BAND
    double c0[], c1[];
@@ -802,14 +1158,58 @@ int OnInit()
    // a reader must be able to tell which ledger it is holding from the ledger alone.
    if(!InpBarModel)
       era_note += "+diag-census";
+   // v1.21: the HUD view is serialised into a new row type (STATE) on every evaluated
+   // bar, so the chart's reading survives the chart. Same reason as +diag-census: a reader
+   // holding a ledger must be able to tell what it carries from the ledger alone.
+   if(!InpBarModel)
+      era_note += "+state-view";
+   // v1.22: every fill row gained a keyed `cfg=<usd>@<pct>` tail — the risk the arm was
+   // CONFIGURED for, beside the risk it took. A grammar change on the fill rows for the
+   // same reason as +diag-census: a reader holding a ledger must be able to tell what it
+   // carries from the ledger alone.
+   if(!InpBarModel)
+      era_note += "+cfg-risk";
+   // v1.23: the venue self-inconsistency gained a record of its own (SPEC rows with keyed
+   // fields) and its journal line is deduped to once per session / on change. A grammar
+   // change like the two above, so it rides the era note for the same reason: a reader
+   // holding a ledger must be able to tell what it carries from the ledger alone.
+   if(!InpBarModel)
+      era_note += "+spec-record";
+   // v1.25: fill rows gained `entry=pending` when the price cannot be resolved at write time,
+   // and a fill whose row could not be priced is amended by a LENTRY row. Both are grammar a
+   // reader has to know about to price a fill correctly, so both ride the era note.
+   if(!InpBarModel)
+      era_note += "+fill-price-heal";
+   // v1.26: the EQ row's BASIS changed on a live ledger — it carries the venue's account
+   // equity there, not the paper book's frozen counter. A reader holding a ledger must be
+   // able to tell that from the ledger alone, which is what the note is for.
+   if(!InpBarModel)
+      era_note += "+acct-eq";
+   // v1.27: THREE RECORD-ONLY APPENDS, and a reader has to know about all three because each
+   // moves a field POSITION rather than a meaning. (1) `nodata` is the 10th NOFILL/NOFILLSUM
+   // counter, so BOTH the snapshot floor (12 -> 13) and the row width moved. (2) the STATE row
+   // gained the v1.19e state stamp before its keyed `cfg=` token, so a row that once ended at
+   // `floor` now carries five more fields — and a reader that counted on the old end reads the
+   // cfg token as a state field. (3) `SPREADHOUR` is a new row type. The note names them.
+   // v1.28 adds a fourth: `SWEEPSHADOW` is a new row type, one per evaluated bar inside the
+   // sweep shadow's UTC 07-18 window, so a reader of this arm's book meets a row it has not
+   // seen before and the note says so rather than leaving it to be discovered.
+   // v1.29 adds a fifth: `+exit-reason` - the LCLOSE row names who closed the trade (SL, TP,
+   // SO, EXPERT, MANUAL-*) instead of one EXTERNAL word for "the venue did it".
+   if(!InpBarModel)
+      era_note += "+census10+state-ctx+spread-hour+sweep-shadow+exit-reason";
    PaperLog(StringFormat("ERA,%s,%I64d,%s", APP_VERSION, (long)TimeCurrent(), era_note));
    RestoreOrVerifyLedger();
    DiagRestoreFromLedger();             // v1.20: continue the day this reload interrupted
+   LiveCensusRestoreFromLedger();       // v1.24: the arm's realized record, on the chart
+                                        // from the first second (HudUpdate runs below)
    if(!MQLInfoInteger(MQL_TESTER))
-      PaperLog(StringFormat("EQ,%.2f", PaperEquity()));   // v1.07: init epoch touch (watchdog sees a fresh mtime immediately)
+      LogEquityRow();   // v1.07: init epoch touch (watchdog sees a fresh mtime immediately)
+                        // v1.26: and on an armed arm it carries the ACCOUNT's equity
    EventSetTimer(900);                                 // v1.07: heartbeat — the ledger must provably stay live
    PrintFloorTable();
    DumpH1Debug();                      // v1.02: tester-vs-CSV series comparison
+   LiveEntryPriceHeal();               // v1.25: price a fill row the writer could not price
    LiveRecoverState();                 // v1.08: adopt real positions after restart (live only)
    HudUpdate();                        // v1.10: HUD up from the first second (live only)
    return INIT_SUCCEEDED;
@@ -821,7 +1221,7 @@ void OnDeinit(const int reason)
    if(InpBarModel)
       ReplayTailFlush();
    DiagSnapshot();      // v1.20: capture the census on the way out (recompile, close, restart)
-   PaperLog(StringFormat("EQ,%.2f", PaperEquity()));
+   LogEquityRow();      // v1.26: the farewell heartbeat carries the arm's own equity basis
    IndicatorRelease(g_h1_ema); IndicatorRelease(g_h4_ema);
    IndicatorRelease(g_h1_atr); IndicatorRelease(g_m15_bb);
    IndicatorRelease(g_m15_rsi);
@@ -835,9 +1235,11 @@ void OnTimer()
 {
    if(MQLInfoInteger(MQL_TESTER))
       return;                                          // parity runs: byte-identical ledgers
-   PaperLog(StringFormat("EQ,%.2f", PaperEquity()));
+   LogEquityRow();      // v1.26: on an armed arm this is the ACCOUNT's equity, not the paper
+                        // book's frozen counter — see DisplayEquity()
    DiagMaybeWrite();                    // v1.18: NOFILL diagnostics flush on the heartbeat
    NewsRefreshIfDue(TimeGMT());         // v1.19c: keep the calendar source alive (live only)
+   StateRowWrite();         // v1.21: the HUD's view onto the record, at the same cadence
    HudUpdate();                                        // v1.10: HUD refresh on the heartbeat clock
 }
 
@@ -918,6 +1320,8 @@ void OnTick()
 {
    PropDayAnchorCheck();                   // UTC-day baselines BEFORE any gate reads them
    PropPhaseCheck();                       // evaluation-complete milestone (never a veto)
+   SpreadSampleTick();                     // v1.27: one spread increment per tick, record
+                                           // only — it reads the quote and blocks nothing
    if(InpBarModel)                         // v1.04 research-parity replay
    {
       OnBarReplay();
@@ -985,6 +1389,72 @@ void ResolveLiveIds()
    g_lv_ticket = (ulong)PositionGetInteger(POSITION_TICKET);
    ulong pid   = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
    g_lv_posid  = (pid > 0) ? pid : g_lv_ticket;   // netting fallback
+}
+
+//+------------------------------------------------------------------+
+//| THE FILL PRICE IS NOT KNOWABLE AT ACKNOWLEDGEMENT (v1.25).       |
+//|                                                                  |
+//| MEASURED 2026-09-22 on the arm's first real fill. The EA took    |
+//| the entry price from CTrade::ResultPrice() at the instant the    |
+//| order was acknowledged and wrote `LOPEN,...,0.00000,...`; on this|
+//| venue that field is 0 at that moment, which is the same instant  |
+//| the EA's own journal warns that the position is not yet          |
+//| selectable. The true price (4333.07) was in the position and in  |
+//| the entry deal within the same second, and the row's reader      |
+//| reported `entry price: ledger 0.0 vs venue 4333.07` for the rest |
+//| of the fill's life. A 0 in a price column is read as a PRICE by  |
+//| every reader, so the row must not carry one silently.            |
+//|                                                                  |
+//| Order of authority, direct first, and neither one is a guess:     |
+//|   1. POSITION_PRICE_OPEN of the position we just opened (what the |
+//|      venue says we are in at),                                    |
+//|   2. DEAL_PRICE of that position's IN deal (history).             |
+//| On netting the ORDER ticket IS the position identifier, measured  |
+//| on this account, so history is reachable even in the window where |
+//| the position itself is not yet selectable.                        |
+//+------------------------------------------------------------------+
+// BY IDENTITY, not by whatever the globals happen to hold: the amendment path runs at init,
+// when the EA may be flat and the only thing it has is the identity the fill row carries.
+bool ResolveEntryPriceById(ulong key, double &price, string &src)
+{
+   price = 0.0; src = "";
+   if(key == 0) return false;
+   // THE IDENTITY MUST BE ONE WE CLAIM, and this is the guard that keeps the history select
+   // from ever reaching a stranger's position: either it is state we already hold, or the
+   // venue's own history says that position was opened by an entry deal of ours. Fail-closed:
+   // an identity we cannot claim returns no price, which leaves the row's `entry=pending`
+   // standing rather than filling a price column with another position's number.
+   if(key != g_lv_posid && key != g_lv_order && !PositionHasOurEntry(key)) return false;
+   // 1. the position itself, if it is still open and still ours
+   if(PositionSelectByTicket(key) &&
+      PositionGetString(POSITION_SYMBOL) == _Symbol &&
+      (long)PositionGetInteger(POSITION_MAGIC) == InpMagic)
+   {
+      double p = PositionGetDouble(POSITION_PRICE_OPEN);
+      if(p > 0.0) { price = p; src = "position"; return true; }
+   }
+   // 2. history: the IN deal's price. Reachable while the position is still open, which is
+   //    the window that matters here (the position is not selectable yet at the ack).
+   if(!HistorySelectByPosition(key)) return false;
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong d = HistoryDealGetTicket(i);
+      if(d == 0) continue;
+      if(HistoryDealGetInteger(d, DEAL_ENTRY) != DEAL_ENTRY_IN) continue;
+      if(HistoryDealGetString(d, DEAL_SYMBOL) != _Symbol) continue;   // another symbol's fill is not a price for this row
+      if((long)HistoryDealGetInteger(d, DEAL_MAGIC) != InpMagic) continue;  // measured: the ENTRY deal carries our magic
+      double p = HistoryDealGetDouble(d, DEAL_PRICE);
+      if(p > 0.0) { price = p; src = "entry deal"; return true; }
+   }
+   return false;
+}
+
+bool ResolveEntryPrice(double &price, string &src)
+{
+   if(g_lv_posid != 0)
+      return ResolveEntryPriceById(g_lv_posid, price, src);
+   return ResolveEntryPriceById(g_lv_order, price, src);
 }
 
 // v1.11: resolve the ENTRY deal from open history for a selected position:
@@ -1111,10 +1581,13 @@ bool BarFillAndManage(datetime t)
          g_pp_open_sp = sp_open;            // python pos["sp"]
          g_pending_valid = false;
          filled = true;
+         // v1.25: same off-by-one as the live row — one `%s` more than there were arguments, which
+         // appended MQL5's `(missed string parameter)` to every paper OPEN row too.
          PaperLog(StringFormat("OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s,%.5f,%.5f%s",
                   (long)t, g_pp_ticket, g_pp_dir, fill, g_pp_sl, g_pp_tp,
                   lots, eff_risk, stop_d, InpTimeoutMinutes * 60, InpArmTag,
-                  stop_d / InpSlAtrMult, sp_open, StateAppend()));   // v1.13 R10: atr_at_entry,spread_at_open | v1.19e: the state stamp
+                  stop_d / InpSlAtrMult, sp_open,
+                  StateAppend() + RiskAppend(risk_d)));   // v1.13 R10: atr_at_entry,spread_at_open | v1.19e: the state stamp | v1.22: cfg risk
       }
    }
 
@@ -1332,6 +1805,9 @@ void DiagCountReset()
    g_nofill_signal = 0; g_nofill_mism = 0; g_nofill_session = 0;
    g_nofill_friday = 0; g_nofill_spread = 0; g_nofill_riskcap = 0;
    g_nofill_brk = 0; g_nofill_notr = 0; g_nofill_wrote = 0; g_nofill_news = 0;
+   g_nofill_nodata = 0;                                        // v1.27
+   ArrayInitialize(g_spread_sum, 0.0); ArrayInitialize(g_spread_n, 0);
+   ArrayInitialize(g_spread_max_x100, 0);                        // v1.27
 }
 // v1.20: the UTC DAY NUMBER (epoch / 86400) the counters belong to. The v1.18 cadence
 // was "once per 24h since the first refusal", anchored in memory — so every EA reload
@@ -1339,14 +1815,18 @@ void DiagCountReset()
 // never fire at all. A day KEY cannot drift with the process: it is a property of the
 // clock, and the counters that belong to it are read back from the ledger.
 int UtcDayNo(datetime t) { return (int)((long)t / 86400); }
-// The nine counters, in the LEDGER's field order. One definition, used by the census row
-// and by the snapshot row, so the two can never disagree about a column's meaning.
+// The counters, in the LEDGER's field order — APPEND-ONLY, as the roll's own comment
+// requires: consumers read by index, so a new counter goes on the END. v1.27 appended
+// `nodata` as position 9 (zero-based), which is why both readers below moved together.
+// One definition, used by the census row and by the snapshot row, so the two can never
+// disagree about a column's meaning.
 string DiagCounters()
 {
-   return StringFormat("%d,%d,%d,%d,%d,%d,%d,%d,%d",
+   return StringFormat("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
                        g_nofill_signal, g_nofill_mism, g_nofill_session,
                        g_nofill_friday, g_nofill_spread, g_nofill_riskcap,
-                       g_nofill_brk, g_nofill_notr, g_nofill_news);
+                       g_nofill_brk, g_nofill_notr, g_nofill_news,
+                       g_nofill_nodata);   // v1.27
 }
 string DiagSignature(int day) { return StringFormat("%d|%s", day, DiagCounters()); }
 
@@ -1380,6 +1860,59 @@ void DiagSnapshot()
 }
 
 //+------------------------------------------------------------------+
+//| v1.27 SPREAD BY HOUR — the live arm's own answer to a claim the    |
+//| data of record made, and the ONLY consumer is a human reading it.  |
+//|                                                                    |
+//| WHY. The outside research this arm was re-examined against said   |
+//| the thin hours carry wider spreads and the London-NY overlap is    |
+//| the tight window. The venue CORPUS says this feed is flat at 0.2   |
+//| pts in EVERY hour, which is why the session finding came out       |
+//| backwards. That flatness was read off history; this records the    |
+//| live arm measuring the same thing, so the two can be compared      |
+//| instead of assumed.                                                |
+//|                                                                    |
+//| Sampled on every tick (one increment), rolled into one            |
+//| `SPREADHOUR,<epoch>,<day>,` + 24 x `<hour>,<n>,<mean>,<max_x100>` |
+//| row at the daily roll, then zeroed with the rest of the census.    |
+//| DISPLAY/RECORD ONLY: no entry, exit, size, veto or protective     |
+//| rule reads any of it, and it is gated out of tester/BAR runs so    |
+//| certified parity ledgers stay byte-identical.                      |
+//+------------------------------------------------------------------+
+void SpreadSampleTick()
+{
+   if(MQLInfoInteger(MQL_TESTER)) return;
+   if(InpBarModel) return;
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   // A crossed or absent quote is not a spread. Measuring one would put a negative or a
+   // zero into an hour's mean and make the hour look tighter than the venue is.
+   if(ask <= 0.0 || bid <= 0.0 || ask < bid) return;
+   double sprd = ask - bid;
+   int hour = (int)((((long)TimeGMT() % 86400) + 86400) % 86400 / 3600);
+   g_spread_sum[hour] += sprd;
+   g_spread_n[hour]++;
+   int x100 = (int)MathRound(sprd * 100.0);
+   if(x100 > g_spread_max_x100[hour]) g_spread_max_x100[hour] = x100;
+}
+
+void SpreadHourWrite(datetime now, int day_no)
+{
+   if(MQLInfoInteger(MQL_TESTER)) return;
+   if(InpBarModel) return;
+   string body = "";
+   bool any = false;
+   for(int h = 0; h < 24; h++)
+   {
+      if(g_spread_n[h] > 0) any = true;
+      body += StringFormat(",%d,%d,%.5f,%d", h, g_spread_n[h],
+                           g_spread_n[h] > 0 ? g_spread_sum[h] / g_spread_n[h] : 0.0,
+                           g_spread_max_x100[h]);
+   }
+   if(!any) return;                       // a day with no quotes writes nothing, not zeros
+   PaperLog(StringFormat("SPREADHOUR,%I64d,%d%s", (long)now, day_no, body));
+}
+
+//+------------------------------------------------------------------+
 //| The roll: on the FIRST accounting call of a new UTC day, write    |
 //| the census row for the day that just ended.                        |
 //+------------------------------------------------------------------+
@@ -1394,12 +1927,15 @@ void DiagRollIfNewDay(datetime now)
    {
       // The field list is APPEND-ONLY and positional: consumers read it by index, so a
       // new counter goes on the end and the format literal changes only by addition.
-      PaperLog(StringFormat("NOFILL,%I64d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+      // v1.27 appended `nodata` (the bar could not be priced) as the 10th counter.
+      PaperLog(StringFormat("NOFILL,%I64d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
                (long)now, g_nofill_signal, g_nofill_mism,
                g_nofill_session, g_nofill_friday, g_nofill_spread,
-               g_nofill_riskcap, g_nofill_brk, g_nofill_notr, g_nofill_news));
+               g_nofill_riskcap, g_nofill_brk, g_nofill_notr, g_nofill_news,
+               g_nofill_nodata));
       g_nofill_wrote++;
    }
+   SpreadHourWrite(now, g_diag_day);    // v1.27: the day that just ended, before the zeroing
    DiagCountReset();
    g_diag_day = day;
    g_diag_sig = "";     // force the zeroed state onto the record: a reload after a roll
@@ -1422,19 +1958,21 @@ void DiagRestoreFromLedger()
    }
    ulong snap_ct = 0;
    int snap_day = 0;
-   int c[9];
+   int c[10];                                        // v1.27: +1 (append-only)
    ArrayInitialize(c, 0);
    while(!FileIsEnding(fh))
    {
       string line = FileReadString(fh);
       string p[];
       int n = StringSplit(line, ',', p);
-      // NOFILLSUM = prefix + epoch + day + 9 counters = 12 fields. A short row is not a
-      // snapshot (and is not silently treated as one): the last COMPLETE row wins.
-      if(n < 12 || p[0] != "NOFILLSUM") continue;
+      // NOFILLSUM = prefix + epoch + day + counters. A short row is not a snapshot (and is
+      // not silently treated as one): the last COMPLETE row wins. v1.27: the floor rose
+      // from 12 to 13 because `nodata` was appended, so a v1.26 row is NOT read as one —
+      // a row whose missing 10th counter would otherwise restore as a confident zero.
+      if(n < 13 || p[0] != "NOFILLSUM") continue;
       snap_ct  = (ulong)StringToInteger(p[1]);
       snap_day = (int)StringToInteger(p[2]);
-      for(int i = 0; i < 9; i++) c[i] = (int)StringToInteger(p[3 + i]);
+      for(int i = 0; i < 10; i++) c[i] = (int)StringToInteger(p[3 + i]);
    }
    FileClose(fh);
    if(snap_ct == 0)
@@ -1446,14 +1984,152 @@ void DiagRestoreFromLedger()
    g_nofill_signal = c[0]; g_nofill_mism = c[1]; g_nofill_session = c[2];
    g_nofill_friday = c[3]; g_nofill_spread = c[4]; g_nofill_riskcap = c[5];
    g_nofill_brk = c[6]; g_nofill_notr = c[7]; g_nofill_news = c[8];
+   g_nofill_nodata = c[9];                                 // v1.27
    g_diag_sig = DiagSignature(g_diag_day);   // already on the record: do not rewrite it
    PrintFormat(VersionTag() + "NOFILL census restored: day=%d signal=%d no-trigger=%d "
                "mismatch=%d session=%d friday=%d spread=%d riskcap=%d breaker=%d news=%d "
-               "(from NOFILLSUM @%I64u)",
+               "nodata=%d (from NOFILLSUM @%I64u)",
                g_diag_day, g_nofill_signal, g_nofill_notr, g_nofill_mism,
                g_nofill_session, g_nofill_friday, g_nofill_spread, g_nofill_riskcap,
-               g_nofill_brk, g_nofill_news, snap_ct);
+               g_nofill_brk, g_nofill_news, g_nofill_nodata, snap_ct);
 }
+
+//+------------------------------------------------------------------+
+//| v1.24 THE LIVE RECORD: one increment path, one restore path.      |
+//|                                                                   |
+//| MEASURED 2026-09-22, on the arm's first real fill. BOTH live close |
+//| paths wrote their LCLOSE row and NEITHER touched a counter, so an  |
+//| armed arm's chart read `trades: 0/30 | cumR +0.00` after a real    |
+//| closed trade while the ledger - and every reader of it - said      |
+//| 1/30. The chart and the record disagreeing is the one thing the    |
+//| HUD design forbids, and the go-live gate counts the ARM's closes,  |
+//| not the paper mirror's.                                            |
+//|                                                                   |
+//| So the arm's realized record comes from the same rows the readers  |
+//| read (LCLOSE), restored at init like the NOFILL census and         |
+//| incremented in ONE helper both close paths call - a private copy   |
+//| per path is how they drift. Nothing here is read by a decision,    |
+//| and nothing here writes to the ledger.                             |
+//+------------------------------------------------------------------+
+void LiveCensusAdd(double r)
+{
+   g_live_closed++;
+   g_live_cum_r += r;
+   if(r > 0) g_live_wins++;
+}
+
+void LiveCensusRestoreFromLedger()
+{
+   if(MQLInfoInteger(MQL_TESTER)) return;
+   if(InpBarModel) return;
+   // A paper arm's tally IS the paper counters; only an armed arm has live rows to count.
+   if(!InpLiveExecution) return;
+   int fh = FileOpen(PaperFile(), FILE_READ | FILE_TXT | FILE_ANSI);
+   if(fh == INVALID_HANDLE)
+   {
+      Print(VersionTag() + "LIVE CENSUS: no ledger to restore from (the arm has closed "
+            "nothing yet)");
+      return;
+   }
+   int    rows = 0, wins = 0;
+   double sum_r = 0.0;
+   while(!FileIsEnding(fh))
+   {
+      string line = FileReadString(fh);
+      string p[];
+      int n = StringSplit(line, ',', p);
+      // LCLOSE = prefix + epoch + posid + reason + exit + r = 6 fields (the writer's own
+      // shape). A short row is not a close and is never silently counted as one.
+      if(n < 6 || p[0] != "LCLOSE") continue;
+      double r = StringToDouble(p[5]);
+      rows++;
+      sum_r += r;
+      if(r > 0) wins++;
+   }
+   FileClose(fh);
+   g_live_closed = rows;
+   g_live_wins   = wins;
+   g_live_cum_r  = sum_r;
+   PrintFormat(VersionTag() + "LIVE CENSUS restored: closed=%d wins=%d cumR=%+.3f "
+               "(from %d LCLOSE row(s) in %s)",
+               g_live_closed, g_live_wins, g_live_cum_r, rows, PaperFile());
+}
+//+------------------------------------------------------------------+
+//| THE FILL ROW'S PRICE IS AMENDED WHEN IT BECOMES KNOWABLE (v1.25).|
+//|                                                                  |
+//| MEASURED, and it is the reason this exists: the arm's first fill |
+//| row says `0.00000` in its price field, and the true 4333.07 was  |
+//| known seconds later — in the position, in the entry deal, and     |
+//| after the next reload in the EA's own journal (`LIVE RECOVERED    |
+//| ... entry=4333.07000`). The ledger is append-only, so the         |
+//| amendment is a NEW row keyed by the identity the fill row already |
+//| carries (posid, else the order ticket, else the deal — the rule   |
+//| mt5_ops.live_fill_key reads), never a rewrite of history:         |
+//|                                                                  |
+//|     LENTRY,<epoch>,<identity>,<price>,<source>                    |
+//|                                                                  |
+//| So "what price did the arm actually get" is answerable from the   |
+//| file even for a fill whose write could not know it. Runs at init  |
+//| (which is also what heals a row written by a previous build) and  |
+//| again as soon as a pending fill resolves. Idempotent: a fill that |
+//| already has an LENTRY row is not amended twice.                   |
+//+------------------------------------------------------------------+
+void LiveEntryPriceHeal()
+{
+   if(MQLInfoInteger(MQL_TESTER)) return;      // parity ledgers stay byte-identical
+   if(InpBarModel) return;
+   if(!InpLiveExecution) return;
+   int fh = FileOpen(PaperFile(), FILE_READ | FILE_TXT | FILE_ANSI);
+   if(fh == INVALID_HANDLE) return;            // no ledger: nothing written, nothing to heal
+   string last_id  = "";
+   double last_px  = -1.0;
+   string amended  = "|";                     // "|" + identities already amended + "|"
+   while(!FileIsEnding(fh))
+   {
+      string line = FileReadString(fh);
+      string p[];
+      int n = StringSplit(line, ',', p);
+      if(n < 5) continue;
+      if(p[0] == "LENTRY") { amended += p[2] + "|"; continue; }
+      if(p[0] != "LOPEN") continue;            // the live fill row; paper OPEN rows are exempt
+      if(n < 8) continue;                      // prefix,epoch,posid,order,deal,dir,entry,sl = 8
+      last_px = StringToDouble(p[6]);
+      last_id = "";
+      if(StringToInteger(p[2]) > 0)      last_id = p[2];   // posid (0 until it reconciles)
+      else if(StringToInteger(p[3]) > 0) last_id = p[3];   // on netting the ORDER is the posid
+      else if(StringToInteger(p[4]) > 0) last_id = p[4];   // last resort: the entry deal
+   }
+   FileClose(fh);
+   if(last_id == "") return;
+   if(last_px > 0.0)
+   {
+      // the row already carries a price; if this process holds the same position, adopt it
+      if(g_lv_entry_pending && g_lv_entry <= 0.0) { g_lv_entry = last_px; }
+      if(g_lv_entry > 0.0) g_lv_entry_pending = false;
+      return;
+   }
+   if(StringFind(amended, "|" + last_id + "|") >= 0)
+   {
+      string why = "";
+      if(g_lv_entry_pending && g_lv_entry <= 0.0 && ResolveEntryPrice(g_lv_entry, why))
+         g_lv_entry_pending = false;             // the row is already right; the process was not
+      return;                                    // amended once: never twice
+   }
+   double px = 0.0;
+   string src = "";
+   if(!ResolveEntryPriceById((ulong)StringToInteger(last_id), px, src))
+   {
+      Print(VersionTag() + "LENTRY amendment PENDING: the fill row for " + last_id +
+            " carries no price yet and neither the position nor the entry deal answers — "
+            "the row's `entry=pending` stands until it does");
+      return;
+   }
+   PaperLog(StringFormat("LENTRY,%I64d,%s,%.5f,%s", (long)TimeCurrent(), last_id, px, src));
+   PrintFormat(VersionTag() + "LENTRY amendment: fill %s priced at %.5f from the %s "
+               "(the fill row could not know it at write time)", last_id, px, src);
+   if(g_lv_entry_pending && g_lv_entry <= 0.0) { g_lv_entry = px; g_lv_entry_pending = false; }
+}
+
 string TextVeto(int trigger, int mac)
 {
    if(trigger == 0 && mac == 0)  return "NO-SIGNAL(0,0)";
@@ -1787,6 +2463,215 @@ string StateAppend()
 }
 
 //+------------------------------------------------------------------+
+//| THE CONFIGURED RISK, ON THE ROW (v1.22).                          |
+//|                                                                  |
+//| A fill row carries ONE risk number: the dollars actually put at   |
+//| stake, derived from the lot size this venue lets the arm take.    |
+//| The CONFIGURED risk — InpRiskPercent of the very same equity base |
+//| the sizing above divided — is a different number whenever the     |
+//| lot step cannot express it, and on the $25,000 arm it is ALWAYS   |
+//| different: 0.25% is $62.50, the floor lot (0.01) risks $31.84,   |
+//| and 0.02 lots would overshoot the budget. The row was correct and |
+//| silent: the gap between the two lived only in a verification run  |
+//| against a preset the ledger does not name. It lives here now.     |
+//|                                                                  |
+//| ONE KEYED FIELD, APPENDED LAST: `cfg=<usd>@<pct>`. Keyed and not  |
+//| positional so a reader finds it without counting fields — the     |
+//| state stamp above is 0 or 5 fields depending on the input, so     |
+//| "the next two fields" is ambiguous with a half-written stamp.     |
+//| NO TESTER ROW CARRIES IT: a parity ledger is a reproduction        |
+//| artifact, so certified ledgers stay byte-identical by construction.|
+//| The stamp describes the row's own RISK BASE — PaperEquity() on     |
+//| the paper paths, account equity on the live one — so `cfg` and the |
+//| row's `risk` field are always two numbers off the same basis.      |
+//+------------------------------------------------------------------+
+string RiskAppend(double cfg_usd)
+{
+   if(MQLInfoInteger(MQL_TESTER)) return "";
+   return StringFormat(",cfg=%.2f@%.2f", cfg_usd, InpRiskPercent);
+}
+
+//+------------------------------------------------------------------+
+//| `,entry=pending` — THE PRICE FIELD IS 0 AND SAYS WHY (v1.25).    |
+//|                                                                  |
+//| Keyed, like `cfg=`, so a reader finds it without counting fields.|
+//| Present ONLY when the price really could not be resolved at the  |
+//| moment of the write, which on this venue is rare and bounded:    |
+//| measured once, on the arm's first fill. It is the label that     |
+//| makes `0.00000` honest instead of wrong, and the LENTRY row      |
+//| below is what replaces it with the venue's price.                |
+//+------------------------------------------------------------------+
+string EntryPendingAppend()
+{
+   if(MQLInfoInteger(MQL_TESTER)) return "";
+   return g_lv_entry_pending ? ",entry=pending" : "";
+}
+
+//+------------------------------------------------------------------+
+//| v1.28 — THE SWEEP SHADOW: the Asian-range sweep CONTINUATION,     |
+//| recorded and NEVER traded.                                        |
+//|                                                                  |
+//| WHY IT EXISTS. `docs/ASIA_SWEEP_PREREG_20260922.md` REFUSED to    |
+//|   port this mechanism — its pre-registered primary window failed  |
+//|   on all three variants — and the same run reported the strongest |
+//|   number in this program on its SECONDARY window (UTC 07-18: 152  |
+//|   held-out trades, +0.1955R, pf 1.499, t +2.21), with the mirror  |
+//|   at -0.1584R and the textbook reversal read at -0.1425R. It      |
+//|   prescribed exactly one next step: record it forward, with NO    |
+//|   ORDER PATH AT ALL. This is that step, and the rule it will be   |
+//|   judged by is fixed in                                           |
+//|   `docs/ASIA_SWEEP_FORWARD_PREREG_20260922.md` BEFORE any row.    |
+//|                                                                  |
+//| WHY IT CANNOT PLACE AN ORDER, STRUCTURALLY. This block reads no    |
+//|   order state, consults no governor, increments no census counter, |
+//|   and returns no direction to the entry path — `SweepShadowRow()`  |
+//|   returns void and its only output is a ledger line. It is called  |
+//|   from exactly ONE place, beside the per-bar STATE row in          |
+//|   `TrackFreshM15Bar`, so the shadow rides the same evaluated bar   |
+//|   as the live decision and cannot diverge from it.                 |
+//|   `tests/test_midas_v128_record.py` fails the build if the shadow  |
+//|   is ever referenced from a decision function, and pins the single |
+//|   call site.                                                      |
+//|                                                                  |
+//| THE EA WRITES THE SETUP, NEVER AN OUTCOME. The EA cannot know the  |
+//|   future, and a row claiming an R its writer could not have         |
+//|   measured is not evidence. `scripts/midas_sweep_shadow.py`        |
+//|   resolves these rows to closed outcomes through the engine of     |
+//|   record's own `run_mode`, so no outcome arithmetic is re-          |
+//|   implemented on either side and the two remain one contract.      |
+//+------------------------------------------------------------------+
+
+//: The declared window, in TRUE UTC hours: the sweep cannot exist before 07:00 (the range
+//: closes at 06:45) and 18 is where the study's SECONDARY window ends. It sits entirely
+//: inside this arm's own live gate (InpSessionStartHour/EndHour = 06/20 against broker-server
+//: hours, i.e. UTC 04-18), so the shadow needs no frame normalisation for eligibility.
+#define SWEEP_WINDOW_LO   7
+#define SWEEP_WINDOW_HI   18
+//: How many M15 bars to read for the scan. 120 = 30 hours, which always covers the current
+//: UTC day (00:00 to 18:00 is 72 bars) even after a terminal that was down overnight.
+#define SWEEP_SCAN_BARS   120
+
+//: The UTC day number (epoch / 86400) of an epoch already in the true-UTC frame.
+int UTCDayNumber(datetime utc) { return (int)(((long)utc) / 86400); }
+
+//+------------------------------------------------------------------+
+//| The mechanism, recomputed from the bars on EVERY call rather than |
+//| kept in state: there is no ring to restore, nothing a reload can  |
+//| lose or double-fire, and no way for the record to depend on how   |
+//| long the terminal happened to be up.                              |
+//|                                                                  |
+//| Returns false when the bar makes NO CLAIM AT ALL — no nameable    |
+//| frame (see `StateOffsetMinutes`), outside the declared window, or  |
+//| bars too short to say anything. Returns true and fills the outs   |
+//| otherwise, INCLUDING when there is no sweep (`side == 0`), so the  |
+//| ledger carries the days it did not fire and not only the days it  |
+//| did. `range_bars == 0` in-window is written rather than skipped:   |
+//| it is the honest statement that the day's range could not be       |
+//| built, and the resolver's coverage counter is what makes it        |
+//| visible instead of absent.                                        |
+//+------------------------------------------------------------------+
+bool SweepShadowFor(const datetime sig_open, double &rng_hi, double &rng_lo,
+                    int &range_bars, int &side, bool &is_first, bool &reclaim)
+{
+   rng_hi = 0.0; rng_lo = 0.0; range_bars = 0; side = 0;
+   is_first = false; reclaim = false;
+   int off = StateOffsetMinutes();
+   if(off == STATE_OFF_UNKNOWN) return false;      // no frame -> no claim may be written
+   datetime sig_utc = (datetime)((long)sig_open - (long)off * 60);
+   MqlDateTime ds;
+   TimeToStruct(sig_utc, ds);
+   if(ds.hour < SWEEP_WINDOW_LO || ds.hour >= SWEEP_WINDOW_HI) return false;
+   long day0 = ((long)UTCDayNumber(sig_utc)) * 86400;   // UTC midnight of the signal bar's day
+   MqlRates r[];
+   int got = CopyRates(_Symbol, InpEntryTF, 1, SWEEP_SCAN_BARS, r);
+   if(got < 2) return false;
+   // Find THIS bar by its own stamp rather than by an index: the copy's element ordering is
+   // not something this file is willing to assume, and an off-by-one here would silently
+   // shift every level in the row.
+   int self_i = -1;
+   for(int k = 0; k < got; k++)
+      if(r[k].time == sig_open) { self_i = k; break; }
+   if(self_i < 0) return false;
+   // (1) THE ASIAN RANGE — this UTC day's bars whose OPEN falls in [00:00, 07:00), i.e.
+   //     00:00-06:45, fully known at 07:00 and never revised afterwards.
+   for(int k = 0; k < got; k++)
+   {
+      datetime t_utc = (datetime)((long)r[k].time - (long)off * 60);
+      if((long)t_utc < day0 || (long)t_utc >= day0 + 7 * 3600) continue;
+      if(range_bars == 0) { rng_hi = r[k].high; rng_lo = r[k].low; }
+      else { rng_hi = MathMax(rng_hi, r[k].high); rng_lo = MathMin(rng_lo, r[k].low); }
+      range_bars++;
+   }
+   if(range_bars == 0) return true;                // nothing swept: the range is not built
+   // (2) THIS BAR'S OWN SWEEP, from its own high/low/close and nothing later.
+   bool up = r[self_i].high > rng_hi;
+   bool dn = r[self_i].low  < rng_lo;
+   if(!up && !dn) return true;
+   reclaim = (up && r[self_i].close < rng_hi) || (dn && r[self_i].close > rng_lo);
+   // (3) FIRST OF THE DAY ON THIS SIDE — scanned over STRICTLY EARLIER bars of the same UTC
+   //     day, never a later one. The engine's own `fired` set also marks sweeps at hours >= 18,
+   //     but such a bar is the LAST window-hour bar of its day, so it can never change the
+   //     answer for an in-window bar: the two readings agree on every bar this row can be
+   //     written for, and `scripts/midas_sweep_shadow.py` refuses the run if they ever do not.
+   //     Each side is blocked only by an EARLIER sweep of ITS OWN side, exactly as the engine's
+   //     `fired` set is keyed by (day, side).
+   bool earlier_this_side = false;
+   for(int k = 0; k < got; k++)
+   {
+      if(r[k].time >= sig_open) continue;          // this bar and anything later: never read
+      datetime t_utc = (datetime)((long)r[k].time - (long)off * 60);
+      if((long)t_utc < day0 + 7 * 3600) continue;  // the window opens at 07:00
+      MqlDateTime dk;
+      TimeToStruct(t_utc, dk);
+      if(dk.hour >= SWEEP_WINDOW_HI) continue;     // and closes at 18:00
+      if(up && r[k].high > rng_hi) earlier_this_side = true;
+      if(dn && r[k].low  < rng_lo) earlier_this_side = true;
+   }
+   if(earlier_this_side) return true;              // a sweep, but not the day's first on its side
+   is_first = true;
+   side = up ? 1 : -1;                             // SWEEP_CONT: WITH the break
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| One `SWEEPSHADOW` row per evaluated bar inside the declared window.|
+//|                                                                  |
+//| Fields (13):                                                      |
+//|   SWEEPSHADOW,<write_epoch>,<sig_open>,<utc_day>,<asian_hi>,       |
+//|     <asian_lo>,<range_bars>,<side>,<first>,<reclaim>,<stop_d>,     |
+//|     <off_min>,<version>                                           |
+//| `sig_open` is the ledger's usual SERVER-stamped bar open; `utc_day`|
+//| is the UTC day number of it; `off_min` is the offset that was used |
+//| to get there, so the frame is auditable rather than assumed.       |
+//| `side` is nonzero ONLY on the first sweep of that day on that side,|
+//| so it IS `SWEEP_CONT`'s direction — `SWEEP_FADE` (= -side) and     |
+//| `RECLAIM_REV` (=-side on a reclaim bar) are derivable from the row |
+//| rather than stored, which is what stops the record later reading   |
+//| as if three hypotheses had been tested.                           |
+//|                                                                  |
+//| NO OUTCOME IS WRITTEN. See the block comment above.                |
+//+------------------------------------------------------------------+
+void SweepShadowRow()
+{
+   if(MQLInfoInteger(MQL_TESTER)) return;   // the tester writes no ledger at all
+   if(InpBarModel) return;                  // parity/BAR runs: certified ledgers stay byte-identical
+   if(g_sig_bar_epoch <= 0) return;         // nothing evaluated yet
+   double rng_hi = 0.0, rng_lo = 0.0;
+   int range_bars = 0, side = 0;
+   bool is_first = false, reclaim = false;
+   if(!SweepShadowFor(g_sig_bar_epoch, rng_hi, rng_lo, range_bars, side, is_first, reclaim))
+      return;                               // outside the window, or no frame may be named
+   int off = StateOffsetMinutes();
+   if(off == STATE_OFF_UNKNOWN) return;
+   datetime sig_utc = (datetime)((long)g_sig_bar_epoch - (long)off * 60);
+   double stop = InpSlAtrMult * AtrNow();   // the certified geometry, from the arm's own ATR read
+   PaperLog(StringFormat("SWEEPSHADOW,%I64d,%I64d,%d,%.5f,%.5f,%d,%d,%d,%d,%.5f,%d,%s",
+            (long)TimeUTCNow(), (long)g_sig_bar_epoch, UTCDayNumber(sig_utc),
+            rng_hi, rng_lo, range_bars, side, is_first ? 1 : 0, reclaim ? 1 : 0,
+            stop, off, APP_VERSION));
+}
+
+//+------------------------------------------------------------------+
 //| THE SOURCE HAS TO REPAIR ITSELF, OR THE GATE IS A PERMANENT STOP  |
 //| (v1.19c continued, 2026-09-20).                                   |
 //|                                                                  |
@@ -1964,6 +2849,17 @@ void TrackFreshM15Bar()
    g_sig_bar_epoch = sig_open_time;     // v1.19e state stamp: the bar that just closed
    int mac = MacroState();
    int trigger = TriggerOnClosedBar();
+   // v1.21: the stash the HUD and the STATE row read. Written HERE, where the decision
+   // values are computed, so nothing downstream can disagree with what decided.
+   g_hud_mac     = mac;
+   g_hud_trig    = trigger;
+   g_hud_sig_ct  = sig_open_time;
+   g_hud_sess_ok = InSessionBar(sig_open_time);
+   StateRowWrite();   // v1.21: one STATE row per evaluated bar, so "what did it see at
+                      // 14:15" is answerable from the ledger and not only from a chart
+   SweepShadowRow();  // v1.28: the sweep shadow, on the SAME evaluated bar and from the SAME
+                      // decision point. ONE call site by design — the record-only build's
+                      // structural guarantee is that it is reached from here and nowhere else.
    int direction = 0;
    if(!ModeDecide(trigger, mac, direction) || direction == 0)
    {
@@ -1984,12 +2880,26 @@ void TrackFreshM15Bar()
    // record's classification of the same broker-feed epochs)
    MqlDateTime dt;
    TimeToStruct(sig_open_time, dt);
-   if(dt.hour < InpSessionStartHour || dt.hour >= InpSessionEndHour)
-   { g_nofill_session++; DiagMaybeWrite(); return; }  // v1.18 diagnostics
+   // v1.27: THESE FOUR ARE COUNTED, NOT SILENT. MEASURED 2026-09-22: the session and Friday
+   // gates incremented the census and returned WITHOUT setting g_last_action, so the chart's
+   // `last:` line still read the previous bar's action and the journal said nothing at all —
+   // the operator's question is "why didn't it trade", and for two of the four refusals this
+   // file had no answer anywhere except a counter in a daily row. The two pricing guards
+   // below (atr<=0, stop<=0) were worse: they returned before the census as well, so they
+   // were not even counted. Naming them changes NO decision: every branch below already
+   // returned, and each still returns at the same point.
+   if(!InSessionBar(sig_open_time))          // v1.21: one definition of the window rule
+   {
+      g_nofill_session++; g_last_action = "signal vetoed: outside session window";
+      DiagMaybeWrite(); return;            // v1.18 diagnostics
+   }
 
    // Friday cutoff
    if(dt.day_of_week == 5 && dt.hour >= InpFridayCutoffHour)
-   { g_nofill_friday++; DiagMaybeWrite(); return; }   // v1.18 diagnostics
+   {
+      g_nofill_friday++; g_last_action = "signal vetoed: Friday cutoff";
+      DiagMaybeWrite(); return;            // v1.18 diagnostics
+   }
    g_p5_signals++;                     // v1.17 P5 telemetry: condition-true, in-session (census semantics)
 
    // NEWS STAND-DOWN (v1.19c). Sits with the time gates, before sizing, and it is a
@@ -2009,10 +2919,22 @@ void TrackFreshM15Bar()
       }
    }
 
+   // v1.27: the two "cannot be priced" guards now name themselves and are counted. They are
+   // NOT vetoes — nothing about the arm refused this bar, the ENGINE could not measure a stop
+   // for it — so they get their own counter rather than inflating the refusal census, and the
+   // label says `unpriced` rather than `vetoed`. Same return point, same decisions.
    double atr = AtrNow();
-   if(atr <= 0) return;
+   if(atr <= 0)
+   {
+      g_nofill_nodata++; g_last_action = "signal unpriced: ATR not computable";
+      DiagMaybeWrite(); return;
+   }
    double stop = InpSlAtrMult * atr;
-   if(stop <= 0) return;
+   if(stop <= 0)
+   {
+      g_nofill_nodata++; g_last_action = "signal unpriced: stop distance <= 0";
+      DiagMaybeWrite(); return;
+   }
    if(!SpreadCapOK(stop))              // v1.08: shared veto (paper mirror and live path)
    {
       g_nofill_spread++; DiagMaybeWrite();               // v1.18 diagnostics
@@ -2085,11 +3007,18 @@ bool OpenPaperPosition(int direction, double stop_d, int hour, int mac)
    // v1.02 parity instrumentation: the exact ATR + H1 bar stamp behind the stop
    datetime h1_stamp = iTime(_Symbol, PERIOD_H1, 1);
    double atr_used = AtrNow();
+   // v1.25: the tail is ONE specifier per segment — `StateAppend() + RiskAppend()` is one
+   // ARGUMENT, so it takes one `%s`. MEASURED on the arm's first live fill: a format that asked
+   // for one more `%s` than it was given had MQL5 append `(missed string parameter)` to the row.
+   // The bytes are identical to two specifiers (each segment already starts with its own comma),
+   // and one specifier can never drift out of step with the argument list. Pinned by
+   // tests/test_midas_telemetry.py::test_every_fill_row_format_matches_its_arguments.
    PaperLog(StringFormat("OPEN,%I64d,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s%s,%.5f,%.5f%s",
             (long)TimeCurrent(), ticket, direction, fill, sl, tp, lots, eff_risk,
             g_pp_orig_risk, InpTimeoutMinutes * 60, InpArmTag,
             floored ? "_FLOORED" : "",
-            atr_used, sprd, StateAppend()));   // v1.13 R10: atr_at_entry,spread_at_open | v1.19e: the state stamp
+            atr_used, sprd,
+            StateAppend() + RiskAppend(risk_d)));   // v1.13 R10: atr_at_entry,spread_at_open | v1.19e: the state stamp | v1.22: cfg risk
    PaperLog(StringFormat("PARITY,atr=%.5f,h1=%I64d,stop=%.5f",
             atr_used, (long)h1_stamp, g_pp_orig_risk));
    if(!g_debug_done) { DumpH1Debug(); g_debug_done = true; }
@@ -2192,6 +3121,21 @@ bool SpreadCapOK(double stop_d)
 // the floating P&L that existed at the open (open equity = equity now - realised since,
 // and floating-at-open is not recoverable without equity history). It is the closest
 // honest reading of the day, and it matches the venue's baseline for a flat account.
+// v1.25: A CLOSING DEAL IS NOT ALWAYS OURS TO STAMP. MEASURED 2026-09-22 on the arm's own
+// fill: the ENTRY deal carried magic 7825001 and the CLOSING deal carried **magic 0**, because
+// it was executed outside the EA (the platform's reason field reads MOBILE). This function used
+// to filter every OUT deal on `DEAL_MAGIC == InpMagic`, so a day's realised P&L ignored every
+// trade that was not closed BY the EA — and that number is what the Best Day cap and the day's
+// reconstructed opening equity are measured from. It is a risk-path number, not a display one:
+// under-counting it under-counts the drawdown the venue's own rules are about.
+//
+// The attribution is now BY POSITION, which the venue does give us: an OUT deal belongs to this
+// arm iff its position id has an IN deal carrying this magic. Cheap in the common case (one pass)
+// and exact in the case that broke it (one extra history select per unmatched close, i.e. per
+// externally-closed trade, at most a handful a day). A deal whose position we cannot claim is
+// NOT counted, so the failure direction stays conservative in the governor's favour...
+// which is the wrong direction for a risk limit, so it is stated here rather than assumed:
+// the unmatched case is logged, not silently dropped.
 double PropDayRealisedPnlUtc()
 {
    datetime now  = TimeUTCNow();
@@ -2203,13 +3147,40 @@ double PropDayRealisedPnlUtc()
    {
       ulong t = HistoryDealGetTicket(i);
       if(t == 0) continue;
-      if((long)HistoryDealGetInteger(t, DEAL_MAGIC) != InpMagic) continue;
       if((long)HistoryDealGetInteger(t, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+      bool mine = ((long)HistoryDealGetInteger(t, DEAL_MAGIC) == InpMagic);
+      if(!mine)
+      {
+         // externally executed close: ask the position who opened it
+         ulong pid = (ulong)HistoryDealGetInteger(t, DEAL_POSITION_ID);
+         mine = PositionHasOurEntry(pid);
+         if(!mine)
+            PrintFormat(VersionTag() + "DAY P&L: out-deal %I64u on position %I64u carries magic 0 and no "
+                        "entry deal of ours — NOT counted (logged, not dropped silently)", t, pid);
+      }
+      if(!mine) continue;
       sum += HistoryDealGetDouble(t, DEAL_PROFIT)
            + HistoryDealGetDouble(t, DEAL_SWAP)
            + HistoryDealGetDouble(t, DEAL_COMMISSION);
    }
    return sum;
+}
+
+// Does this position carry an IN deal stamped with our magic? The venue stamps the ENTRY deal
+// with the EA's magic (measured) and the CLOSE with whatever executed it (0 when that was not
+// the EA), so the entry leg is the reliable marker of ownership.
+bool PositionHasOurEntry(ulong pid)
+{
+   if(pid == 0) return false;
+   if(!HistorySelectByPosition(pid)) return false;
+   for(int i = 0; i < HistoryDealsTotal(); i++)
+   {
+      ulong d = HistoryDealGetTicket(i);
+      if(d == 0) continue;
+      if(HistoryDealGetInteger(d, DEAL_ENTRY) != DEAL_ENTRY_IN) continue;
+      if((long)HistoryDealGetInteger(d, DEAL_MAGIC) == InpMagic) return true;
+   }
+   return false;
 }
 
 void PropDayAnchorCheck()
@@ -2315,6 +3286,7 @@ string PropGovernorBlock()
    double size = PropGovernorSize();
 
    double floor_usd = PropShieldFloor();
+   g_hud_floor = floor_usd;               // v1.21: display echo of the shield reading
    if(eq <= floor_usd)
       return StringFormat("trailing shield: equity %.2f at/below floor %.2f", eq, floor_usd);
 
@@ -2330,6 +3302,10 @@ string PropGovernorBlock()
    // The day's baseline comes from the per-tick anchor, never from "the equity when we
    // first happened to look today" — see PropDayAnchorCheck for the measured reason.
    double cap = PropDayProfitCapUsd();
+   // v1.21: stashed where the governor computes them, so the HUD never calls back into a
+   // function that carries internal state (PropShieldFloor keeps the equity peak).
+   g_hud_daypnl = (g_prop_day_eq > 0.0) ? eq - g_prop_day_eq : 0.0;
+   g_hud_cap    = cap;
    if(cap > 0.0 && g_prop_day_eq > 0.0 && (eq - g_prop_day_eq) >= cap)
       return StringFormat("Best Day cap: today +%.2f >= %.2f", eq - g_prop_day_eq, cap);
 
@@ -2430,6 +3406,33 @@ bool LiveSendOrder(int direction, double stop_d, int hour, int mac)
             Print(VersionTag() + "WARNING: fill acknowledged but owned position not yet selectable — IDs will reconcile on the next tick");
          else
             ResolveEntryDeal();
+         // v1.25: THE ACK-TIME PRICE IS NOT AUTHORITATIVE ON THIS VENUE. MEASURED on the arm's
+         // first real fill: ResultPrice() was 0 here and the row went out as `0.00000` while the
+         // true price was in the position and in the entry deal within the same second. Resolve
+         // it before the row is written; if neither source answers inside a bounded wait, the row
+         // says the price is UNRESOLVED (`entry=pending`) instead of printing a 0 in a price
+         // column and letting every reader read it as a price.
+         if(g_lv_entry <= 0.0 && InpLiveExecution)
+         {
+            string src = "";
+            double p = 0.0;
+            for(int k = 0; k < 20 && p <= 0.0; k++)      // up to ~1s, then label it instead
+            {
+               if(!ResolveEntryPrice(p, src)) Sleep(50);
+            }
+            if(p > 0.0)
+            {
+               g_lv_entry = p;
+               PrintFormat(VersionTag() + "LIVE ENTRY PRICE resolved %.5f from the %s (the ack-time field was 0)",
+                           g_lv_entry, src);
+            }
+            else
+            {
+               g_lv_entry_pending = true;
+               Print(VersionTag() + "LIVE ENTRY PRICE unresolved at acknowledgement — the fill row carries "
+                     "entry=pending and is amended by an LENTRY row as soon as the venue reports it");
+            }
+         }
          PrintFormat(VersionTag() + "LIVE FILL %s vol=%.2f @%.5f SL=%.5f TP=%.5f risk=$%.2f%s retcode=%u attempt=%d",
                      direction > 0 ? "BUY" : "SELL", lots, g_lv_entry, sl, tp,
                      stop_d * dpu * lots, floored ? " | FLOORED-TO-MIN-LOT" : "", rc, attempt);
@@ -2439,10 +3442,21 @@ bool LiveSendOrder(int direction, double stop_d, int hour, int mac)
          // more here than there: an ARMED arm writes LOPEN (not OPEN), so without this the
          // record of the arm as deployed would be unlabelled by construction — see the
          // grammar note on StateAppend() and tests/test_state_label_contract.py.
+         // v1.25: the format carried FOUR `%s` for THREE arguments, so every live fill row ended
+         // with MQL5's `(missed string parameter)` appended after the cfg token — measured on the
+         // arm's own row (`...,cfg=62.50@0.25(missed string parameter)`). The paper OPEN row had
+         // the same off-by-one from the same copy: fixed in both, and the author's own check is
+         // now a test that counts specifiers against arguments in both writers.
          PaperLog(StringFormat("LOPEN,%I64d,%I64u,%I64u,%I64u,%d,%.5f,%.5f,%.5f,%.2f,%.2f,%.5f,%d,%s%s%s",
                   (long)TimeCurrent(), g_lv_posid, g_lv_order, g_lv_deal, direction, g_lv_entry, sl, tp,
                   lots, stop_d * dpu * lots, stop_d, InpTimeoutMinutes * 60, InpArmTag,
-                  floored ? "_FLOORED" : "", StateAppend()));
+                  floored ? "_FLOORED" : "",
+                  StateAppend() + EntryPendingAppend() + RiskAppend(risk_d)));
+         // ^ THE ORDER IS THE CONTRACT, not a preference: the v1.22 configured-risk token is read
+         //   OFF THE END OF THE ROW (`midas_first_fills_audit._split_risk_tail` takes `fields[-1]`
+         //   when it starts with `cfg=`), so v1.25's `,entry=pending` sits BEFORE it. Both tail
+         //   readers still see what they need: the state stamp is the first five fields after the
+         //   head, and the risk token is last.
          g_last_action = StringFormat("LIVE OPEN %s %.2f @%.5f",   // v1.10 HUD
                         direction > 0 ? "BUY" : "SELL", lots, g_lv_entry);
          return true;
@@ -2474,6 +3488,7 @@ void LiveClosePosition(string reason)
          double r = (g_lv_stop > 0) ? ((exit - g_lv_entry) * side) / g_lv_stop : 0;
          PrintFormat(VersionTag() + "LIVE CLOSE %s exit=%.5f R=%+.3f", reason, exit, r);
          PaperLog(StringFormat("LCLOSE,%I64d,%I64u,%s,%.5f,%.3f", (long)TimeCurrent(), g_lv_posid, reason, exit, r));
+         LiveCensusAdd(r);   // v1.24: the row above is what the chart now counts
          g_last_action = StringFormat("LIVE CLOSE %s R=%+.2f", reason, r);   // v1.10 HUD
          g_lv_posid = 0; g_lv_ticket = 0; g_lv_order = 0; g_lv_deal = 0;
          return;
@@ -2505,23 +3520,46 @@ void LiveRecoverState()
 
 void LiveCheckExits()
 {
+   // v1.25: a fill acknowledged with no price gets one as soon as the venue reports it. Cheap
+   // and bounded: the resolver reads a position or a deal, and it stops once the row is amended.
+   if(g_lv_entry_pending) LiveEntryPriceHeal();
    if(g_lv_posid == 0) return;
    if(!SelectOurPosition())                        // closed externally (server SL/TP or manual)
    {
       double exit = (g_lv_sl > 0 && g_lv_tp > 0) ? g_lv_tp : 0;  // unknowable which; R uses last known ref
       HistorySelectByPosition(g_lv_posid);         // v1.11: reconcile by POSITION IDENTIFIER
       exit = 0;
+      string why = "EXTERNAL-UNKNOWN";             // v1.29: the OUT deal names the close
       for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
       {
          ulong d = HistoryDealGetTicket(i);
          if(d > 0 && (ulong)HistoryDealGetInteger(d, DEAL_POSITION_ID) == g_lv_posid &&
             HistoryDealGetInteger(d, DEAL_ENTRY) == DEAL_ENTRY_OUT)
-         { exit = HistoryDealGetDouble(d, DEAL_PRICE); break; }
+         {
+            exit = HistoryDealGetDouble(d, DEAL_PRICE);
+            long magic = (long)HistoryDealGetInteger(d, DEAL_MAGIC);
+            long reason = (long)HistoryDealGetInteger(d, DEAL_REASON);
+            // MEASURED 2026-09-22 (docs/LIVE_EXIT_AUDIT_20260922.md): this venue's mobile
+            // close carried magic 0 and reason 1 (MOBILE); the ENTRY deal carries our
+            // magic, so a closing deal bearing our magic is the EA's own path.
+            if(magic == InpMagic)                  why = "EXPERT";
+            else if(reason == DEAL_REASON_SL)      why = "SL";
+            else if(reason == DEAL_REASON_TP)      why = "TP";
+            else if(reason == DEAL_REASON_SO)      why = "SO";
+            else if(reason == DEAL_REASON_CLIENT)  why = "MANUAL-CLIENT";
+            else if(reason == DEAL_REASON_WEB)     why = "MANUAL-WEB";
+            else if(reason == DEAL_REASON_MOBILE)  why = "MANUAL-MOBILE";
+            // NOTE: this toolchain's ENUM_DEAL_REASON has no OTHER member — any reason
+            // this arm does not name (rollover, vmargin, split, a future platform value)
+            // stays EXTERNAL-UNKNOWN, which is the designed answer for 'not known'.
+            break;
+         }
       }
       double side = (g_lv_dir > 0) ? 1.0 : -1.0;
       double r = (exit > 0 && g_lv_stop > 0) ? ((exit - g_lv_entry) * side) / g_lv_stop : 0;
-      PrintFormat(VersionTag() + "LIVE EXTERNAL CLOSE exit=%.5f R=%+.3f", exit, r);
-      PaperLog(StringFormat("LCLOSE,%I64d,%I64u,EXTERNAL,%.5f,%.3f", (long)TimeCurrent(), g_lv_posid, exit, r));
+      PrintFormat(VersionTag() + "LIVE EXTERNAL CLOSE (%s) exit=%.5f R=%+.3f", why, exit, r);
+      PaperLog(StringFormat("LCLOSE,%I64d,%I64u,%s,%.5f,%.3f", (long)TimeCurrent(), g_lv_posid, why, exit, r));
+      LiveCensusAdd(r);   // v1.24: BOTH close paths count, or the tally depends on who closed it
       g_last_action = StringFormat("LIVE EXTERNAL CLOSE @%.5f", exit);   // v1.10 HUD
       g_lv_posid = 0; g_lv_ticket = 0; g_lv_order = 0; g_lv_deal = 0;
       return;
@@ -2541,6 +3579,7 @@ void LiveOnTick()
    LiveCheckExits();
    if(g_lv_posid != 0) return;
    string prop_block = PropGovernorBlock();   // v1.19+: shield + target + Best Day, not just the daily cap
+   g_hud_gov = prop_block;                    // v1.21: the same reason the HUD prints
    if(prop_block != "")
    {
       g_nofill_brk++;

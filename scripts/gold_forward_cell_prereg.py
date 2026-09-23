@@ -118,16 +118,20 @@ def utc_of_server(epoch: int) -> tuple[int | None, str]:
     return epoch - off * 60, ""
 
 
-def build_axes(symbol: str, bars: int) -> dict:
+def build_axes(symbol: str, bars: int, *, as_of: int | None = None) -> dict:
     """The SELECTION's axes, built once from the venue's data of record.
 
     The per-bar M15 Wilder ATR(14), its causal trailing median, the UTC hour, the news mask — the
     exact inputs `gold_persistence_state.cell_of` consumed when the cell was found. Built through
     the same call (`gg.venue_data`) the selection study used, so the forward label and the
     selection's label are the same measurement rather than two implementations of one sentence.
+
+    `as_of` passes through to `gps.news_axis`: the instant calendar freshness is judged at.
+    `label_rows` leaves it at the default (corpus tail); a caller judging a declared window
+    passes that window's end — see `news_axis` for why the default is not enough.
     """
     B, epoch, n, atr, hours, ok = gg.venue_data(symbol, bars)
-    news_mask, news_note = gps.news_axis(epoch, n)
+    news_mask, news_note = gps.news_axis(epoch, n, as_of=as_of)
     return {"index": {int(e): i for i, e in enumerate(epoch)},
             "atr": atr, "atr_med": gw.trailing_percentile(atr, gw.ATR_LOOKBACK, 0.5),
             "hours": hours, "ok": ok, "news_mask": news_mask, "news_note": news_note,

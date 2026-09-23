@@ -13,6 +13,21 @@
 ; would make the only forward record we have unrepresentative of the account it
 ; is supposed to represent.
 ;
+; STRATEGY MODE IS 1 (REVERSE_DIRECTION) — THE ONE THE CERTIFICATION RAN ON
+; (2026-09-22). The arm was armed on InpMode=0 (ORIGINAL), which no parity pass and
+; no gate verdict describes: the walk-forward gate certifies mode 1 and FAILED it
+; too. So this aligns the NAME to the certified CONFIGURATION; it is not a claim that
+; mode 1 is the better mode. Venue bars (artifacts/midas_sweep_20260921.json):
+;   ORIGINAL           is1 142tr +0.1668R | is2 209tr +0.1166R | wf 115tr +0.0953R
+;   REVERSE_DIRECTION  is1 186tr +0.0402R | is2 259tr +0.0297R | wf 151tr +0.0098R
+;   oos (the one window not used to pick a mode): ORIGINAL 94tr +0.0697R pf 1.141
+;   maxDD 6.87R, REVERSE_DIRECTION 108tr +0.0759R pf 1.158 maxDD 5.41R, +8.199R vs
+;   +6.555R total and 15% more fills. Both modes are NO-SHIP on the gate.
+; MEASURED on this arm's own ledger: all 3 of the 31 evaluated bars that carried a
+; trigger (each mac=-1/trig=+1) were refused by ORIGINAL and are entries under mode
+; 1. Mode 1 also refuses the agreement case, so it trades a different set, not more.
+; The change is an arming-record amendment (artifacts/live/armed.json), not an edit.
+;
 ; RISK PER TRADE IS 0.25%, AND IT IS A MEASURED NUMBER (2026-09-21).
 ; The EA's own default is 1.00%, which the sizing scan in
 ; artifacts/gold_prereg_no_target.json measures as breaching the venue's 3% daily line
@@ -61,14 +76,20 @@
 ;   their code defaults — InpLiveExecution=false is hard (paper arm forever,
 ;   live authorization is a frozen-gate event, never an input edit).
 ;   Symbol: XAUUSD (charter: gold only)
+;   2026-09-22: 2.0 -> 1.5, following the family pin (gold_preset_upcomers.BB_DEV, and
+;   midas_parity.BB_DEV). The strategy may not vary between presets — only the MODE does, and
+;   this control stays ORIGINAL (protocol §2/§10 Amendment 2). tests/test_midas_golive_grammar.py
+;   asserts every preset against one literal for exactly that reason. Measurement:
+;   docs/FREQUENCY_AXES_PREREG_20260922.md. This control is attached to no chart today, so
+;   nothing live changes here; the file moves so the family runs ONE strategy.
 ;   v1.19 P6 build block: entry TF explicit (M15 = certified; no behavior change)
 
 InpMagic=7825001
 InpArmTag=U25
-InpMode=0
+InpMode=1
 InpMacroEmaPeriod=20
 InpBBPeriod=20
-InpBBDev=2.0
+InpBBDev=1.5
 InpRSIPeriod=14
 InpEntryTF=15
 InpRSIUpper=70.0
@@ -79,7 +100,7 @@ InpTpMult=2.0
 InpTimeoutMinutes=720
 InpSessionStartHour=6
 InpSessionEndHour=20
-InpSpreadCapPctStop=1.5
+InpSpreadCapPctStop=2.5
 InpFridayCutoffHour=20
 InpUseNewsFilter=false
 InpNewsFile=MIDASTOUCH_news_calendar.csv

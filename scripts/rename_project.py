@@ -56,7 +56,11 @@ def plan(root: Path, new_name: str) -> tuple[Path, list[tuple[Path, int]]]:
     return target, hits
 
 
-TASK_NAME = "MitemshubPaperSupervisor"
+TASK_NAME = "MIDASTOUCH Arm Supervisor"
+#: The task this installer REPLACES (2026-09-22): the predecessor was paper-scoped in name
+#: and interactive-logon-only in fact, so it is probed too -- a checkout still carrying
+#: only the legacy registration is exactly the case this re-point must not miss.
+LEGACY_TASK_NAMES = ("MitemshubPaperSupervisor",)
 
 
 def refresh_scheduled_task(target: Path) -> None:
@@ -79,20 +83,23 @@ def refresh_scheduled_task(target: Path) -> None:
     # with a bare `exit 0`, which forced success and made this branch unreachable: an
     # absent task would have been silently RE-INSTALLED, undoing a deliberate removal.
     # The exit code has to come from the query itself.
+    names = ", ".join(f"'{n}'" for n in (TASK_NAME, *LEGACY_TASK_NAMES))
+    probe = (f"$n = {names}; "
+             "$t = $n | ForEach-Object { Get-ScheduledTask -TaskName $_ -ErrorAction "
+             "SilentlyContinue }; if ($t) { exit 0 } else { exit 3 }")
     try:
-        q = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             f"$t = Get-ScheduledTask -TaskName '{TASK_NAME}' -ErrorAction "
-             "SilentlyContinue; if ($t) { exit 0 } else { exit 3 }"],
-            capture_output=True, text=True, timeout=30)
+        q = subprocess.run(["powershell", "-NoProfile", "-Command", probe],
+                           capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"\nNOTE: could not query the scheduled task ({exc}).")
         return
     if q.returncode != 0:
-        print(f"\nno scheduled task named {TASK_NAME} is registered; nothing to "
+        print(f"\nno scheduled task named {TASK_NAME} "
+              f"(or {', '.join(LEGACY_TASK_NAMES)}) is registered; nothing to "
               f"re-point (it will not be installed behind your back).")
         return
-    print(f"\nre-pointing scheduled task {TASK_NAME} at the new location...")
+    print(f"\nre-pointing scheduled task {TASK_NAME} at the new location "
+          f"(re-running the installer also replaces the legacy interactive task, if any)...")
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-File", str(installer), "-Apply"],
                            capture_output=True, text=True, timeout=120)
