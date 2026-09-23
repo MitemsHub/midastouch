@@ -188,8 +188,9 @@ def preflight(plan: str, *, positions: list | None = None,
         lines.append("BLOCKER: no profile-saved chart carries MidastouchAI. MT5 migrates "
                      "saved/active charts WITH EAs only ('0 charts of 1 prepared' is the "
                      "signature of this exact failure). Fix: open the EA chart, then "
-                     "File -> Profiles -> Save (the profile that opens at boot), and "
-                     "re-run this preflight.")
+                     "File -> Profiles -> Save As... (write the profile that opens at "
+                     "boot — a plain window close does not save it), and re-run this "
+                     "preflight.")
     else:
         path, txt = carrier
         lines.append(f"carrier chart: {path}")

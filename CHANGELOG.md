@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-09-23 22:40Z - ERA-INGEST DAILY TASK LIVE; AMENDMENT 12; CERTIFICATION NIGHT OPENED GREEN
+
+- **Scheduled task `MIDASTOUCH Era Ingest` registered and verified** (daily 22:40
+local = 21:40Z, S4U principal — runs without a signed-in user, like the supervisor;
+wrapper `scripts/era_ingest_task.cmd` resolves the repo by its own location). A
+deliberate triggered run wrote the honest out-of-era NO-OP into
+`artifacts/live/vps_fills.json`; in the era the same task keeps the tally artifact
+fresh and `[3b]` flags it as a PROBLEM past 26 h. S4U registration required elevation
+(schtasks `/RU` without a password yields an Interactive task — the first attempt,
+approved, was replaced by the PowerShell registration).
+- **Amendment 12** on `artifacts/live/armed.json`: the tally corrected to the venue's
+own count (3/30, +0.486R, all wins; exact ingest-vs-EA parity 0.1046 vs LCLOSE 0.104
+on the shared position; corpus comparison 54.6–56.9th centiles / 43.5th bootstrap
+percentile — within expectation both directions, n=3 validates nothing), the
+maintenance task, and the certification-night posture. The paper gate's counter
+still reads LCLOSE rows; re-defining the gate's input is pre-registration work, not
+a midnight edit.
+- **Certification night opened green** (22:00Z): supervisor task result 0 / 0 missed,
+the pre-window PASS (Sep 22→23, 100% coverage) on the record, no sleep events since
+18:34Z. The verdict is due after 08:00Z Sep 24.
+- **The paper-rehearsal preflight still refuses**: no EA-carrier profile exists after
+three attempts (newest .chr 11.1 h old). The official menu path is confirmed —
+File → Profiles → Save As… (or toolbar → Manage Profiles → Save As). Migration is
+forbidden until 08:00Z regardless: an EA transfer can fire the local algo-trading
+lock mid-measurement.
+
 ## 2026-09-23 22:15Z - VPS-ERA TALLY FOLD WIRED; INGEST CORRECTED AGAINST REAL DATA; LIVE R's READ AGAINST THE CORPUS
 
 - **`morning_status [3b]` folds `vps_fills.json` into the tally** (`_vps_fills_line`,
