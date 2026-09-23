@@ -160,6 +160,130 @@ class TestMidasSectionIntegration:
         assert "inputs byte-identical to repo .set)" in out
         assert "PROBLEM" not in out and healthy is False
 
+    # --- the VPS-era tally fold (runbook §0d) ------------------------------
+
+    LCLOSE_ROW = ("LCLOSE,1790200000,18874164,EXTERNAL,4262.39000,0.10400")
+
+    @staticmethod
+    def _live_chart_text() -> str:
+        """A .chr body from the LIVE pin file itself (the upcomers LIVE .set — the
+        same trick _preset_input_lines uses for the M1 world). A U25 chart is graded
+        against preset_for_tag('U25', armed=True); building it from the M1 fixture
+        defaults manufactured DRIFT problems that drowned the fold's own signal."""
+        with open(ms.MIDAS_PRESET.replace("M1_gold", "upcomers_gold_LIVE"),
+                  encoding="utf-8") as f:
+            inp = [ln.strip() for ln in f if ln.strip().startswith("Inp")]
+        lines = ["; chart", "MidastouchAI", "symbol=XAUUSD", "period_size=15",
+                 "==== Strategy (frozen protocol defaults) ===="]
+        return "\r\n".join(lines + inp) + "\r\n"
+
+    def _vps_artifact(self, tmp_path, *, verdict="OK", tally=None, ts=None):
+        import json
+        from datetime import datetime, timedelta, timezone
+        p = os.path.join(str(tmp_path), "vps_fills.json")
+        art = {"verdict": verdict,
+               "ts": ts or datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        if tally is not None:
+            art["tally"] = tally
+        if verdict == "FAIL":
+            art["problems"] = ["era is active but the venue cannot be read"]
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(art, f)
+        return p
+
+    @staticmethod
+    def _enter_vps_era(monkeypatch, tmp_path, vps_fills_path, *, era=True):
+        import midas_watchdog as W
+        monkeypatch.setattr(ms, "VPS_FILLS_PATH", vps_fills_path)
+        monkeypatch.setattr(W, "vps_hosting_active", lambda: era)
+
+    def _live_arm_with_lclose(self, tmp_path, monkeypatch) -> None:
+        """The fold prints inside the LIVE arm's closed-block, so the fixture is a
+        live-chart world: tag U25 (the ledger name follows the tag — an M1 chart
+        looks for _M1.csv and reports MISSING), one consistent fill seen by BOTH
+        sides (an LCLOSE row plus its IN/OUT deals, so the reconciliation agrees
+        instead of manufacturing a PROBLEM of its own), and the synthetic reader
+        so nothing reaches this machine's real account (the 2026-09-22 lesson)."""
+        from types import SimpleNamespace
+        self._write_fixture(tmp_path, monkeypatch, self._live_chart_text())
+        led = os.path.join(str(tmp_path), "Term", "FAKEHASH", "MQL5", "Files",
+                           "MIDASTOUCH_paper_XAUUSD_U25.csv")
+        with open(led, "w", encoding="utf-8") as f:
+            f.write("ERA,MIDAS1.19,1789956934,pertick-fills\nEQ,25000.00\n"
+                    # the fill BOTH sides saw, in the real row grammar (order = the
+                    # venue's position id), then its adopted close
+                    "LOPEN,1790170200,0,18874164,0,-1,4306.19000,4327.54000,"
+                    "4262.39000,0.02,43.43,21.71714,43200,U25,1790169300,11,"
+                    "0.70381,out,120,cfg=62.51@0.25\n"
+                    + self.LCLOSE_ROW + "\n")
+
+        def deals(*a, **k):
+            # the same fill the LCLOSE row records: IN carries the magic, the
+            # platform OUT carries magic 0 (the venue's real stamping)
+            return [SimpleNamespace(ticket=18137411, magic=7825001, entry=0,
+                                    position_id=18874164),
+                    SimpleNamespace(ticket=18138688, magic=0, entry=1,
+                                    position_id=18874164)]
+        monkeypatch.setattr(ms, "LIVE_FILL_DEAL_READER", deals)
+        import midas_watchdog as W
+        ff = os.path.join(str(tmp_path), "first_fill.json")  # this world's own record
+        with open(ff, "w", encoding="utf-8") as f:
+            f.write('{"recorded_utc": "2026-09-23T00:00:00Z", "ledger_fills": 1, '
+                    '"account_identifiers": 1, "first_ledger_row": "fixture"}')
+        monkeypatch.setattr(W, "FIRST_FILL_PATH", ff)
+
+    def test_out_of_era_prints_no_vps_line(self, tmp_path, monkeypatch, capsys):
+        """The fold exists only where LCLOSE rows cannot — out of era it is absent."""
+        self._write_fixture(tmp_path, monkeypatch, _chart_text())
+        ms.print_midas_section()
+        assert "vps era" not in capsys.readouterr().out
+
+    def test_era_without_artifact_is_a_yellow_note_not_a_problem(self, tmp_path, monkeypatch, capsys):
+        """The marker is set BEFORE the migration completes, so an era window with
+        nothing yet ingested is normal — a note, never a PROBLEM."""
+        self._live_arm_with_lclose(tmp_path, monkeypatch)
+        missing = os.path.join(str(tmp_path), "vps_fills.json")  # never written
+        self._enter_vps_era(monkeypatch, tmp_path, missing)
+        healthy = ms.print_midas_section()
+        out = capsys.readouterr().out
+        assert "no vps_fills.json yet" in out
+        assert "PROBLEM" not in out and healthy is False
+
+    def test_era_with_failing_artifact_is_a_problem(self, tmp_path, monkeypatch, capsys):
+        """FAIL means the venue went dark on the ingest: the tally is blind again —
+        the exact state the ingest exists to prevent, so it must surface as PROBLEM."""
+        self._live_arm_with_lclose(tmp_path, monkeypatch)
+        p = self._vps_artifact(tmp_path, verdict="FAIL")
+        self._enter_vps_era(monkeypatch, tmp_path, p)
+        healthy = ms.print_midas_section()
+        out = capsys.readouterr().out
+        assert "ingest FAILED" in out
+        assert "PROBLEM" in out and healthy is True
+
+    def test_era_with_stale_artifact_is_a_problem(self, tmp_path, monkeypatch, capsys):
+        from datetime import datetime, timedelta, timezone
+        self._live_arm_with_lclose(tmp_path, monkeypatch)
+        old = (datetime.now(timezone.utc) - timedelta(hours=40)).isoformat(timespec="seconds")
+        p = self._vps_artifact(tmp_path, tally={"closed": 1, "wins": 1, "sum_r": 0.2},
+                               ts=old)
+        self._enter_vps_era(monkeypatch, tmp_path, p)
+        healthy = ms.print_midas_section()
+        out = capsys.readouterr().out
+        assert "stale" in out
+        assert "PROBLEM" in out and healthy is True
+
+    def test_era_with_healthy_artifact_folds_the_tally(self, tmp_path, monkeypatch, capsys):
+        """THE contract: ledger LCLOSE rows (1 in the fixture) plus the venue-
+        attributed VPS-era closes (2) print as the COMBINED tally 3/30."""
+        self._live_arm_with_lclose(tmp_path, monkeypatch)
+        p = self._vps_artifact(tmp_path, tally={"closed": 2, "wins": 1, "sum_r": 0.35})
+        self._enter_vps_era(monkeypatch, tmp_path, p)
+        ms.print_midas_section()
+        out = capsys.readouterr().out
+        assert "2 VPS-era closed position(s)" in out
+        assert "1W/1L" in out and "sumR +0.35" in out
+        assert "tally 3/30 includes them" in out
+
     def test_section_flags_drift_as_unhealthy(self, tmp_path, monkeypatch, capsys):
         self._write_fixture(tmp_path, monkeypatch,
                             _chart_text({"InpMode": "2"}))

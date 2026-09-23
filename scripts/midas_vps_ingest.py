@@ -48,20 +48,35 @@ ARMED_PATH = os.path.join(REPO, "artifacts", "live", "armed.json")
 #: for positions whose SL was later moved (none yet), the OPEN deal's SL is what the
 #: certification was made on — the ingest reports the R the strategy defined, not the
 #: R a trailing hand gave it.
-def _r_of_position(entry: dict, close: dict) -> float | None:
+def _r_of_position(entry: dict, close: dict,
+                   stop_distance: float | None = None) -> float | None:
     """R = dir * (exit - entry) / stop_distance, dir +1 long / -1 short.
 
-    The denominator is the ABSOLUTE stop distance: `entry - sl` is negative for a
-    short, and dividing by it flips every short's sign — a winning short read as -1R.
-    MEASURED against the arm's own opens (all shorts) before this tool ever ran."""
-    sl = entry.get("sl")
-    if not sl or not entry.get("price") or not close.get("price"):
+    Two sign traps are pinned in tests: the denominator is a DISTANCE (an early
+    draft subtracted the ledger's stop_d as if it were a price and divided by
+    ~4284 — R 2.0168 read as 0.0102), and it is ABSOLUTE (`entry - sl` is negative
+    on a short and flips every short's sign — a winning short read as -1R).
+
+    `stop_distance` is the LEDGER's LOPEN `stop_d` — the EA's own risk-defining
+    distance, which is the CERTIFIED denominator. It is preferred over deriving
+    one from the fill price: measured on the arm's real rows, |fill − SL| is 21.35
+    while the EA's stop_d is 21.71714 (order-time distance; the fill slipped), and
+    the strategy's R is defined by the risk it took, not the price it got.
+    The venue's own deal records carry NO SL at all (measured 2026-09-23), so a
+    price-derived distance is only a fallback for a venue that one day stamps it."""
+    price, sl = entry.get("price"), entry.get("sl")
+    if not price or not close.get("price"):
         return None
-    stop_d = abs(entry["price"] - sl)
+    if stop_distance:
+        stop_d = abs(float(stop_distance))
+    elif sl:
+        stop_d = abs(price - sl)
+    else:
+        return None
     if not stop_d:
         return None
     dirn = 1.0 if entry.get("type") == 0 else -1.0   # mt5 DEAL_TYPE_BUY = 0 (a long entry)
-    return round(dirn * (close["price"] - entry["price"]) / stop_d, 4)
+    return round(dirn * (close["price"] - price) / stop_d, 4)
 
 
 def era_active(marker_path: str = "") -> bool:
@@ -85,13 +100,21 @@ def collect_deals(reader=None):
     return list(reader(frm, until) or [])
 
 
-def ingest(magic: int, deals: list, known_ids: set[int]) -> dict:
+def ingest(magic: int, deals: list, ledger: dict) -> dict:
     """One pass: attribute the deals, pair positions, diff against the ledger.
 
     `magic` comes from the ARMING RECORD (resolved by main), never defaulted: the
     era marker carries no magic, and attributing with magic 0 would adopt every
     unbranded IN deal on the account — the one direction attribution must not
-    fail in (tests/test_deal_attribution.py)."""
+    fail in (tests/test_deal_attribution.py).
+
+    `ledger` is `_ledger_facts()`'s three sets. THE DIFF COUNTS CLOSES, NOT OPENS
+    (measured 2026-09-23 against the real account: the ledger holds all four LOPEN
+    rows but only one LCLOSE — the re-entry moved the EA's tracker before its exit
+    scan adopted the manual close — so keying the diff on opens would report a
+    tally of zero while two closed wins sat uncounted): a position is a tally
+    event when the LEDGER LACKS ITS CLOSE. R's stop falls back to the ledger's
+    LOPEN stop_d because the venue's deals carry no SL."""
     ours_positions = R.our_positions_from_deals(deals, magic)
     by_pos: dict[int, dict] = {}
     for d in deals:
@@ -118,22 +141,26 @@ def ingest(magic: int, deals: list, known_ids: set[int]) -> dict:
             side["closes"].append(rec)
 
     positions = []
+    closes_known = ledger["closes"]
+    stops = ledger["stops"]
     for pid in sorted(by_pos):
         e = by_pos[pid]["entry"]
         if e is None or not by_pos[pid]["closes"]:
             continue  # still open, or an unpaired entry — not a tally event yet
         last_close = by_pos[pid]["closes"][-1]
-        r = _r_of_position(e, last_close)
+        r = _r_of_position(e, last_close, stops.get(pid))
         positions.append({
             "position_id": pid,
             "opened_utc": datetime.fromtimestamp(e["time"], timezone.utc).isoformat() if e["time"] else None,
             "closed_utc": datetime.fromtimestamp(last_close["time"], timezone.utc).isoformat() if last_close["time"] else None,
-            "entry": e["price"], "exit": last_close["price"], "sl": e["sl"],
+            "entry": e["price"], "exit": last_close["price"],
+            "stop_d": stops.get(pid) or (abs(e["price"] - e["sl"]) if e.get("sl") else None),
             "volume": last_close["volume"] or e["volume"],
             "r": r,
-            "in_local_ledger": pid in known_ids,
+            "open_in_local_ledger": pid in ledger["opens"],
+            "close_in_local_ledger": pid in closes_known,
         })
-    fresh = [p for p in positions if not p["in_local_ledger"]]
+    fresh = [p for p in positions if not p["close_in_local_ledger"]]
     closed = len(fresh)
     wins = sum(1 for p in fresh if (p["r"] or 0) > 0)
     sum_r = round(sum(p["r"] for p in fresh if p["r"] is not None), 4)
@@ -192,7 +219,7 @@ def main() -> int:
         print(out["problems"][0])
         return 2
 
-    known = _ledger_position_ids()
+    known = _ledger_facts()
     result = ingest(magic, deals, known)
     out.update(result)
     out["tally_note"] = ("VPS-era closed positions by venue attribution — the tally "
@@ -225,8 +252,14 @@ def _resolve_magic(era: dict) -> int:
     return marker_magic or magic
 
 
-def _ledger_position_ids(ledger_paths: list[str] | None = None) -> set[int]:
-    """Position ids the local ledger already knows (any of its identifier fields).
+def _ledger_facts(ledger_paths: list[str] | None = None) -> dict:
+    """What the local ledger knows, as three sets the ingest diffs against.
+
+    `opens` — position ids of fills the ledger recorded (any identifier field).
+    `closes` — position ids of CLOSES the ledger adopted (LCLOSE `posid`); the
+    tally diff keys on THIS, not on opens (see ingest's docstring).
+    `stops` — position id -> LOPEN `stop_d`: the venue's deals carry no SL, so
+    this is where every real R's denominator comes from.
 
     `ledger_paths` injectable for tests; the default scans every terminal data
     folder's MIDASTOUCH ledger (the arm's identity is the magic, the suffix is
@@ -238,7 +271,9 @@ def _ledger_position_ids(ledger_paths: list[str] | None = None) -> set[int]:
         ledger_paths = glob.glob(os.path.join(
             os.environ.get("APPDATA", ""), "MetaQuotes", "Terminal", "*",
             "MQL5", "Files", "MIDASTOUCH_paper_XAUUSD_*.csv"))
-    ids: set[int] = set()
+    opens: set[int] = set()
+    closes: set[int] = set()
+    stops: dict[int, float] = {}
     for a in ledger_paths:
         rows = read_rows(Path(a))
         for r in rows["rows"].get("lopen", []):
@@ -246,10 +281,22 @@ def _ledger_position_ids(ledger_paths: list[str] | None = None) -> set[int]:
                 v = str(r.get(k) or "").strip()
                 if v and v != "0":   # a zero is not an identifier (the reconciliation's rule)
                     try:
-                        ids.add(int(v))
+                        opens.add(int(v))
                     except ValueError:
                         continue
-    return ids
+            if r.get("order") and r.get("stop_d"):
+                try:
+                    stops[int(r["order"])] = float(r["stop_d"])
+                except (TypeError, ValueError):
+                    continue
+        for r in rows["rows"].get("lclose", []):
+            v = str(r.get("posid") or "").strip()
+            if v and v != "0":
+                try:
+                    closes.add(int(v))
+                except ValueError:
+                    continue
+    return {"opens": opens, "closes": closes, "stops": stops}
 
 
 if __name__ == "__main__":

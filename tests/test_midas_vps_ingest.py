@@ -94,26 +94,48 @@ def test_r_is_none_without_a_stop_or_prices() -> None:
 
 # --- pairing + attribution (the engine's own rule, not a copy) ---------------
 
+def _ledger(**kw) -> dict:
+    """An empty `_ledger_facts()`-shaped world; pass opens=/closes=/stops= to fill."""
+    d = {"opens": set(), "closes": set(), "stops": {}}
+    d.update(kw)
+    return d
+
+
 def test_platform_closed_short_is_paired_and_counted_fresh() -> None:
-    out = V.ingest(OUR, [SHORT_IN, SHORT_OUT, STRANGER], known_ids=set())
+    out = V.ingest(OUR, [SHORT_IN, SHORT_OUT, STRANGER], _ledger())
     assert len(out["positions"]) == 1, "the stranger's IN deal must never appear"
     p = out["positions"][0]
     assert p["position_id"] == 18874164
-    assert p["in_local_ledger"] is False
+    assert p["close_in_local_ledger"] is False
     assert p["r"] is not None and p["r"] > 0
     assert out["fresh"] == 1
     assert out["tally"] == {"closed": 1, "wins": 1, "sum_r": p["r"]}
 
 
-def test_positions_the_ledger_knows_are_reported_but_not_recounted() -> None:
-    out = V.ingest(OUR, [SHORT_IN, SHORT_OUT], known_ids={18874164})
-    assert out["positions"][0]["in_local_ledger"] is True
+def test_a_position_whose_close_the_ledger_has_is_not_recounted() -> None:
+    out = V.ingest(OUR, [SHORT_IN, SHORT_OUT],
+                   _ledger(closes={18874164}, stops={18874164: 21.71714}))
+    assert out["positions"][0]["close_in_local_ledger"] is True
     assert out["fresh"] == 0
     assert out["tally"] == {"closed": 0, "wins": 0, "sum_r": 0}
 
 
+def test_the_diff_keys_on_closes_not_opens() -> None:
+    """MEASURED 2026-09-23 against the real account: the ledger held all four LOPEN
+    rows but one LCLOSE — the EA's re-entry moved its tracker before the exit scan
+    adopted the manual close. Keying the diff on OPENS reported a tally of zero
+    while two closed wins sat uncounted. An open the ledger knows with NO close is
+    a tally event."""
+    out = V.ingest(OUR, [SHORT_IN, SHORT_OUT],
+                   _ledger(opens={18874164}, stops={18874164: 21.71714}))
+    p = out["positions"][0]
+    assert p["open_in_local_ledger"] is True
+    assert p["close_in_local_ledger"] is False
+    assert out["fresh"] == 1 and out["tally"]["closed"] == 1
+
+
 def test_an_open_position_is_not_a_tally_event() -> None:
-    out = V.ingest(OUR, [SHORT_IN], known_ids=set())
+    out = V.ingest(OUR, [SHORT_IN], _ledger())
     assert out["positions"] == []
     assert out["fresh"] == 0
 
@@ -121,8 +143,32 @@ def test_an_open_position_is_not_a_tally_event() -> None:
 def test_a_close_without_its_open_is_not_ours() -> None:
     """The fail-closed direction: an OUT deal whose IN we cannot see adopts nothing."""
     orphan_out = _deal(888, 0, R.DEAL_ENTRY_OUT, 999999, 0, 4262.39)
-    out = V.ingest(OUR, [orphan_out], known_ids=set())
+    out = V.ingest(OUR, [orphan_out], _ledger())
     assert out["positions"] == []
+
+
+# --- the stop join -------------------------------------------------------------
+
+def test_r_falls_back_to_the_ledgers_stop_when_the_venue_has_none() -> None:
+    """MEASURED 2026-09-23: the venue's own deals carry NO SL on either side, so
+    without the ledger join every real R would be None. The LOPEN stop_d — the
+    CERTIFIED stop — is the denominator."""
+    no_sl_in = _deal(18137411, OUR, R.DEAL_ENTRY_IN, 18874164, 1, 4306.19,
+                     sl=0.0, time_=1790170200)
+    out = V.ingest(OUR, [no_sl_in, SHORT_OUT],
+                   _ledger(stops={18874164: 21.71714}))
+    p = out["positions"][0]
+    assert p["r"] == round(-1 * (4262.39 - 4306.19) / 21.71714, 4)
+    assert p["r"] > 0
+    assert p["stop_d"] == 21.71714
+
+
+def test_r_is_none_when_no_stop_exists_anywhere() -> None:
+    no_sl_in = _deal(18137411, OUR, R.DEAL_ENTRY_IN, 18874164, 1, 4306.19,
+                     sl=0.0, time_=1790170200)
+    out = V.ingest(OUR, [no_sl_in, SHORT_OUT], _ledger())
+    assert out["positions"][0]["r"] is None
+    assert out["tally"]["closed"] == 1   # counted, but honestly carrying no R
 
 
 # --- era gating and main()'s fail-closed directions --------------------------
@@ -145,7 +191,8 @@ def _run_main(monkeypatch, tmp_path, *, era=None, deals_reader=None,
         monkeypatch.setattr(V, "collect_deals",
                             lambda: (_ for _ in ()).throw(
                                 AssertionError("venue must not be read in this scenario")))
-    monkeypatch.setattr(V, "_ledger_position_ids", lambda: (ledger_ids or set()))
+    monkeypatch.setattr(V, "_ledger_facts",
+                        lambda: {"opens": set(), "closes": set(), "stops": {}})
     monkeypatch.setattr(sys, "argv", ["midas_vps_ingest.py"])
     rc = V.main()
     artifact = json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else None
@@ -213,13 +260,18 @@ def test_armed_magic_reader_is_tolerant(monkeypatch, tmp_path) -> None:
 
 # --- the ledger-diff join -----------------------------------------------------
 
-def test_ledger_ids_ignore_zeros_and_keep_real_identifiers(tmp_path) -> None:
+def test_ledger_facts_ignore_zeros_and_keep_identifiers_and_stops(tmp_path) -> None:
     """One REAL LOPEN row (arm ledger, 2026-09-23): posid and deal are '0' — a zero
-    is not an identity — and `order` 19003889 is the venue-side position id."""
+    is not an identity — `order` 19003889 is the venue-side position id, and its
+    stop_d is the R denominator the venue's deals never carry."""
     led = tmp_path / "MIDASTOUCH_paper_XAUUSD_U25.csv"
     led.write_text(
         "ERA,MIDAS1.19,1789956934,pertick-fills\n"
         "LOPEN,1790170200,0,19003889,0,-1,4306.19000,4327.54000,4262.39000,"
-        "0.02,43.43,21.71714,43200,U25,1790169300,11,0.70381,out,120,cfg=62.51@0.25\n",
+        "0.02,43.43,21.71714,43200,U25,1790169300,11,0.70381,out,120,cfg=62.51@0.25\n"
+        "LCLOSE,1790200000,19003889,EXTERNAL,4262.39000,0.10400\n",
         encoding="utf-8")
-    assert V._ledger_position_ids([str(led)]) == {19003889}
+    facts = V._ledger_facts([str(led)])
+    assert facts["opens"] == {19003889}
+    assert facts["closes"] == {19003889}
+    assert facts["stops"] == {19003889: 21.71714}

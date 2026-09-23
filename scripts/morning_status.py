@@ -1343,6 +1343,18 @@ SHADOW_ART = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
 COV_ALARM_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                               "artifacts", "live", "heartbeat_gap_alarm.json")
 
+#: The VPS-era ingest artifact (scripts/midas_vps_ingest.py writes it) — module
+#: constant like COV_ALARM_PATH so fixtures repoint it. In the era the ledger's
+#: LCLOSE rows STOP (the EA's ledger lives on MetaQuotes' disk), so the 30-trade
+#: tally would freeze at whatever it reached when the era began. This artifact is
+#: the venue-attributed delta; the live closed-line folds it in. STALE_H is the
+#: maintenance contract: the ingest must run at least daily while the era stands,
+#: and an artifact older than a day plus slack means the tally is blind again —
+#: the exact "trading without eyes" state the ingest exists to prevent.
+VPS_FILLS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "artifacts", "live", "vps_fills.json")
+VPS_FILLS_STALE_H = 26
+
 
 def print_shadow_record() -> None:
     """[3b.1] The sweep-shadow forward record, as an artifact quote. Display-only.
@@ -1812,6 +1824,53 @@ def nofill_summary(path: str, now_ts: float | None = None) -> dict | None:
         return None
 
 
+def _vps_fills_line(vps_era: bool, ledger_closes: int) -> tuple[str | None, bool]:
+    """The VPS-era tally fold (runbook §0d), one line for the live closed-block.
+
+    Returns (line, problem). (None, False) out of era — the fold exists only where
+    LCLOSE rows cannot. In era: a missing artifact is a yellow note (the marker is
+    set BEFORE the migration completes, so a window with nothing to ingest is
+    normal), a FAILING or stale artifact is a PROBLEM (the tally is blind again),
+    and a healthy one carries the combined tally — ledger LCLOSE rows plus the
+    venue-attributed VPS-era closes the ledger can never have.
+    """
+    if not vps_era:
+        return None, False
+    try:
+        with open(VPS_FILLS_PATH, encoding="utf-8") as fh:
+            art = json.load(fh)
+    except (OSError, ValueError):
+        return (paint("  vps era: no vps_fills.json yet - run scripts/midas_vps_ingest.py "
+                      "once the VPS EA is live (the tally cannot fold what was not read)", "y"),
+                False)
+    if art.get("verdict") == "FAIL":
+        first = "; ".join(art.get("problems", [])[:1]) or "unreadable era record"
+        return (paint(f"  vps era: ingest FAILED - {first}", "r"), True)
+    age_h = None
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        age_h = (_dt.now(_tz.utc)
+                 - _dt.fromisoformat(art["ts"])).total_seconds() / 3600.0
+    except (KeyError, ValueError):
+        pass
+    if age_h is None or age_h > VPS_FILLS_STALE_H:
+        return (paint(f"  vps era: vps_fills.json is stale "
+                      f"({art.get('ts', 'no timestamp')}) - the tally is not being "
+                      f"maintained; run scripts/midas_vps_ingest.py", "r"), True)
+    tally = art.get("tally", {})
+    n = int(tally.get("closed", 0))
+    wins = int(tally.get("wins", 0))
+    sr = float(tally.get("sum_r", 0.0))
+    if n == 0:
+        return (f"  vps era: 0 VPS-era closed position(s) outside the ledger so far "
+                f"(artifact {art.get('ts', '?')}Z) - tally {ledger_closes}/{MIN_TRADES} "
+                f"unchanged; the fold applies when a VPS position closes", False)
+    combined = ledger_closes + n
+    return (f"  vps era: {n} VPS-era closed position(s) outside the ledger "
+            f"({wins}W/{n - wins}L, sumR {sr:+.2f}) - tally {combined}/{MIN_TRADES} "
+            f"includes them", False)
+
+
 def _print_midas_arm(td: str, txt: str, multi: bool = False,
                      ordinal: int = 1, positions: list[dict] | None = None,
                      origin: str | None = None) -> bool:
@@ -2083,6 +2142,15 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
                      if reasons else "none yet")
         print(f"  closed: {lv['lclose_ct']}/{MIN_TRADES} (live LCLOSE rows) "
               f"| exits: {breakdown} | $ realized is on the account, R on the rows")
+        # The era fold (runbook §0d): past this line the ledger's LCLOSE rows stop —
+        # the EA's ledger lives on MetaQuotes' disk — so the tally continues only
+        # through the venue-attributed ingest artifact. A failing or stale artifact
+        # is a health problem, not a footnote: the era without eyes is blind again.
+        vps_line, vps_bad = _vps_fills_line(vps_era, lv["lclose_ct"])
+        if vps_line:
+            print(vps_line)
+        if vps_bad:
+            problems.append("vps era: the tally's ingest artifact is failing or stale")
     elif closed:
         total_r = sum(c["r"] for c in closed)
         reasons: dict[str, int] = {}

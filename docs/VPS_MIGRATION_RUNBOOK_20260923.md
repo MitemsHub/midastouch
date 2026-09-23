@@ -129,10 +129,13 @@ Built 2026-09-23 (14 pinned tests, `tests/test_midas_vps_ingest.py`), read-only:
    trade without eyes), and identity resolves from the ARMING RECORD's `magic` (an
    era-marker `magic` overrides for a rehearsal arm) — both silent refuses to run,
    because attribution with magic 0 would adopt strangers' IN deals.
-2. REMAINING WIRING (not built): `morning_status [3b]` gains one line in the era:
-   `N VPS-era fill(s) by position attribution; tally X/30 includes them`. Until that
-   lands, the tally consumer is the operator reading `vps_fills.json` — the artifact
-   is first-class, the morning line is not yet automatic.
+2. WIRED 2026-09-23 (`morning_status._vps_fills_line`, tests in
+   `tests/test_morning_status_preset.py::TestMidasSectionIntegration`): the live
+   arm's closed-line now folds the artifact in — `N VPS-era closed position(s)
+   (W/L, sumR) — tally X/30 includes them`. The artifact is stale past 26 h, or
+   FAILING, the fold prints it as a PROBLEM: in the era the tally's only heartbeat
+   is the ingest, and an un-maintained one is the blind state again. Missing
+   artifact (era just marked, nothing to read) is a yellow note, not a problem.
 3. What stays blind, stated honestly: the **census** (refusal reasons per bar) and
    trigger telemetry are EA-side and unrecoverable — the pace tool's trigger counts
    pause for the era; only the execution record survives. The blind-EA problem

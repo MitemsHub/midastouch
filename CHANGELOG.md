@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-09-23 22:15Z - VPS-ERA TALLY FOLD WIRED; INGEST CORRECTED AGAINST REAL DATA; LIVE R's READ AGAINST THE CORPUS
+
+- **`morning_status [3b]` folds `vps_fills.json` into the tally** (`_vps_fills_line`,
+5 new tests): in the era the live closed-line gains `N VPS-era closed position(s)
+(W/L, sumR) — tally X/30 includes them`. A FAILING or >26 h stale artifact is a
+PROBLEM (the ingest is the tally's only heartbeat then); a missing one is a yellow
+note (the marker precedes the migration). Fixture world: live-pin chart, both-sides-
+seen fill, synthetic deal reader — the 2026-09-22 lesson applied twice.
+- **Two ingest defects fixed by running it against the real account** (both now
+pinned): the venue's deals carry NO SL on either side, so R joins the LEDGER's LOPEN
+`stop_d` — the EA's order-time risk, which is the certified denominator (|fill−SL|
+is 21.35 where the EA's stop_d is 21.71714); and the tally diff keys on CLOSES, not
+opens — the ledger held all four LOPEN rows but one LCLOSE (the re-entry moved the
+EA's tracker), so opens-keyed diffing reported 1/30 while the venue shows 3 closed
+positions. An early draft also divided by the stop DISTANCE as if it were a price
+(R 2.0168 read as 0.0102) — caught by deriving the test.
+- **Measured**: true tally 3/30, +0.486R (0.1046/0.1934/0.1883 — 54.6–56.9th
+centiles of the corpus forward). Parity: the ingest reproduces the EA's own LCLOSE R
+(0.104) for the one position both sides hold.
+- **Live vs corpus forward (engine of record, oos 130 fills)**: live mean +0.162R
+sits at the 43.5th bootstrap percentile of 3-draw corpus means — the live behavior is
+indistinguishable from expectation in both directions. n=3 validates nothing; it
+fails to contradict.
+
 ## 2026-09-23 21:30Z - VPS-ERA LEDGER INGEST BUILT; PROFILE SAVE STILL DID NOT LAND
 
 - **`scripts/midas_vps_ingest.py`** exists now (14 pinned tests,
