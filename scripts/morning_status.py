@@ -792,7 +792,8 @@ def live_grammar_view(path: str) -> dict:
     "LIVE POSITION: SHORT ... open -1.7h" — negative age, because the row's epoch is
     SERVER-stamped while the age was taken against UTC. The identity now comes from the
     one rule all four readers share (mt5_ops.live_fill_key)."""
-    out: dict = {"open": [], "lclose_ct": 0, "reasons": [], "problems": []}
+    out: dict = {"open": [], "lclose_ct": 0, "reasons": [], "problems": [],
+                 "lclose_ids": set(), "lclose_r": 0.0}
     opens: dict[str, dict] = {}
     try:
         with open(path) as f:
@@ -814,6 +815,11 @@ def live_grammar_view(path: str) -> dict:
                 elif parts[0] == "LCLOSE" and len(parts) >= 6:
                     out["lclose_ct"] += 1
                     out["reasons"].append(parts[3])
+                    out["lclose_ids"].add(parts[2])
+                    try:
+                        out["lclose_r"] += float(parts[5])
+                    except ValueError:
+                        pass   # the count and the id stand; an unreadable R is not fabricated
                     opens.pop(R.live_fill_key(parts), None)
         out["open"] = list(opens.values())
     except OSError as e:
@@ -1354,6 +1360,58 @@ COV_ALARM_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__
 VPS_FILLS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                               "artifacts", "live", "vps_fills.json")
 VPS_FILLS_STALE_H = 26
+VPS_ERA_ARCHIVE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "artifacts", "vps_eras")
+
+
+def _venue_closed_positions(vps_fills_path: str = "",
+                            archive_dir: str = "") -> tuple[list, list]:
+    """The venue-attributed closed positions the paper gate's fold may count
+    (docs/PAPER_GATE_VENUE_FOLD_PREREG_20260923.md — pre-registered before wiring).
+
+    Sources, in recency order: the live artifact's `positions`, its NO-OP-time
+    `era_positions_preserved` (the daily task's out-of-era overwrite — §4's
+    survival contract), and every archived era artifact (`clear-era` moves the
+    marker; its ingested positions stay in the count forever — §4).
+
+    Returns (positions, problems): positions are dicts with `position_id` and `r`
+    (None-honest); problems are strings for anything unreadable (contributed as
+    zero trades, never guessed — §6)."""
+    path = vps_fills_path or VPS_FILLS_PATH
+    arch = archive_dir or VPS_ERA_ARCHIVE
+    by_id: dict[int, dict] = {}
+    problems: list[str] = []
+
+    def absorb(doc: dict, src: str) -> None:
+        for p in doc.get("positions") or []:
+            pid = p.get("position_id")
+            if pid is None:
+                continue
+            try:
+                by_id[int(pid)] = p
+            except (TypeError, ValueError):
+                problems.append(f"{src}: unreadable position id {pid!r}")
+        for p in doc.get("era_positions_preserved") or []:
+            pid = p.get("position_id")
+            if pid is None:
+                continue
+            try:
+                by_id.setdefault(int(pid), p)
+            except (TypeError, ValueError):
+                problems.append(f"{src}: unreadable preserved id {pid!r}")
+
+    try:
+        with open(path, encoding="utf-8") as fh:
+            absorb(json.load(fh), os.path.basename(path))
+    except (OSError, ValueError):
+        pass   # no artifact yet — zero venue trades is the honest count
+    for a in sorted(glob.glob(os.path.join(arch, "*.json"))):
+        try:
+            with open(a, encoding="utf-8") as fh:
+                absorb(json.load(fh), os.path.basename(a))
+        except (OSError, ValueError):
+            problems.append(f"archived era artifact {os.path.basename(a)} unreadable")
+    return list(by_id.values()), problems
 
 
 def print_shadow_record() -> None:
@@ -2151,6 +2209,26 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
             print(vps_line)
         if vps_bad:
             problems.append("vps era: the tally's ingest artifact is failing or stale")
+        # The pre-registered fold (docs/PAPER_GATE_VENUE_FOLD_PREREG_20260923.md):
+        # the gate's count is the LEDGER's closes ∪ the venue-attributed closes,
+        # by position id — the ledger undercounts its own closes (measured
+        # 2026-09-23, amendment 12: one LCLOSE row for three closed positions).
+        # The venue-only trades print so the operator can always see how much of
+        # the count the ledger did not record; the venue's R's carry the same
+        # certified stop denominator, and unknown-R trades count trades but never
+        # fabricate R.
+        venue_pos, venue_problems = _venue_closed_positions()
+        fresh = [p for p in venue_pos
+                 if str(p.get("position_id")) not in lv["lclose_ids"]]
+        if fresh or venue_problems:
+            with_r = [p for p in fresh if p.get("r") is not None]
+            sum_r = sum(p["r"] for p in with_r)
+            tally_n = lv["lclose_ct"] + len(fresh)
+            tally_r = lv["lclose_r"] + sum_r
+            print(f"  tally (folded): {tally_n}/{MIN_TRADES} | venue-added {len(fresh)} "
+                  f"({sum_r:+.2f}R) | ledger-side R {lv['lclose_r']:+.2f} | "
+                  f"combined R {tally_r:+.2f}")
+            problems.extend(venue_problems)
     elif closed:
         total_r = sum(c["r"] for c in closed)
         reasons: dict[str, int] = {}

@@ -284,6 +284,96 @@ class TestMidasSectionIntegration:
         assert "1W/1L" in out and "sumR +0.35" in out
         assert "tally 3/30 includes them" in out
 
+    # --- the pre-registered venue fold (docs/PAPER_GATE_VENUE_FOLD_PREREG_20260923)
+
+    def _write_vps_positions(self, tmp_path, positions, *, preserved=None):
+        import json
+        p = os.path.join(str(tmp_path), "vps_fills.json")   # the conftest-provided path
+        doc = {"verdict": "OK",
+               "ts": "2026-09-23T22:00:00+00:00",
+               "tally": {"closed": len(positions), "wins": 0, "sum_r": 0.0},
+               "positions": positions}
+        if preserved is not None:
+            doc = {"verdict": "NO-OP", "ts": "2026-09-24T21:40:00+00:00",
+                   "problems": ["no era marker"],
+                   "era_positions_preserved": preserved,
+                   "preserved_from": "2026-09-23T22:00:00+00:00"}
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        return p
+
+    def test_fold_counts_venue_closes_outside_the_ledger(self, tmp_path, monkeypatch, capsys):
+        """§1: the count is LCLOSE ∪ venue-attributed closes, by position id. The
+        fixture's ledger close (18874164) is deduped; the two venue-only wins are
+        added — the real 2026-09-23 correction, now the rule (amendment 12)."""
+        self._live_arm_with_lclose(tmp_path, monkeypatch)
+        self._write_vps_positions(tmp_path, [
+            {"position_id": 18874164, "r": 0.1046},    # in the ledger — never double-counted
+            {"position_id": 19003889, "r": 0.1934},    # venue-only
+            {"position_id": 19008799, "r": 0.1883},    # venue-only
+        ])
+        ms.print_midas_section()
+        out = capsys.readouterr().out
+        assert "tally (folded): 3/30" in out
+        assert "venue-added 2 (+0.38R)" in out
+        assert "ledger-side R +0.10" in out
+        assert "combined R +0.49" in out
+
+    def test_fold_survives_the_daily_noop_overwrite(self, tmp_path, monkeypatch, capsys):
+        """§4: out of era the daily task writes a NO-OP whose `positions` are gone
+        but whose `era_positions_preserved` carries them — the fold counts them
+        with NO era marker present, because the count is a property of the record,
+        not of whether a migration is in flight (§3)."""
+        self._live_arm_with_lclose(tmp_path, monkeypatch)
+        self._write_vps_positions(tmp_path, [], preserved=[
+            {"position_id": 19003889, "r": 0.1934},
+            {"position_id": 19008799, "r": 0.1883},
+        ])
+        ms.print_midas_section()
+        out = capsys.readouterr().out
+        assert "tally (folded): 3/30" in out
+        assert "venue-added 2" in out
+
+    def test_fold_reads_archived_eras_after_clear_era(self, tmp_path, monkeypatch, capsys):
+        """§4: clear-era moves the marker to the archive; its ingested positions
+        stay in the count forever, attributed to the era they happened in."""
+        import json
+        self._live_arm_with_lclose(tmp_path, monkeypatch)
+        arch = os.path.join(str(tmp_path), "vps_eras")
+        os.makedirs(arch, exist_ok=True)
+        with open(os.path.join(arch, "midas_vps_hosting_20260925T000000Z.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({"verdict": "OK", "ts": "2026-09-25T00:00:00+00:00",
+                       "positions": [{"position_id": 5550001, "r": -0.5}]}, f)
+        ms.print_midas_section()
+        out = capsys.readouterr().out
+        assert "tally (folded): 2/30" in out
+        assert "venue-added 1 (-0.50R)" in out
+
+    def test_fold_never_double_counts_a_shared_close(self, tmp_path, monkeypatch, capsys):
+        """§5: a position whose close exists in BOTH records counts once, from the
+        ledger row — and with nothing venue-only to add, the fold line is silent."""
+        self._live_arm_with_lclose(tmp_path, monkeypatch)
+        self._write_vps_positions(tmp_path, [{"position_id": 18874164, "r": 0.1046}])
+        ms.print_midas_section()
+        out = capsys.readouterr().out
+        assert "tally (folded)" not in out
+        assert "closed: 1/30 (live LCLOSE rows)" in out
+
+    def test_fold_reports_an_unreadable_archive_as_a_problem(self, tmp_path, monkeypatch, capsys):
+        """§6: an unreadable source contributes zero trades and a PROBLEM — never
+        a guess, never a silent shrink of the count."""
+        self._live_arm_with_lclose(tmp_path, monkeypatch)
+        arch = os.path.join(str(tmp_path), "vps_eras")
+        os.makedirs(arch, exist_ok=True)
+        with open(os.path.join(arch, "midas_vps_hosting_broken.json"), "w",
+                  encoding="utf-8") as f:
+            f.write("{not json")
+        ms.print_midas_section()
+        out = capsys.readouterr().out
+        assert "PROBLEM" in out
+        assert "midas_vps_hosting_broken.json" in out
+
     def test_section_flags_drift_as_unhealthy(self, tmp_path, monkeypatch, capsys):
         self._write_fixture(tmp_path, monkeypatch,
                             _chart_text({"InpMode": "2"}))

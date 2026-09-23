@@ -206,6 +206,22 @@ def test_no_era_marker_is_a_noop_that_writes_its_reason(monkeypatch, tmp_path) -
     assert "no era marker" in art["problems"][0]
 
 
+def test_noop_preserves_a_prior_eras_positions(monkeypatch, tmp_path) -> None:
+    """The paper-gate fold's survival contract (prereg §4): out of era the daily
+    task overwrites vps_fills.json, and a bare NO-OP would ERASE previously-
+    ingested positions the moment the era ends. The NO-OP must carry them."""
+    import json
+    out_path = tmp_path / "vps_fills.json"
+    out_path.write_text(json.dumps({
+        "verdict": "OK", "ts": "2026-09-23T22:00:00+00:00",
+        "positions": [{"position_id": 19003889, "r": 0.1934}]}), encoding="utf-8")
+    rc, art = _run_main(monkeypatch, tmp_path, era=None)
+    assert rc == 0
+    assert art["verdict"] == "NO-OP"
+    assert art["era_positions_preserved"] == [{"position_id": 19003889, "r": 0.1934}]
+    assert art["preserved_from"] == "2026-09-23T22:00:00+00:00"
+
+
 def test_era_with_dark_venue_fails_closed(monkeypatch, tmp_path) -> None:
     def dark():
         raise RuntimeError("mt5.initialize() failed")

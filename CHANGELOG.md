@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-09-24 08:05Z - VENUE FOLD PRE-REGISTERED AND WIRED; CERTIFICATION NIGHT STILL OPEN; 4TH POSITION STILL OPEN
+
+- **The clock governs, again**: at measurement time it was 22:25Z Sep 23 — the
+certification window had been open 25 minutes, so the Sep 23→24 verdict does not exist
+and the migration freeze stands (~7.5 h remained). The pre-flight still refuses (no
+EA-carrier profile after three attempts); Migrate stays forbidden until 08:00Z Sep 24.
+- **`docs/PAPER_GATE_VENUE_FOLD_PREREG_20260923.md`** — frozen BEFORE the wiring: the
+gate's count is `LCLOSE rows ∪ venue-attributed closes`, by position id; the statistic
+runs over the same union; the era marker is not part of the rule; era trades survive
+the daily NO-OP overwrite and `clear-era`; never double-counted; unreadable sources
+contribute zero trades and a PROBLEM. Falsifiers stated (parity divergence beyond
+±0.001R, any double-count, any lost position).
+- **Wired per the prereg**: `morning_status._venue_closed_positions()` reads the live
+artifact, the NO-OP's `era_positions_preserved`, and every archived era artifact —
+one cumulative store. The `[3b]` closed-line gains the folded tally
+(`tally (folded): N/30 | venue-added K (±x.xxR) | ledger-side R | combined R`),
+silent when nothing is venue-only. `live_grammar_view` now carries `lclose_ids`
+and `lclose_r` (the fold's dedupe keys and ledger-side R). The ingest's NO-OP
+preserves the prior era's positions. Conftest isolates the fold's paths (the
+second verse of the 2026-09-23 hermeticity lesson). Tests: 6 fold pins + the
+NO-OP survival pin. Suite: 1718 passed, 10 skipped.
+- **The 4th position is still open** (venue-verified): pos 19048647, SELL 0.02 @
+4280.34, SL 4308.71 / TP 4222.71 server-side, −$21.26 float at 22:25Z. No close deal
+exists; the tally correctly stands at 3/30 (+0.486R). Nothing to update.
+
 ## 2026-09-23 22:40Z - ERA-INGEST DAILY TASK LIVE; AMENDMENT 12; CERTIFICATION NIGHT OPENED GREEN
 
 - **Scheduled task `MIDASTOUCH Era Ingest` registered and verified** (daily 22:40

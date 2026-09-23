@@ -188,6 +188,20 @@ def main() -> int:
         out["problems"].append("no era marker (midas_vps_hosting.json) — not in the "
                                "MT5-VPS era; there is nothing to ingest and this tool "
                                "does not manufacture one")
+        # The daily task overwrites this file out of era, and a bare NO-OP would
+        # ERASE previously-ingested positions the moment the era ends — exactly
+        # what docs/PAPER_GATE_VENUE_FOLD_PREREG_20260923.md §4 forbids ("era
+        # trades survive clear-era"). The venue's deal history regenerates them
+        # on the next era run, but between clear-era and that run the fold would
+        # read a world smaller than the one that happened. Preserve them.
+        try:
+            with open(OUT_PATH, encoding="utf-8") as fh:
+                prev = json.load(fh)
+            if prev.get("positions"):
+                out["era_positions_preserved"] = prev["positions"]
+                out["preserved_from"] = prev.get("ts")
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
         with open(OUT_PATH, "w", encoding="utf-8") as fh:
             json.dump(out, fh, indent=2)
         print(out["problems"][0])

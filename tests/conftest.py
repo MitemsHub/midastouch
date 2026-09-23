@@ -78,3 +78,12 @@ def _isolated_cov_alarm(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ms, "COV_ALARM_PATH",
                         os.path.join(str(tmp_path), "heartbeat_gap_alarm.json"))
+    # Same lesson, second verse (2026-09-23): the paper gate's venue-fold reads
+    # artifacts/live/vps_fills.json and the era archive — machine state a real
+    # era on this host would leak into every clean-section assertion. Absent
+    # paths default the fold to "zero venue trades", which is the world the
+    # fixtures describe; a test that needs an era writes its own artifact.
+    monkeypatch.setattr(ms, "VPS_FILLS_PATH",
+                        os.path.join(str(tmp_path), "vps_fills.json"))
+    monkeypatch.setattr(ms, "VPS_ERA_ARCHIVE",
+                        os.path.join(str(tmp_path), "vps_eras"))
