@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-09-23 21:30Z - VPS-ERA LEDGER INGEST BUILT; PROFILE SAVE STILL DID NOT LAND
+
+- **`scripts/midas_vps_ingest.py`** exists now (14 pinned tests,
+`tests/test_midas_vps_ingest.py`): era-gated (NO-OP without the operator marker,
+FAIL-closed with it when the venue is dark), attribution through the engine's own
+`mt5_ops.attribute_deal` rule, positions paired from venue deal history, diffed
+against the ledger's known fills, tally (closed/wins/sum_R) into
+`artifacts/live/vps_fills.json`. Identity resolves from the arming record's `magic`
+(era-marker override); both silent refuses to run rather than attribute with magic 0.
+- **The short sign flip**, caught while deriving the tests, before the tool touched
+live data: dividing R by `entry − SL` divides by a NEGATIVE on shorts and reads every
+winning short as a loser. The denominator is the absolute stop distance now; the R
+sign matrix (short win/loss, long win/loss) is the test suite's first pins.
+- **Runbook §0d updated from "to build" to built**, with the one remaining wiring
+stated: the `morning_status [3b]` era line is not yet automatic; until it lands the
+operator reads `vps_fills.json` directly.
+- **Measured blocker unchanged**: no saved profile on any of the three MT5 installs
+carries the EA (newest .chr predates the save attempt). The paper-rehearsal preflight
+refuses, correctly. The menu path that works is File → Profiles → **Save As...**
+(there is no plain "Save"); the preset `MidastouchAI_VPS_gold.set` is staged in the
+arm terminal's Presets folder for the dialog.
+
 ## 2026-09-23 22:00Z - THE HOST EVENTS ARE ON THE ARMING RECORD; THE LAPTOP ENTERS ITS CERTIFICATION NIGHT
 
 - **Amendment 11 (artifacts/live/armed.json)** records the day's host events: the

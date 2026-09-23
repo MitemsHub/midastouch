@@ -107,6 +107,44 @@ blind execution era. The arm's home — the thing the five gates certify — is 
 host (§1–§8). Until one is provisioned, the laptop (hibernation disabled, S4U
 supervisor, one measured night pending) remains the trading host of record.
 
+## 0d. VPS-era ledger ingestion — keeping the tally alive while the EA is blind-hosted
+
+The built-in VPS writes the EA's ledger to MetaQuotes' own disk; no tool on this side
+can ever read it. But **the account's deal history is a transport both sides see**:
+the local terminal is signed into the same account, so every VPS-era fill and close
+arrives in the local history sync — which is exactly the machinery that already
+adopted the three manually-closed positions (magic attribution + position-id pairing,
+`midas_watchdog`'s live_fills reconciliation).
+
+Built 2026-09-23 (14 pinned tests, `tests/test_midas_vps_ingest.py`), read-only:
+
+1. `scripts/midas_vps_ingest.py` — runs only when the era marker is present (a no-op
+   with a message otherwise). Reads the account's deal history from the local terminal
+   (the same MT5-python bridge the reconciliation uses), attributes deals through the
+   engine's own rule (`mt5_ops.attribute_deal` — magic, or by-position for the magic-0
+   platform closes), pairs each position's IN/OUT deals, diffs against the local
+   ledger's known fills, and emits the delta — closed positions with entry, exit,
+   volume and R from the deal pair — into `artifacts/live/vps_fills.json`.
+   Fail-closed twice: era active + unreadable terminal is a FAIL (the VPS EA must not
+   trade without eyes), and identity resolves from the ARMING RECORD's `magic` (an
+   era-marker `magic` overrides for a rehearsal arm) — both silent refuses to run,
+   because attribution with magic 0 would adopt strangers' IN deals.
+2. REMAINING WIRING (not built): `morning_status [3b]` gains one line in the era:
+   `N VPS-era fill(s) by position attribution; tally X/30 includes them`. Until that
+   lands, the tally consumer is the operator reading `vps_fills.json` — the artifact
+   is first-class, the morning line is not yet automatic.
+3. What stays blind, stated honestly: the **census** (refusal reasons per bar) and
+   trigger telemetry are EA-side and unrecoverable — the pace tool's trigger counts
+   pause for the era; only the execution record survives. The blind-EA problem
+   shrinks from "the arm vanishes" to "the engine's why-not diagnostics pause".
+4. On `clear-era`, the ingested record stays as a first-class artifact: those trades
+   count in the tally forever, attributed to the era they happened in.
+
+The R each ingested position carries is the strategy's own definition: direction
+× (exit − entry) / **|entry − SL|** — the absolute stop distance, because dividing by
+`entry − SL` on a short divides by a negative and flips every short's sign (caught by
+deriving the tests, before the tool touched live data; pinned as the first test).
+
 ## 1. Provision the VPS
 
 * Windows Server 2019+ (the MT5 GUI and the watchdog's stop-and-relaunch need a desktop
