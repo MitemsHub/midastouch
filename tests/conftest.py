@@ -59,3 +59,22 @@ _prepend(os.path.join(_PARENT, "scripts"))
 def repo_root():
     """Absolute path to the repository root (same for every test module)."""
     return _PARENT
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cov_alarm(tmp_path, monkeypatch):
+    """Point the [3b] coverage-alarm read at an absent per-test path.
+
+    The alarm record (artifacts/live/heartbeat_gap_alarm.json) is MACHINE state:
+    a real unacknowledged gap on this host failed five [3b] section tests that
+    own no alarm of their own (measured 2026-09-23, the hibernation gap — the
+    section printed the live PROBLEM inside fixtures asserting a clean world).
+    morning_status.print_midas_section reads the path through ms.COV_ALARM_PATH
+    precisely so this fixture can repoint it. A test that needs an alarm writes
+    one at the path its own fixture owns (test_morning_status_preset
+    ._write_alarm) — this removes only the leak, never the behavior.
+    """
+    import morning_status as ms
+
+    monkeypatch.setattr(ms, "COV_ALARM_PATH",
+                        os.path.join(str(tmp_path), "heartbeat_gap_alarm.json"))

@@ -1334,6 +1334,15 @@ def print_midas_section() -> bool:
 SHADOW_ART = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "artifacts", "sweep_shadow_forward.json")
 
+#: The coverage alarm record lives in artifacts/live and is MACHINE STATE — a real
+#: unacknowledged gap on this host used to leak into every [3b] fixture test that
+#: asserts a clean section (measured 2026-09-23: the hibernation gap broke five tests
+#: that own no alarm of their own). The path is a module constant like SHADOW_ART so
+#: tests can point it at an absent file and stay hermetic; production reads the real
+#: record, whose acknowledgement is a human act (live_coverage.ack_alarm).
+COV_ALARM_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "artifacts", "live", "heartbeat_gap_alarm.json")
+
 
 def print_shadow_record() -> None:
     """[3b.1] The sweep-shadow forward record, as an artifact quote. Display-only.
@@ -2104,7 +2113,7 @@ def _print_midas_arm(td: str, txt: str, multi: bool = False,
     # 03:00", from the recorded pass timeline, and it stays until a human acknowledges it.
     try:
         from live_coverage import alarm_line, prereg
-        cov_line = alarm_line()
+        cov_line = alarm_line(alarm_path=COV_ALARM_PATH)
         if cov_line and "PROBLEM" in cov_line:
             print(paint(f"  coverage: {cov_line}", "r"))
             problems.append(f"heartbeat gap: {cov_line}")

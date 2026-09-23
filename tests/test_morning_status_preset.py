@@ -129,6 +129,29 @@ class TestMidasSectionIntegration:
         with open(os.path.join(fd, "MIDASTOUCH_paper_XAUUSD_M1.csv"), "w") as f:
             f.write("ERA,MIDAS1.10,1757894400,pertick-fills\nEQ,50.00\n")
         monkeypatch.setattr(ms, "TERM_ROOT", term_root)
+        # The coverage-alarm record is machine state; default the fixture to an absent
+        # alarm so a real gap on this host can never leak into these tests (measured
+        # 2026-09-23: the hibernation gap broke every clean-section assertion here).
+        alarm_path = os.path.join(str(tmp_path), "heartbeat_gap_alarm.json")
+        monkeypatch.setattr(ms, "COV_ALARM_PATH", alarm_path)
+        return alarm_path
+
+    @staticmethod
+    def _write_alarm(path: str, *, acked: bool) -> None:
+        """A coverage alarm record in live_coverage's own shape, current (raised now)."""
+        import json
+        from datetime import datetime, timezone
+        rec = {
+            "episode": "supervision-gap:fixture", "kind": "supervision-gap",
+            "raised_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "gap_min": 90.0, "from_utc": "2026-09-23T15:28:42Z",
+            "to_utc": "2026-09-23T18:35:00Z", "threshold_min": 40, "cadence_min": 20,
+            "detail": "fixture: no supervision pass for 90 min",
+        }
+        if acked:
+            rec["acked_utc"] = rec["raised_utc"]
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(rec, f)
 
     def test_section_reports_preset_ok(self, tmp_path, monkeypatch, capsys):
         self._write_fixture(tmp_path, monkeypatch, _chart_text())
@@ -144,6 +167,29 @@ class TestMidasSectionIntegration:
         out = capsys.readouterr().out
         assert "preset DRIFT: InpMode=2 (repo pin 0)" in out
         assert healthy is True
+
+    def test_unacked_alarm_is_a_problem_in_the_section(self, tmp_path, monkeypatch, capsys):
+        """A current, unacknowledged coverage alarm reads as PROBLEM and marks the
+        section unhealthy — pinned with a fixture, not with the host's real record
+        (which is exactly what the 2026-09-23 hibernation gap proved necessary)."""
+        alarm_path = self._write_fixture(tmp_path, monkeypatch, _chart_text())
+        self._write_alarm(alarm_path, acked=False)
+        healthy = ms.print_midas_section()
+        out = capsys.readouterr().out
+        assert "coverage: PROBLEM: supervision-gap" in out
+        assert healthy is True, "a PROBLEM line makes the section unhealthy"
+
+    def test_acked_alarm_is_recorded_not_current(self, tmp_path, monkeypatch, capsys):
+        """An acknowledged alarm keeps its history visible (the night happened and
+        stays answerable) but no longer reads as a current PROBLEM."""
+        alarm_path = self._write_fixture(tmp_path, monkeypatch, _chart_text())
+        self._write_alarm(alarm_path, acked=True)
+        healthy = ms.print_midas_section()
+        out = capsys.readouterr().out
+        assert "coverage: past: supervision-gap" in out
+        assert "acknowledged" in out
+        assert "PROBLEM" not in out
+        assert healthy is False
 
 
 class TestShadowRecordSection:

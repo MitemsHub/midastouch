@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-09-23 20:15Z - THE HOST HIBERNATED UNDER THE LIVE ARM; HIBERNATION DISABLED, S4U SUPERVISOR CONFIRMED, VPS RUNBOOK WRITTEN
+
+- **Measured failure**: 2026-09-23 15:28→18:35Z (186.3 min) no supervision pass ran AND the EA's
+ledger itself stopped beating (worst observed age 46.5 min) — Kernel-Power event 42 at 16:51:58Z,
+"Sleep Reason: Hibernate from Sleep — Standby Battery Budget Exceeded". The laptop entered Modern
+Standby and then hibernated with a live position open. A host that is in hibernation runs nothing:
+not the EA, not either supervisor task. This is the laptop's second measured overnight gap
+(407.4 min on 2026-09-22; see docs/UNATTENDED_OPERATION_20260922.md §1a).
+- **`powercfg /hibernate off`** applied (elevated, operator-approved, reversible with
+`/hibernate on`). Measured after: `powercfg -a` lists Hibernate under NOT available —
+"Hibernation has not been enabled". The sleep-into-hibernation path that produced the gap no
+longer exists on this host. Both supervisor tasks verified running (`MIDASTOUCH Arm Supervisor`
+S4U + boot trigger + 20-min repetition, wake-to-run on; legacy `MitemshubPaperSupervisor` kept as
+the interactive fallback; LastTaskResult 0 / 0 missed runs on both). The S0-idle leg remains
+UNVERIFIED by design — one measured night of `live_coverage.py` PASS is the certifier, not a
+setting.
+- **`docs/VPS_MIGRATION_RUNBOOK_20260923.md`** added: the host-move procedure keyed to the five
+readiness gates (unattended task PASS, host-power PASS, one measured night PASS, live_readiness
+READY, parity holds), with the account-exclusivity rule (exactly one terminal on the account —
+two is double execution), the data-folder copy that carries the ledger/census/tally, the cutover
+order (pause local watchdog → stop local terminal → start VPS terminal → verify the init banner
+reads `census restored`), and a rollback path. Moving hosts arms nothing: the arming record is
+the record.
+
 ## 2026-09-23 11:15Z - THE SPREAD CAP WAS TIGHTER THAN THE CERTIFIED STRATEGY; FIXED AND DEPLOYED (amendment 10)
 
 - **Measured before anything changed**: the certified engine of record's own entry costs on the
