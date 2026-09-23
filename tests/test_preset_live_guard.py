@@ -45,7 +45,11 @@ PRESET_DIRS = (ROOT / "mql5" / "MIDASTOUCH",)
 #: The inert presets, named so that renaming one is a deliberate act. The paper mirror
 #: must stay inert FOREVER: its ledger is the arms-length forward record, and a real
 #: order behind it would silently convert the record into something else.
-PAPER = ("MidastouchAI_M1_gold.set", "MidastouchAI_upcomers_gold.set")
+PAPER = ("MidastouchAI_M1_gold.set", "MidastouchAI_upcomers_gold.set",
+         "MidastouchAI_VPS_gold.set")  # 2026-09-23: MT5-VPS rehearsal carrier — the
+# upcomers paper preset with only InpArmTag=VPS changed, so a MetaTrader-VPS migration
+# can be rehearsed (scripts/midas_vps_migration.py) without a live EA on the cloud side;
+# inert like every PAPER entry, and its own tag keeps its rows out of the live ledger.
 
 #: The one preset that may carry `InpLiveExecution=true`. It exists because the
 #: operator authorised real orders on 2026-09-21 (see `ARTIFACTS/live/armed.json`), and

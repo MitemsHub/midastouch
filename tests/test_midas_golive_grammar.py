@@ -423,7 +423,10 @@ CERTIFIED_STRATEGY = {
 #: (an arming-record amendment for a live arm, or a protocol pin for a control).
 # The keys are the arm names this file enumerates (the preset stem minus the
 # `MidastouchAI_` prefix and the `_gold.set` suffix), NOT the repo file names.
-ARM_MODE = {"M1": "0", "upcomers": "1", "upcomers_gold_LIVE": "1"}
+ARM_MODE = {"M1": "0", "upcomers": "1", "upcomers_gold_LIVE": "1",
+            "VPS": "1"}  # 2026-09-23: the MT5-VPS rehearsal carrier runs the upcomers
+# strategy and its mode — it is the paper preset with only the arm tag changed, so it
+# inherits mode 1; an unregistered arm must not ship, which is why it is registered here.
 
 
 @pytest.mark.parametrize("arm", _presets_on_disk())

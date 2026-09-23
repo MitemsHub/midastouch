@@ -22,6 +22,53 @@ both send orders — that is double execution, not redundancy.
 | arming record present | `python -c "import json;print(json.load(open('artifacts/live/armed.json'))['tag'])"` | `U25` |
 | local terminal STOPPED before the VPS terminal starts | see step 4 | — |
 
+## 0b. The MetaTrader built-in VPS path (the one already rented)
+
+The operator subscribed to MetaQuotes' managed VPS on 2026-09-23 (subscription 6911490,
+VPS Germany 01) and clicked Migrate the same day — and the VPS received **nothing**:
+`6911490: 0 charts of 1 prepared to synchronize / nothing to synchronize, no any EA`.
+Measured cause: the arm's EA chart exists only as a startup-INI attachment inside the
+running process; no saved profile carries it (forced exits never save a profile), and
+MT5 migrates the **saved profile's** charts only — the journal's `0 charts of 1` was
+the Default profile's single bare chart, and a startup-INI chart is invisible to the
+migration even while its EA is live (`charts without Expert Advisors are ignored`,
+metatrader5.com). The VPS idled at `0 charts, 0 EAs` all day while the laptop traded
+and, during the hibernation gap, while nothing covered it.
+
+`scripts/midas_vps_migration.py` now gates and verifies this path (17 pinned tests):
+
+```bash
+python scripts/midas_vps_migration.py preflight --plan paper-rehearsal   # prove the environment, stay live locally
+python scripts/midas_vps_migration.py preflight --plan full-cutover      # the real handover
+# operator clicks Migrate in the VPS tab — only after a preflight PASS
+python scripts/midas_vps_migration.py verify-after --plan <plan>         # reads the journal, fails closed
+python scripts/midas_vps_migration.py mark-era --why "full cutover <date>"  # watchdog/morning-report era marker
+python scripts/midas_vps_migration.py clear-era                          # when the surface comes home
+```
+
+* **paper-rehearsal** migrates a second chart running the dedicated rehearsal pin
+  (`MidastouchAI_VPS_gold.set` — the paper preset with only `InpArmTag=VPS` changed),
+  proving the carrier-chart fix end-to-end while the laptop EA stays the only live
+  trader and the rehearsal cannot touch the book (paper execution, own tag, own ledger).
+  Operator steps: drag the EA onto a new XAUUSD,H1 chart, load the VPS preset, then
+  **File → Profiles → Save** (the migration reads saved profiles, not open windows).
+* **full-cutover** migrates the LIVE EA chart itself. MT5 then disables local algo
+  trading automatically — its own double-execution guard — and `verify-after` FAILS if
+  that guard line did not appear (a missing guard means a live EA may exist on BOTH
+  sides). The local LV ledger going stale is EXPECTED in this era (the 2026-09-18
+  precedent); the local supervisor keeps supervising what it can see and stands down
+  restart remediation (midas_watchdog.vps_hosting_active). Operator steps: close the
+  bare charts, **File → Profiles → Save** so the profile carries the live EA chart,
+  move `midas_attach.ini` aside in the same session, preflight, Migrate (All),
+  verify-after, mark-era.
+* The startup-INI conflict is a preflight blocker on full-cutover: once a profile
+  carries the live EA, `midas_attach.ini` would boot a SECOND live EA next to it on
+  every local restart — move the ini aside in the same session as the migration.
+* What this VPS type can never do: run the python evidence layer. The census, parity,
+  coverage and watchdog stay on the laptop (or a future Windows VPS) reading whatever
+  ledgers remain visible to them; the EA on the MetaTrader VPS trades unmonitored by
+  anything but MT5 itself. That trade-off is the operator's to accept knowingly.
+
 ## 1. Provision the VPS
 
 * Windows Server 2019+ (the MT5 GUI and the watchdog's stop-and-relaunch need a desktop
